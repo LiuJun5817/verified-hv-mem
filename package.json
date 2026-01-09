@@ -1,0 +1,30 @@
+{
+  "name": "verified-hv-mem",
+  "version": "1.0.0",
+  "description": "A modular, architecture-independent memory management library for Rust hypervisors, designed for reuse and formal verification with Verus.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "cz": "git-cz"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LiuJun5817/verified-hv-mem.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/LiuJun5817/verified-hv-mem/issues"
+  },
+  "homepage": "https://github.com/LiuJun5817/verified-hv-mem#readme",
+  "devDependencies": {
+    "commitizen": "^4.3.1",
+    "cz-conventional-changelog": "^3.3.0"
+  },
+  "config": {
+    "commitizen": {
+      "path": "./node_modules/cz-conventional-changelog"
+    }
+  }
+}
