@@ -1,8 +1,9 @@
+//! Page table trait with formal specification.
 use vstd::prelude::*;
 
 use crate::address::addr::{PAddr, PAddrExec, VAddr, VAddrExec};
-use crate::page_table::pt_arch::{PTArch, PTArchExec};
-use crate::address::frame::{Frame, MemAttr, FrameExec};
+use crate::address::frame::{Frame, FrameExec, MemAttr};
+use crate::page_table::pt_arch::{SpecPTArch, PTArch};
 
 verus! {
 
@@ -10,16 +11,16 @@ verus! {
 pub type PagingResult<T = ()> = Result<T, ()>;
 
 /// Page table config constants.
-pub struct PTConstants {
+pub struct SpecPTConstants {
     /// Page table architecture.
-    pub arch: PTArch,
+    pub arch: SpecPTArch,
     /// Physical memory lower bound.
     pub pmem_lb: PAddr,
     /// Physical memory upper bound.
     pub pmem_ub: PAddr,
 }
 
-impl PTConstants {
+impl SpecPTConstants {
     /// Check if valid.
     pub open spec fn valid(self) -> bool {
         &&& self.arch.valid()
@@ -28,32 +29,32 @@ impl PTConstants {
 }
 
 /// Page table config constants (exec mode).
-pub struct PTConstantsExec {
+pub struct PTConstants {
     /// Page table architecture.
-    pub arch: PTArchExec,
+    pub arch: PTArch,
     /// Physical memory lower bound.
     pub pmem_lb: PAddrExec,
     /// Physical memory upper bound.
     pub pmem_ub: PAddrExec,
 }
 
-impl PTConstantsExec {
+impl PTConstants {
     /// View as `PTConstants`
-    pub open spec fn view(self) -> PTConstants {
-        PTConstants { arch: self.arch@, pmem_lb: self.pmem_lb@, pmem_ub: self.pmem_ub@ }
+    pub open spec fn view(self) -> SpecPTConstants {
+        SpecPTConstants { arch: self.arch@, pmem_lb: self.pmem_lb@, pmem_ub: self.pmem_ub@ }
     }
 }
 
-/// Abstract page table.
-pub struct SpecPageTable {
+/// Abstract page table state.
+pub struct PageTableState {
     /// Mappings from virtual address to physical frames.
     pub mappings: Map<VAddr, Frame>,
     /// Page table constants.
-    pub constants: PTConstants,
+    pub constants: SpecPTConstants,
 }
 
 /// State transition specification.
-impl SpecPageTable {
+impl PageTableState {
     /// Init state.
     pub open spec fn init(self) -> bool {
         &&& self.mappings === Map::empty()
@@ -139,11 +140,7 @@ impl SpecPageTable {
     }
 
     /// Query the physical frame mapped to a virtual address.
-    pub open spec fn query(
-        self,
-        vaddr: VAddr,
-        res: PagingResult<(VAddr, Frame)>,
-    ) -> bool {
+    pub open spec fn query(self, vaddr: VAddr, res: PagingResult<(VAddr, Frame)>) -> bool {
         // Precondition
         &&& self.query_pre(vaddr)
         // Check result
@@ -159,9 +156,9 @@ impl SpecPageTable {
 }
 
 /// Helper functions.
-impl SpecPageTable {
+impl PageTableState {
     /// Construct a page table state.
-    pub open spec fn new(mappings: Map<VAddr, Frame>, constants: PTConstants) -> Self {
+    pub open spec fn new(mappings: Map<VAddr, Frame>, constants: SpecPTConstants) -> Self {
         Self { mappings, constants }
     }
 
@@ -220,13 +217,13 @@ impl SpecPageTable {
 /// Concrete implementation must implement `PageTable` trait to satisfy the specification.
 pub trait PageTable where Self: Sized {
     /// View as a `VAddr` to `Frame` mapping.
-    spec fn view(self) -> SpecPageTable;
+    spec fn view(self) -> PageTableState;
 
     /// Invariants that must be implied at initial state and preseved after each operation.
     spec fn invariants(self) -> bool;
 
     /// Create an empty page table.
-    fn new(constants: PTConstantsExec) -> (pt: Self)
+    fn new(constants: PTConstants) -> (pt: Self)
         requires
             constants@.valid(),
         ensures
@@ -242,13 +239,7 @@ pub trait PageTable where Self: Sized {
             old(self)@.map_pre(vbase@, frame@),
         ensures
             self.invariants(),
-            SpecPageTable::map(
-                old(self)@,
-                self@,
-                vbase@,
-                frame@,
-                res,
-            ),
+            PageTableState::map(old(self)@, self@, vbase@, frame@, res),
     ;
 
     /// Unmap a virtual address.
@@ -258,12 +249,7 @@ pub trait PageTable where Self: Sized {
             old(self)@.unmap_pre(vbase@),
         ensures
             self.invariants(),
-            SpecPageTable::unmap(
-                old(self)@,
-                self@,
-                vbase@,
-                res,
-            ),
+            PageTableState::unmap(old(self)@, self@, vbase@, res),
     ;
 
     /// Query the physical frame mapped to a virtual address.
@@ -278,7 +264,7 @@ pub trait PageTable where Self: Sized {
                 match res {
                     Ok((vaddr_exec, frame_exec)) => Ok((vaddr_exec@, frame_exec@)),
                     Err(()) => Err(()),
-                }
+                },
             ),
     ;
 }

@@ -19,7 +19,7 @@ verus! {
 pub spec const PTE_SIZE: nat = 8;
 
 /// Represents a single level in a hierarchical page table structure.
-pub struct PTArchLevel {
+pub struct SpecPTArchLevel {
     /// The number of entries at this level.
     pub entry_count: nat,
     /// Frame size indicated by a block/page descriptor at this level.
@@ -28,9 +28,9 @@ pub struct PTArchLevel {
 
 /// Complete description of a page table architecture, consisting of multiple
 /// hierarchical levels from root (lowest level) to leaf (highest level).
-pub struct PTArch(pub Seq<PTArchLevel>);
+pub struct SpecPTArch(pub Seq<SpecPTArchLevel>);
 
-impl PTArch {
+impl SpecPTArch {
     /// The number of hierarchical levels in the page table.
     pub open spec fn level_count(self) -> nat {
         self.0.len()
@@ -201,17 +201,18 @@ impl PTArch {
 }
 
 /// **EXEC MODE** Represents a single level in a hierarchical page table structure.
-pub struct PTArchLevelExec {
+#[derive(Clone)]
+pub struct PTArchLevel {
     /// The number of entries at this level.
     pub entry_count: usize,
     /// Frame size indicated by a block/page descriptor at this level.
     pub frame_size: FrameSize,
 }
 
-impl PTArchLevelExec {
+impl PTArchLevel {
     /// View as `PTArchLevel`.
-    pub open spec fn view(self) -> PTArchLevel {
-        PTArchLevel { entry_count: self.entry_count as nat, frame_size: self.frame_size }
+    pub open spec fn view(self) -> SpecPTArchLevel {
+        SpecPTArchLevel { entry_count: self.entry_count as nat, frame_size: self.frame_size }
     }
 }
 
@@ -219,12 +220,14 @@ impl PTArchLevelExec {
 /// multiple hierarchical levels from root (lowest level) to leaf (highest level).
 ///
 /// Provides utilities to compute the page table entry index and the virtual address.
-pub struct PTArchExec(pub Vec<PTArchLevelExec>);
+/// TODO: fix `Clone` which is not supported by Verus yet.
+#[derive(Clone)]
+pub struct PTArch(pub Vec<PTArchLevel>);
 
-impl PTArchExec {
+impl PTArch {
     /// View as `PTArch`.
-    pub open spec fn view(self) -> PTArch {
-        PTArch(Seq::new(self.0.len() as nat, |i| self.0[i].view()))
+    pub open spec fn view(self) -> SpecPTArch {
+        SpecPTArch(Seq::new(self.0.len() as nat, |i| self.0[i].view()))
     }
 
     /// The number of hierarchical levels in the page table.

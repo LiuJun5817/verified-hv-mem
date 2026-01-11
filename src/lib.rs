@@ -6,7 +6,8 @@ pub mod page_table;
 // pub mod frame_allocator;
 
 verus! {
-    global layout usize is size == 8;
-}
 
+global layout usize is size == 8;
+
+} // verus!
 fn main() {}

@@ -1,10 +1,10 @@
-use vstd::prelude::*;
+use super::{ExecPTE, GhostPTE};
 use crate::address::{
     addr::{PAddr, PAddrExec},
-    frame::{FrameSize, MemAttr}
+    frame::{FrameSize, MemAttr},
 };
-use super::{GhostPTE, ExecPTE};
 use crate::page_table::pt_arch::{PTArchExec, PTArchLevelExec};
+use vstd::prelude::*;
 
 verus! {
 
@@ -120,7 +120,6 @@ impl GhostPTE for Aarch64GhostPTE {
 }
 
 } // verus!
-
 bitflags::bitflags! {
     /// Memory attribute fields in the VMSAv8-64 translation table format descriptors.
     #[derive(Clone, Copy, Debug)]
