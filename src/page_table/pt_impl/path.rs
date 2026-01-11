@@ -256,7 +256,12 @@ impl PTTreePath {
     }
 
     /// Lemma. from_vaddr(vaddr, arch, start, end).step().1 == from_vaddr(vaddr, arch, start + 1, end)
-    pub broadcast proof fn lemma_from_vaddr_step(vaddr: VAddr, arch: SpecPTArch, start: nat, end: nat)
+    pub broadcast proof fn lemma_from_vaddr_step(
+        vaddr: VAddr,
+        arch: SpecPTArch,
+        start: nat,
+        end: nat,
+    )
         requires
             start < end < arch.level_count(),
             arch.valid(),
@@ -469,7 +474,11 @@ impl PTTreePath {
     }
 
     /// Lemma. If `a` and `b` are not a prefix of each other, then `a.vaddr() != b.vaddr()`.
-    pub broadcast proof fn lemma_nonprefix_implies_vaddr_inequality(arch: SpecPTArch, a: Self, b: Self)
+    pub broadcast proof fn lemma_nonprefix_implies_vaddr_inequality(
+        arch: SpecPTArch,
+        a: Self,
+        b: Self,
+    )
         requires
             arch.valid(),
             #[trigger] a.valid(arch, 0),
@@ -571,7 +580,11 @@ impl PTTreePath {
     }
 
     /// Lemma. Converting a vaddr into a path and then back exactly inverts the operation.
-    pub broadcast proof fn lemma_to_vaddr_inverts_from_vaddr(arch: SpecPTArch, vaddr: VAddr, path: Self)
+    pub broadcast proof fn lemma_to_vaddr_inverts_from_vaddr(
+        arch: SpecPTArch,
+        vaddr: VAddr,
+        path: Self,
+    )
         requires
             arch.valid(),
             path.valid(arch, 0),

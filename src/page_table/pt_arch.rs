@@ -201,7 +201,6 @@ impl SpecPTArch {
 }
 
 /// **EXEC MODE** Represents a single level in a hierarchical page table structure.
-#[derive(Clone)]
 pub struct PTArchLevel {
     /// The number of entries at this level.
     pub entry_count: usize,
@@ -216,13 +215,32 @@ impl PTArchLevel {
     }
 }
 
+impl Clone for PTArchLevel {
+    fn clone(&self) -> Self {
+        PTArchLevel {
+            entry_count: self.entry_count,
+            frame_size: self.frame_size,
+        }
+    }
+}
+
 /// **EXEC MODE** Complete description of a page table architecture, consisting of
 /// multiple hierarchical levels from root (lowest level) to leaf (highest level).
 ///
 /// Provides utilities to compute the page table entry index and the virtual address.
-/// TODO: fix `Clone` which is not supported by Verus yet.
-#[derive(Clone)]
 pub struct PTArch(pub Vec<PTArchLevel>);
+
+impl Clone for PTArch {
+    fn clone(&self) -> (res: Self) 
+        ensures
+            self@ == res@,
+    {
+        let res = PTArch(self.0.clone());
+        // Assume equivalence of the clone.
+        assume(self@ == res@);
+        res
+    }
+}
 
 impl PTArch {
     /// View as `PTArch`.

@@ -133,7 +133,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
                 target_level as nat,
                 new_pte@,
             ),
-            res is Err ==> old(self) == self,
+            res is Err ==> old(self)@ == self@,
         decreases old(self).arch().level_count() - level as nat,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
@@ -174,6 +174,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
                 // Allocate intermediate table
                 let (table_base, _) = self.pt_mem.alloc_table(level + 1);
                 proof {
+                    // TODO: prove alignment
                     assume(table_base@.aligned(FrameSize::Size4K.as_nat()));
                 }
                 // Write entry
@@ -195,7 +196,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
             old(self).pt_mem@.table(base@).level == level,
         ensures
             (self@, res) == old(self)@.remove(vbase@, base@, level as nat),
-            res is Err ==> old(self) == self,
+            res is Err ==> old(self)@ == self@,
         decreases old(self).arch().level_count() - level as nat,
     {
         let idx = self.constants.arch.pte_index(vbase, level);

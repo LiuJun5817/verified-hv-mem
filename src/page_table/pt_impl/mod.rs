@@ -38,13 +38,7 @@ impl<M, G, E> PageTable for ExPageTable<M, G, E> where M: PageTableMem, G: Ghost
     fn new(constants: PTConstants) -> (pt: Self) {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
-        let arch = constants.arch.clone();
-        proof {
-            // Verus does not (yet) support autoderive Clone impl when the clone is not a copy;
-            // continuing, but without adding a specification for the derived Clone impl
-            assume(arch@ == constants.arch@);
-        }
-        let pt_mem = M::new(arch);
+        let pt_mem = M::new(constants.arch.clone());
         proof {
             pt_mem.view().lemma_init_implies_invariants();
         }

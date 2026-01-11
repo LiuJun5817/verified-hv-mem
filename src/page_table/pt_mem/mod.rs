@@ -8,7 +8,7 @@ use crate::address::{
     addr::{PAddr, PAddrExec, VAddr, VAddrExec},
     frame::FrameSize,
 };
-use crate::page_table::pt_arch::{SpecPTArch, PTArch};
+use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 
 verus! {
 
@@ -139,6 +139,8 @@ impl SpecPageTableMem {
     /// Specification of `alloc_table`.
     pub open spec fn alloc_table_spec(s1: Self, s2: Self, level: nat, table: Table) -> bool {
         &&& s1.alloc_table_pre(level)
+        &&& (s2, table) == s1.alloc_table(level)
+        // `arch` is unchanged
         &&& s2.arch == s1.arch
         // `self` doesn't have the table
         &&& !s1.contains_table(table.base)
@@ -181,7 +183,7 @@ impl SpecPageTableMem {
             ({
                 let (s2, table) = #[trigger] self.alloc_table(level);
                 Self::alloc_table_spec(self, s2, level, table)
-            })
+            }),
     {
         admit();
     }
@@ -201,6 +203,8 @@ impl SpecPageTableMem {
     /// Specification of `dealloc_table`.
     pub open spec fn dealloc_table_spec(s1: Self, s2: Self, base: PAddr) -> bool {
         &&& s1.dealloc_table_pre(base)
+        &&& s2 == s1.dealloc_table(base)
+        // `arch` is unchanged
         &&& s2.arch == s1.arch
         // Root is preserved
         &&& s2.tables[0] == s1.tables[0]
@@ -250,6 +254,8 @@ impl SpecPageTableMem {
     /// Specification of `write`.
     pub open spec fn write_spec(s1: Self, s2: Self, base: PAddr, index: nat, entry: u64) -> bool {
         &&& s1.write_pre(base, index)
+        &&& s2 == s1.write(base, index, entry)
+        // `arch` is unchanged
         &&& s2.arch == s1.arch
         // Tables are the same
         &&& s2.tables == s1.tables
