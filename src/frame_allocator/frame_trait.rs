@@ -1,5 +1,5 @@
 use vstd::prelude::*;
-use crate::memory::address::addr::{PAddr, PAddrExec};
+use crate::address::addr::{PAddr, PAddrExec};
 
 verus! {
 
@@ -38,7 +38,6 @@ pub trait FrameAllocator {
     /// The empty value.
     fn empty() -> Self where Self: Sized;
 
-    // TODO:初始化为管理 [base, base+size) 这一段连续物理内存（按页管理）
     fn init(&mut self, base: PAddrExec, size: usize)
         requires
             old(self).wf(),
