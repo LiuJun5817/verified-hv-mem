@@ -80,7 +80,6 @@ macro_rules! set_bits16 {
 }
 
 verus! {
-global layout usize is size == 8;
 
 pub trait BitAllocView {
     /// Specification function to view the internal u16 as a sequence of booleans.
