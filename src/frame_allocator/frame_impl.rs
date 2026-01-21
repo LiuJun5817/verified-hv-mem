@@ -1,9 +1,8 @@
 use vstd::prelude::*;
-use crate::memory::{
+use crate::{
     address::addr::{PAddr, PAddrExec},
     bitmap_allocator::{
-        bitmap_impl::BitAlloc1M,
-        bitmap_trait::{BitAllocView, BitAlloc},
+        bitmap_impl::{BitAllocView, BitAlloc, BitAlloc1M},
     },
 };
 use super::frame_trait::FrameAllocator;
@@ -99,13 +98,11 @@ impl FrameAllocator for FrameAllocator1M {
         Self { base: PAddrExec(0), inner: BitAlloc1M::default() }
     }
 
-    // fn init(&mut self, base: PAddrExec, size: usize) {
-        // self.base = PAddrExec(align_up(base.0));
-        // // self.base = base;
-        // // let page_count = align_up(size) / FrameSize::Size4K.as_usize();
-        // let page_count = (size / Self::page_size());
-        // self.inner.insert(0..page_count);
-    // }
+    fn init(&mut self, base: PAddrExec, size: usize) {
+        self.base = base;
+        let page_count = (size / Self::page_size());
+        self.inner.insert(0..page_count);
+    }
 
     unsafe fn alloc(&mut self) -> (res: Option<PAddrExec>) {
         let ret = self.inner.alloc().map(|idx| PAddrExec(idx * Self::page_size() + self.base.0));
