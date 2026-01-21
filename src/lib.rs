@@ -3,6 +3,7 @@ use vstd::prelude::*;
 pub mod address;
 // pub mod bitmap_allocator;
 pub mod page_table;
+pub mod memory_set;
 // pub mod frame_allocator;
 
 verus! {

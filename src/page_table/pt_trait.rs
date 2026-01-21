@@ -79,8 +79,6 @@ impl PageTableState {
         &&& frame.base.0 >= self.constants.pmem_lb.0
         &&& frame.base.0 + frame.size.as_nat()
             <= self.constants.pmem_ub.0
-        // Frame should not overlap with existing pmem
-        &&& !self.overlaps_pmem(frame)
     }
 
     /// State transition - map a virtual address to a physical frame.

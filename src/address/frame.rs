@@ -1,5 +1,5 @@
+use super::addr::{PAddr, PAddrExec, VAddr, VAddrExec};
 use vstd::prelude::*;
-use super::addr::{PAddr, PAddrExec};
 
 verus! {
 
@@ -55,7 +55,6 @@ impl FrameSize {
         }
     }
 }
-
 
 /// Frame attributes. Defination consistent with `hvisor::memory::MemFlags`.
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -140,6 +139,127 @@ impl FrameExec {
     /// Convert to Frame.
     pub open spec fn view(self) -> Frame {
         Frame { base: self.base@, size: self.size, attr: self.attr }
+    }
+}
+
+/// Page size in bytes (4KB).
+pub const PAGE_SIZE: usize = 0x1000;
+
+/// A memory region represents a contiguous range of virtual addresses with specific properties.
+pub struct MemoryRegion {
+    /// The starting virtual address of the region.
+    pub start: VAddrExec,
+    /// The number of 4KB pages in the region.
+    pub pages: usize,
+    /// The memory attributes of the region.
+    pub attr: MemAttr,
+    /// The mapping strategy for the region.
+    pub mapper: Mapper,
+}
+
+impl MemoryRegion {
+    /// Spec-mode validation check.
+    pub open spec fn spec_valid(self) -> bool {
+        &&& 0 < self.pages <= usize::MAX / PAGE_SIZE
+        &&& self.start@.aligned(PAGE_SIZE as nat)
+        &&& self.start@.0 <= usize::MAX as nat - (self.pages as nat * PAGE_SIZE as nat)
+        &&& self.mapper.valid(
+            self.start@.0 + (self.pages as nat * PAGE_SIZE as nat),
+        )
+    }
+
+    /// Check if the region is within valid virtual address space.
+    pub fn valid(&self) -> (res: bool)
+        ensures
+            res == self.spec_valid(),
+    {
+        if self.pages == 0 || self.pages > usize::MAX / PAGE_SIZE {
+            return false;
+        }
+        if !self.start.aligned(PAGE_SIZE) {
+            return false;
+        }
+        if self.start.0 > usize::MAX - self.pages * PAGE_SIZE {
+            return false;
+        }
+        match self.mapper {
+            Mapper::Offset(off) => {
+                let max_vaddr = self.start.0 + self.pages * PAGE_SIZE;
+                off <= usize::MAX - max_vaddr
+            }
+            Mapper::Fixed(_) => true,
+        }
+    }
+
+    /// Calculate the end virtual address of the region.
+    pub fn end(&self) -> (res: VAddrExec)
+        requires
+            self.spec_valid(),
+        ensures
+            res@ == self.start@.offset(self.pages as nat * PAGE_SIZE as nat),
+    {
+        VAddrExec(self.start.0 + self.pages * PAGE_SIZE)
+    }
+
+    /// Spec-mode overlap check.
+    pub open spec fn spec_overlaps(self, other: MemoryRegion) -> bool {
+        VAddr::overlap(
+            self.start@,
+            self.pages as nat * PAGE_SIZE as nat,
+            other.start@,
+            other.pages as nat * PAGE_SIZE as nat,
+        )
+    }
+
+    /// If two regions overlap.
+    pub fn overlaps(&self, other: &MemoryRegion) -> (res: bool)
+        requires
+            self.spec_valid(),
+            other.spec_valid(),
+        ensures
+            res == self.spec_overlaps(*other),
+    {
+        if self.start.0 <= other.start.0 {
+            self.start.0 + self.pages * PAGE_SIZE > other.start.0
+        } else {
+            other.start.0 + other.pages * PAGE_SIZE > self.start.0
+        }
+    }
+
+    /// Lemma: overlaps is symmetric.
+    pub proof fn lemma_overlaps_symmetric(self, other: MemoryRegion)
+        requires
+            self.spec_valid(),
+            other.spec_valid(),
+        ensures
+            self.spec_overlaps(other) == other.spec_overlaps(self),
+    {
+    }
+}
+
+/// The mapping strategy for a memory region.
+#[derive(Clone, Copy, Debug)]
+pub enum Mapper {
+    Offset(usize),
+    Fixed(usize),
+}
+
+impl Mapper {
+    pub open spec fn valid(self, max_vaddr: nat) -> bool {
+        match self {
+            Self::Offset(off) => off as nat <= usize::MAX as nat - max_vaddr,
+            Self::Fixed(paddr) => true,
+        }
+    }
+
+    pub fn map(&self, vaddr: VAddrExec) -> PAddrExec
+        requires
+            self.valid(vaddr.0 as nat),
+    {
+        match self {
+            Self::Offset(off) => PAddrExec(vaddr.0 + *off),
+            Self::Fixed(paddr) => PAddrExec(*paddr),
+        }
     }
 }
 
