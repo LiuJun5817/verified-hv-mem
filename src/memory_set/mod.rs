@@ -1,14 +1,15 @@
 //! A memory set is a collection of memory areas that can be mapped into the virtual address
 //! space of a zone (process). It manages the page table for the zone, and provides methods to
 //! insert, remove, and find memory areas.
-use vstd::{invariant, prelude::*};
 
+use vstd::{invariant, prelude::*};
+use std::marker::PhantomData;
 use crate::{
     address::{
         addr::VAddrExec,
         frame::{FrameExec, FrameSize, MemoryRegion, PAGE_SIZE},
     },
-    page_table::PageTable,
+    page_table::{PageTable, PageTableMem},
 };
 
 verus! {
@@ -58,14 +59,16 @@ pub trait MemorySet {
 }
 
 /// Memory set implementation using a vector of memory regions.
-pub struct VecMemorySet<PT> where PT: PageTable {
+pub struct VecMemorySet<M, PT> where PT: PageTable<M>, M: PageTableMem {
     /// The list of memory regions in the memory set.
     pub regions: Vec<MemoryRegion>,
     /// Page table managing the mappings.
     pub pt: PT,
+    /// Phantom data for the page table memory type.
+    pub phantom: PhantomData<M>,
 }
 
-impl<PT> VecMemorySet<PT> where PT: PageTable {
+impl<M, PT> VecMemorySet<M, PT> where PT: PageTable<M>, M: PageTableMem {
     /// If a region is mapped in the page table.
     pub open spec fn has_mapping_for(self, region: MemoryRegion) -> bool {
         forall|page_idx: nat|
@@ -123,7 +126,7 @@ impl<PT> VecMemorySet<PT> where PT: PageTable {
     }
 }
 
-impl<PT> MemorySet for VecMemorySet<PT> where PT: PageTable {
+impl<M, PT> MemorySet for VecMemorySet<M, PT> where PT: PageTable<M>, M: PageTableMem {
     open spec fn view(self) -> Seq<MemoryRegion> {
         Seq::new(self.regions.len() as nat, |i| self.regions[i])
     }

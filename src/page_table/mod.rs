@@ -5,3 +5,4 @@ mod pt_trait;
 mod pte;
 
 pub use pt_trait::PageTable;
+pub use pt_mem::PageTableMem;

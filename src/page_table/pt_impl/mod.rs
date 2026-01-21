@@ -26,22 +26,23 @@ pub struct ExPageTable<M, G, E>(pub pt::PageTable<M, G, E>) where
     E: ExecPTE<G>,
 ;
 
-impl<M, G, E> PageTable for ExPageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<G> {
+impl<M, G, E> PageTable<M> for ExPageTable<M, G, E> where
+    M: PageTableMem,
+    G: GhostPTE,
+    E: ExecPTE<G>,
+ {
     open spec fn view(self) -> PageTableState {
         self.0.view().view().view()
     }
 
     open spec fn invariants(self) -> bool {
-        self.0.view().invariants()
+        self.0.invariants()
     }
 
-    fn new(constants: PTConstants) -> (pt: Self) {
+    fn new(pt_mem: M, constants: PTConstants) -> (pt: Self) {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
-        let pt_mem = M::new(constants.arch.clone());
-        proof {
-            pt_mem.view().lemma_init_implies_invariants();
-        }
+        proof { pt_mem.view().lemma_init_implies_wf(); }
         let pt = pt::PageTable::<M, G, E>::new(pt_mem, constants);
         proof {
             pt.view().pt_mem.lemma_contains_root();
@@ -64,7 +65,7 @@ impl<M, G, E> PageTable for ExPageTable<M, G, E> where M: PageTableMem, G: Ghost
 
     fn map(&mut self, vbase: VAddrExec, frame: FrameExec) -> (res: Result<(), ()>) {
         proof {
-            self.0.view().lemma_view_implies_invariants();
+            self.0.view().lemma_wf_implies_node_wf();
             self.0.view().pt_mem.lemma_contains_root();
             self.0.view().construct_node_facts(self.0.view().pt_mem.root(), 0);
             self.0.view().view().map_refinement(vbase@, frame@);
@@ -74,7 +75,7 @@ impl<M, G, E> PageTable for ExPageTable<M, G, E> where M: PageTableMem, G: Ghost
 
     fn unmap(&mut self, vbase: VAddrExec) -> (res: Result<(), ()>) {
         proof {
-            self.0.view().lemma_view_implies_invariants();
+            self.0.view().lemma_wf_implies_node_wf();
             self.0.view().pt_mem.lemma_contains_root();
             self.0.view().construct_node_facts(self.0.view().pt_mem.root(), 0);
             self.0.view().view().unmap_refinement(vbase@);
@@ -84,7 +85,7 @@ impl<M, G, E> PageTable for ExPageTable<M, G, E> where M: PageTableMem, G: Ghost
 
     fn query(&self, vaddr: VAddrExec) -> (res: Result<(VAddrExec, FrameExec), ()>) {
         proof {
-            self.0.view().lemma_view_implies_invariants();
+            self.0.view().lemma_wf_implies_node_wf();
             self.0.view().pt_mem.lemma_contains_root();
             self.0.view().construct_node_facts(self.0.view().pt_mem.root(), 0);
             self.0.view().view().query_refinement(vaddr@);

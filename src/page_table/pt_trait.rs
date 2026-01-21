@@ -4,6 +4,7 @@ use vstd::prelude::*;
 use crate::address::addr::{PAddr, PAddrExec, VAddr, VAddrExec};
 use crate::address::frame::{Frame, FrameExec, MemAttr};
 use crate::page_table::pt_arch::{SpecPTArch, PTArch};
+use super::pt_mem::PageTableMem;
 
 verus! {
 
@@ -213,17 +214,20 @@ impl PageTableState {
 /// Specification of a Page Table viewed by higher-level components.
 ///
 /// Concrete implementation must implement `PageTable` trait to satisfy the specification.
-pub trait PageTable where Self: Sized {
+pub trait PageTable<M> where Self: Sized, M: PageTableMem {
     /// View as a `VAddr` to `Frame` mapping.
     spec fn view(self) -> PageTableState;
 
     /// Invariants that must be implied at initial state and preseved after each operation.
     spec fn invariants(self) -> bool;
 
-    /// Create an empty page table.
-    fn new(constants: PTConstants) -> (pt: Self)
+    /// Create an empty page table
+    fn new(pt_mem: M, constants: PTConstants) -> (pt: Self)
         requires
+            pt_mem.invariants(),
+            pt_mem@.init(),
             constants@.valid(),
+            pt_mem@.arch == constants@.arch,
         ensures
             pt@.constants == constants@,
             pt@.init(),

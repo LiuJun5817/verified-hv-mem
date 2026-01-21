@@ -23,9 +23,9 @@ broadcast use crate::page_table::pt_mem::group_pt_mem_lemmas;
 
 /// Executable page table implementation.
 ///
-/// `PageTable` wraps a `PageTableMemExec` and a `PTConstantsExec` to provide a convenient interface for
+/// `PageTable` wraps a `PageTableMem` and a `PTConstants` to provide a convenient interface for
 /// manipulating the page table. Refinement proof is provided by implementing trait `PageTableInterface`
-/// to ensure `PageTableMemExec` is manipulated correctly.
+/// to ensure `PageTableMem` is manipulated correctly.
 pub struct PageTable<M: PageTableMem, G: GhostPTE, E: ExecPTE<G>> {
     /// Page table memory.
     pub pt_mem: M,
@@ -46,13 +46,19 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
         self.constants.arch@
     }
 
+    /// Invariants that must implied at initial state and preseved after each operation.
+    pub open spec fn invariants(self) -> bool {
+        &&& self.pt_mem.invariants()
+        &&& self.view().wf()
+    }
+
     /// Construct a new page table.
     pub fn new(pt_mem: M, constants: PTConstants) -> (res: Self)
         requires
-            SpecPageTable::<G>::new(pt_mem@, constants@).invariants(),
-            pt_mem@.arch == constants.arch@,
+            SpecPageTable::<G>::new(pt_mem@, constants@).wf(),
+            pt_mem.invariants(),
         ensures
-            res@.invariants(),
+            res.invariants(),
             res.pt_mem == pt_mem,
             res.constants == constants,
     {
@@ -62,7 +68,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     /// If all pte in a table are invalid.
     pub fn is_table_empty(&self, base: PAddrExec, level: usize) -> (res: bool)
         requires
-            self@.invariants(),
+            self.invariants(),
             self@.pt_mem.contains_table(base@),
             self@.pt_mem.table(base@).level == level,
         ensures
@@ -71,7 +77,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
         let entry_count = self.constants.arch.entry_count(level);
         for i in 0..entry_count
             invariant
-                self@.invariants(),
+                self.invariants(),
                 self.constants.arch@.entry_count(level as nat) == entry_count,
                 self@.pt_mem.contains_table(base@),
                 self@.pt_mem.table(base@).level == level,
@@ -90,7 +96,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     /// entry and level. Proven consistent with the specification-level walk.
     pub fn walk(&self, vaddr: VAddrExec, base: PAddrExec, level: usize) -> (res: (E, usize))
         requires
-            self@.invariants(),
+            self.invariants(),
             self.pt_mem@.contains_table(base@),
             self.pt_mem@.table(base@).level == level,
         ensures
@@ -120,7 +126,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
         new_pte: E,
     ) -> (res: PagingResult)
         requires
-            old(self)@.invariants(),
+            old(self).invariants(),
             level <= target_level < old(self).arch().level_count(),
             old(self).pt_mem@.contains_table(base@),
             old(self).pt_mem@.table(base@).level == level,
@@ -133,6 +139,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
                 target_level as nat,
                 new_pte@,
             ),
+            self.invariants(),
             res is Err ==> old(self)@ == self@,
         decreases old(self).arch().level_count() - level as nat,
     {
@@ -157,7 +164,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
                 }
             } else {
                 proof {
-                    self@.lemma_alloc_intermediate_table_preserves_invariants(
+                    self@.lemma_alloc_intermediate_table_preserves_wf(
                         base@,
                         level as nat,
                         idx as nat,
@@ -190,12 +197,13 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     /// Recursively remove a page table entry.
     pub fn remove(&mut self, vbase: VAddrExec, base: PAddrExec, level: usize) -> (res: PagingResult)
         requires
-            old(self)@.invariants(),
+            old(self).invariants(),
             level < old(self).arch().level_count(),
             old(self).pt_mem@.contains_table(base@),
             old(self).pt_mem@.table(base@).level == level,
         ensures
             (self@, res) == old(self)@.remove(vbase@, base@, level as nat),
+            self.invariants(),
             res is Err ==> old(self)@ == self@,
         decreases old(self).arch().level_count() - level as nat,
     {
@@ -232,14 +240,17 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     /// Recursively deallocate empty tables along `vaddr` from `base`.
     pub fn prune(&mut self, vaddr: VAddrExec, base: PAddrExec, level: usize)
         requires
-            old(self)@.invariants(),
+            old(self).invariants(),
             level < old(self).arch().level_count(),
             old(self).pt_mem@.contains_table(base@),
             old(self).pt_mem@.table(base@).level == level,
         ensures
             self@ == old(self)@.prune(vaddr@, base@, level as nat),
+            self.invariants(),
         decreases old(self).arch().level_count() - level as nat,
     {
+        proof { self.view().lemma_prune_preserves_wf(vaddr@, base@, level as nat) }
+
         let idx = self.constants.arch.pte_index(vaddr, level);
         assert(self.pt_mem@.accessible(base@, idx as nat));
         let pte = E::from_u64(self.pt_mem.read(base, idx));
@@ -247,7 +258,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
             // Prune from subtable
             proof {
                 // Invariants satisfied after recycling from subtable
-                self.view().lemma_prune_preserves_invariants(vaddr@, pte@.addr(), level as nat + 1);
+                self.view().lemma_prune_preserves_wf(vaddr@, pte@.addr(), level as nat + 1);
                 // Current table and subtable are accessible after recycling from subtable
                 self.view().lemma_prune_preserves_lower_tables(
                     vaddr@,
@@ -278,7 +289,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     /// Resolve a virtual address to its mapped physical frame.
     pub fn query(&self, vaddr: VAddrExec) -> (res: PagingResult<(VAddrExec, FrameExec)>)
         requires
-            self@.invariants(),
+            self.invariants(),
         ensures
             self@@.query(vaddr@) == match res {
                 PagingResult::Ok((vaddr, frame)) => PagingResult::Ok((vaddr@, frame@)),
@@ -292,7 +303,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
 
             // spec `get_pte` == node `visit`
             self.pt_mem@.lemma_contains_root();
-            self@.lemma_construct_node_implies_invariants(root, 0);
+            self@.lemma_construct_node_implies_node_wf(root, 0);
             let node = self@.construct_node(root, 0);
             self@.lemma_walk_consistent_with_model(vaddr@, root, 0);
             node.lemma_visit_length_bounds(
@@ -338,14 +349,14 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     /// Insert a mapping from a virtual base address to a physical frame.
     pub fn map(&mut self, vbase: VAddrExec, frame: FrameExec) -> (res: PagingResult)
         requires
-            old(self)@.invariants(),
+            old(self).invariants(),
             old(self)@.constants.arch.is_valid_frame_size(frame.size),
             vbase@.aligned(frame.size.as_nat()),
             frame.base@.aligned(frame.size.as_nat()),
             frame.base.0 >= old(self).constants.pmem_lb.0,
             frame.base.0 + frame.size.as_nat() <= old(self).constants.pmem_ub.0,
         ensures
-            self@.invariants(),
+            self.invariants(),
             ({
                 let (s2, r) = old(self)@@.map(vbase@, frame@);
                 r is Ok == res is Ok && s2 == self@@
@@ -364,13 +375,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
             let root = self.pt_mem@.root();
             self.view().construct_node_facts(root, 0);
             // Ensures #1
-            self.view().lemma_insert_preserves_invariants(
-                vbase@,
-                root,
-                0,
-                target_level as nat,
-                new_pte@,
-            );
+            self.view().lemma_insert_preserves_wf(vbase@, root, 0, target_level as nat, new_pte@);
             // Ensures #2
             self.view().lemma_insert_consistent_with_model(
                 vbase@,
@@ -388,9 +393,9 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     /// Remove the mapping for a given virtual base address.
     pub fn unmap(&mut self, vbase: VAddrExec) -> (res: PagingResult)
         requires
-            old(self)@.invariants(),
+            old(self).invariants(),
         ensures
-            self@.invariants(),
+            self.invariants(),
             ({
                 let (s2, r) = old(self)@@.unmap(vbase@);
                 r is Ok == res is Ok && s2 == self@@
@@ -400,7 +405,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
         proof {
             self@.construct_node_facts(root, 0);
             // Ensures #1
-            self@.lemma_remove_preserves_invariants(vbase@, root, 0);
+            self@.lemma_remove_preserves_wf(vbase@, root, 0);
             // Ensures #2
             self@.lemma_remove_consistent_with_model(vbase@, root, 0);
             self@.lemma_remove_preserves_root(vbase@, root, 0);
@@ -409,7 +414,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
         proof {
             self@.construct_node_facts(root, 0);
             // Ensures #1
-            self@.lemma_prune_preserves_invariants(vbase@, root, 0);
+            self@.lemma_prune_preserves_wf(vbase@, root, 0);
             // Ensures #2
             self@.lemma_prune_consistent_with_model(vbase@, root, 0);
             self@.lemma_prune_preserves_root(vbase@, root, 0);

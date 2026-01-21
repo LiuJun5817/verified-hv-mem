@@ -13,7 +13,7 @@ use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 verus! {
 
 /// Describe a page table stored in physical memory.
-pub struct Table {
+pub struct SpecTable {
     /// Base address of the table.
     pub base: PAddr,
     /// Size of the table.
@@ -28,7 +28,7 @@ pub struct Table {
 /// Page table memory is modified by page table functions.
 pub struct SpecPageTableMem {
     /// All tables in the hierarchical page table, the first table is the root.
-    pub tables: Seq<Table>,
+    pub tables: Seq<SpecTable>,
     /// Page table architecture.
     pub arch: SpecPTArch,
 }
@@ -41,15 +41,15 @@ impl SpecPageTableMem {
 
     /// If the table with the given base address exists.
     pub open spec fn contains_table(self, base: PAddr) -> bool {
-        exists|table: Table| #[trigger] self.tables.contains(table) && table.base == base
+        exists|table: SpecTable| #[trigger] self.tables.contains(table) && table.base == base
     }
 
     /// Get the table with the given base address.
-    pub open spec fn table(self, base: PAddr) -> Table
+    pub open spec fn table(self, base: PAddr) -> SpecTable
         recommends
             self.contains_table(base),
     {
-        choose|table: Table| #[trigger] self.tables.contains(table) && table.base == base
+        choose|table: SpecTable| #[trigger] self.tables.contains(table) && table.base == base
     }
 
     /// View a table as a sequence of entries.
@@ -62,7 +62,7 @@ impl SpecPageTableMem {
     #[verifier::external_body]
     pub broadcast proof fn table_view_facts(self, base: PAddr)
         requires
-            self.invariants(),
+            self.wf(),
         ensures
             #[trigger] self.table_view(base).len() == self.arch.entry_count(self.table(base).level),
     {
@@ -89,8 +89,8 @@ impl SpecPageTableMem {
         self.table_view(base)[index as int]
     }
 
-    /// Invariants.
-    pub open spec fn invariants(self) -> bool {
+    /// Well-formedness.
+    pub open spec fn wf(self) -> bool {
         &&& self.arch.valid()
         // Root table is always present.
         &&& self.tables.len() > 0
@@ -126,7 +126,7 @@ impl SpecPageTableMem {
     }
 
     /// Allocate a new table.
-    pub uninterp spec fn alloc_table(self, level: nat) -> (Self, Table)
+    pub uninterp spec fn alloc_table(self, level: nat) -> (Self, SpecTable)
         recommends
             self.alloc_table_pre(level),
     ;
@@ -137,7 +137,7 @@ impl SpecPageTableMem {
     }
 
     /// Specification of `alloc_table`.
-    pub open spec fn alloc_table_spec(s1: Self, s2: Self, level: nat, table: Table) -> bool {
+    pub open spec fn alloc_table_spec(s1: Self, s2: Self, level: nat, table: SpecTable) -> bool {
         &&& s1.alloc_table_pre(level)
         &&& (s2, table) == s1.alloc_table(level)
         // `arch` is unchanged
@@ -285,7 +285,7 @@ impl SpecPageTableMem {
     /// Lemma. Different tables have different base addresses.
     pub broadcast proof fn lemma_table_base_unique(self)
         requires
-            #[trigger] self.invariants(),
+            #[trigger] self.wf(),
         ensures
             forall|i, j|
                 #![auto]
@@ -310,7 +310,7 @@ impl SpecPageTableMem {
     /// Lemma. Always contains a root table.
     pub broadcast proof fn lemma_contains_root(self)
         requires
-            #[trigger] self.invariants(),
+            #[trigger] self.wf(),
         ensures
             self.contains_table(self.root()),
             self.table(self.root()) == self.tables[0],
@@ -319,29 +319,29 @@ impl SpecPageTableMem {
         self.lemma_table_base_unique();
     }
 
-    /// Lemma. `init` implies invariants.
-    pub broadcast proof fn lemma_init_implies_invariants(self)
+    /// Lemma. `init` implies well-formedness.
+    pub broadcast proof fn lemma_init_implies_wf(self)
         requires
             #[trigger] self.init(),
         ensures
-            self.invariants(),
+            self.wf(),
     {
     }
 
-    /// Lemma. `alloc_table` preserves invariants.
-    pub broadcast proof fn lemma_alloc_table_preserves_invariants(
+    /// Lemma. `alloc_table` preserves wf.
+    pub broadcast proof fn lemma_alloc_table_preserves_wf(
         s1: Self,
         s2: Self,
         level: nat,
-        table: Table,
+        table: SpecTable,
     )
         requires
-            s1.invariants(),
+            s1.wf(),
             #[trigger] Self::alloc_table_spec(s1, s2, level, table),
         ensures
-            s2.invariants(),
+            s2.wf(),
     {
-        assert forall|table2: Table| #[trigger] s2.tables.contains(table2) implies table2.level
+        assert forall|table2: SpecTable| #[trigger] s2.tables.contains(table2) implies table2.level
             < s2.arch.level_count() by {
             if table2 != table {
                 assert(s2.tables.contains(table2));
@@ -354,12 +354,12 @@ impl SpecPageTableMem {
         s1: Self,
         s2: Self,
         level: nat,
-        table: Table,
+        table: SpecTable,
         base: PAddr,
         index: nat,
     )
         requires
-            s1.invariants(),
+            s1.wf(),
             #[trigger] Self::alloc_table_spec(s1, s2, level, table),
             #[trigger] s1.accessible(base, index),
         ensures
@@ -367,7 +367,7 @@ impl SpecPageTableMem {
     {
         // s2 contains table with base address `base`
         assert(s1.contains_table(base));
-        assert forall|table2: Table| s1.tables.contains(table2) implies s2.tables.contains(
+        assert forall|table2: SpecTable| s1.tables.contains(table2) implies s2.tables.contains(
             table2,
         ) by {
             let idx = choose|i| 0 <= i < s1.tables.len() && s1.tables[i] == table2;
@@ -376,7 +376,7 @@ impl SpecPageTableMem {
         assert(s2.contains_table(base));
 
         // The table with base address `base` is the same as the table in `s1`
-        Self::lemma_alloc_table_preserves_invariants(s1, s2, level, table);
+        Self::lemma_alloc_table_preserves_wf(s1, s2, level, table);
         s2.lemma_table_base_unique();
         assert(s1.table(base) == s2.table(base));
     }
@@ -386,10 +386,10 @@ impl SpecPageTableMem {
         s1: Self,
         s2: Self,
         level: nat,
-        table: Table,
+        table: SpecTable,
     )
         requires
-            s1.invariants(),
+            s1.wf(),
             #[trigger] Self::alloc_table_spec(s1, s2, level, table),
         ensures
             s2.contains_table(table.base),
@@ -404,10 +404,10 @@ impl SpecPageTableMem {
         s1: Self,
         s2: Self,
         level: nat,
-        table: Table,
+        table: SpecTable,
     )
         requires
-            s1.invariants(),
+            s1.wf(),
             #[trigger] Self::alloc_table_spec(s1, s2, level, table),
         ensures
             forall|base: PAddr|
@@ -415,16 +415,21 @@ impl SpecPageTableMem {
     {
         assert forall|base: PAddr|
             s2.contains_table(base) && base != table.base implies s1.contains_table(base) by {
-            let table = choose|table: Table| #[trigger]
+            let table = choose|table: SpecTable| #[trigger]
                 s2.tables.contains(table) && table.base == base;
             assert(s1.tables.contains(table));
         }
     }
 
     /// Lemma. `self.tables` after `alloc_table` is a superset of before.
-    pub broadcast proof fn lemma_allocated_is_superset(s1: Self, s2: Self, level: nat, table: Table)
+    pub broadcast proof fn lemma_allocated_is_superset(
+        s1: Self,
+        s2: Self,
+        level: nat,
+        table: SpecTable,
+    )
         requires
-            s1.invariants(),
+            s1.wf(),
             #[trigger] Self::alloc_table_spec(s1, s2, level, table),
         ensures
             forall|base: PAddr| s1.contains_table(base) ==> s2.contains_table(base),
@@ -435,13 +440,13 @@ impl SpecPageTableMem {
         }
     }
 
-    /// Lemma. `dealloc_table` preserves invariants.
-    pub broadcast proof fn lemma_dealloc_table_preserves_invariants(s1: Self, s2: Self, base: PAddr)
+    /// Lemma. `dealloc_table` preserves wf.
+    pub broadcast proof fn lemma_dealloc_table_preserves_wf(s1: Self, s2: Self, base: PAddr)
         requires
-            s1.invariants(),
+            s1.wf(),
             #[trigger] Self::dealloc_table_spec(s1, s2, base),
         ensures
-            s2.invariants(),
+            s2.wf(),
     {
         s1.lemma_contains_root();
         assert forall|i| 0 <= i < s2.tables.len() implies #[trigger] s2.tables[i].level
@@ -464,8 +469,8 @@ impl SpecPageTableMem {
         }
     }
 
-    /// Lemma. `write` preserves invariants.
-    pub broadcast proof fn lemma_write_preserves_invariants(
+    /// Lemma. `write` preserves wf.
+    pub broadcast proof fn lemma_write_preserves_wf(
         s1: Self,
         s2: Self,
         base: PAddr,
@@ -473,10 +478,10 @@ impl SpecPageTableMem {
         entry: u64,
     )
         requires
-            s1.invariants(),
+            s1.wf(),
             #[trigger] Self::write_spec(s1, s2, base, index, entry),
         ensures
-            s2.invariants(),
+            s2.wf(),
     {
     }
 }
@@ -489,14 +494,14 @@ pub broadcast group group_pt_mem_lemmas {
     SpecPageTableMem::write_facts,
     SpecPageTableMem::lemma_table_base_unique,
     SpecPageTableMem::lemma_contains_root,
-    SpecPageTableMem::lemma_init_implies_invariants,
-    SpecPageTableMem::lemma_alloc_table_preserves_invariants,
+    SpecPageTableMem::lemma_init_implies_wf,
+    SpecPageTableMem::lemma_alloc_table_preserves_wf,
     SpecPageTableMem::lemma_allocated_contains_new_table,
     SpecPageTableMem::lemma_allocated_contains_old_tables,
     SpecPageTableMem::lemma_allocated_is_superset,
     SpecPageTableMem::lemma_alloc_table_preserves_accessibility,
-    SpecPageTableMem::lemma_dealloc_table_preserves_invariants,
-    SpecPageTableMem::lemma_write_preserves_invariants,
+    SpecPageTableMem::lemma_dealloc_table_preserves_wf,
+    SpecPageTableMem::lemma_write_preserves_wf,
 }
 
 /// Specifiaction that executable page table memory should satisfy.
@@ -509,6 +514,9 @@ pub trait PageTableMem: Sized {
         // However, this may lead to unsafety since Verus cannot reason about the page table memory structure.
         SpecPageTableMem { arch: SpecPTArch(Seq::empty()), tables: Seq::empty() }
     }
+
+    /// Invariants that must be implied at initial state and preseved after each operation.
+    spec fn invariants(self) -> bool;
 
     /// Physical address of the root page table.
     fn root(&self) -> (res: PAddrExec)
@@ -526,44 +534,35 @@ pub trait PageTableMem: Sized {
             res == self@.is_table_empty(base@),
     ;
 
-    /// Construct a new page table memory and initialize the root table.
-    fn new(arch: PTArch) -> (res: Self)
-        requires
-            arch@.valid(),
-        ensures
-            res@.arch == arch@,
-            res@.init(),
-    ;
-
     /// Allocate a new table and returns the table base address and size.
     fn alloc_table(&mut self, level: usize) -> (res: (PAddrExec, FrameSize))
         requires
-            old(self)@.invariants(),
+            old(self).invariants(),
             old(self)@.alloc_table_pre(level as nat),
         ensures
-            self@.invariants(),
+            self.invariants(),
             SpecPageTableMem::alloc_table_spec(
                 old(self)@,
                 self@,
                 level as nat,
-                Table { base: res.0@, size: res.1, level: level as nat },
+                SpecTable { base: res.0@, size: res.1, level: level as nat },
             ),
     ;
 
     /// Deallocate a table.
     fn dealloc_table(&mut self, base: PAddrExec)
         requires
-            old(self)@.invariants(),
+            old(self).invariants(),
             old(self)@.dealloc_table_pre(base@),
         ensures
-            self@.invariants(),
+            self.invariants(),
             SpecPageTableMem::dealloc_table_spec(old(self)@, self@, base@),
     ;
 
     /// Get the value at the given index in the given table.
     fn read(&self, base: PAddrExec, index: usize) -> (res: u64)
         requires
-            self@.invariants(),
+            self.invariants(),
             self@.accessible(base@, index as nat),
         ensures
             self@.read(base@, index as nat) == res,
@@ -572,11 +571,19 @@ pub trait PageTableMem: Sized {
     /// Write the value to the given index in the given table.
     fn write(&mut self, base: PAddrExec, index: usize, value: u64)
         requires
-            old(self)@.invariants(),
+            old(self).invariants(),
             old(self)@.write_pre(base@, index as nat),
         ensures
-            self@.invariants(),
+            self.invariants(),
             SpecPageTableMem::write_spec(old(self)@, self@, base@, index as nat, value),
+    ;
+
+    /// Lemma. Invariants implies well-formedness.
+    broadcast proof fn lemma_invariants_implies_wf(self)
+        requires
+            #[trigger] self.invariants(),
+        ensures
+            self@.wf(),
     ;
 }
 
