@@ -4,9 +4,9 @@ use vstd::prelude::*;
 verus! {
 
 /// Representing virtual address.
-pub struct VAddr(pub nat);
+pub struct SpecVAddr(pub nat);
 
-impl VAddr {
+impl SpecVAddr {
     /// If addr is aligned to `size` bytes.
     pub open spec fn aligned(self, size: nat) -> bool {
         self.0 % size == 0
@@ -23,8 +23,8 @@ impl VAddr {
     }
 
     /// Offset `self` by `offset` bytes.
-    pub open spec fn offset(self, offset: nat) -> VAddr {
-        VAddr(self.0 + offset)
+    pub open spec fn offset(self, offset: nat) -> SpecVAddr {
+        SpecVAddr(self.0 + offset)
     }
 
     /// Convert to word index.
@@ -34,18 +34,18 @@ impl VAddr {
 
     /// If virtual page base `vbase` maps to physical page base `pbase`, calculate the
     /// physical address that `self` maps to.
-    pub open spec fn map(self, vbase: Self, pbase: PAddr) -> PAddr
+    pub open spec fn map(self, vbase: Self, pbase: SpecPAddr) -> SpecPAddr
         recommends
             self.0 >= vbase.0,
     {
-        PAddr((self.0 - vbase.0) as nat + pbase.0)
+        SpecPAddr((self.0 - vbase.0) as nat + pbase.0)
     }
 }
 
 /// Representing physical address.
-pub struct PAddr(pub nat);
+pub struct SpecPAddr(pub nat);
 
-impl PAddr {
+impl SpecPAddr {
     /// If addr is aligned to `size` bytes.
     pub open spec fn aligned(self, size: nat) -> bool {
         self.0 % size == 0
@@ -62,8 +62,8 @@ impl PAddr {
     }
 
     /// Offset `self` by `offset` bytes.
-    pub open spec fn offset(self, offset: nat) -> PAddr {
-        PAddr(self.0 + offset)
+    pub open spec fn offset(self, offset: nat) -> SpecPAddr {
+        SpecPAddr(self.0 + offset)
     }
 
     /// Convert to word index.
@@ -77,8 +77,8 @@ pub struct VIdx(pub nat);
 
 impl VIdx {
     /// Convert to virtual address.
-    pub open spec fn addr(self) -> VAddr {
-        VAddr(self.0 * 8)
+    pub open spec fn addr(self) -> SpecVAddr {
+        SpecVAddr(self.0 * 8)
     }
 
     /// Convert to int.
@@ -92,8 +92,8 @@ pub struct PIdx(pub nat);
 
 impl PIdx {
     /// Convert to physical address.
-    pub open spec fn addr(self) -> PAddr {
-        PAddr(self.0 * 8)
+    pub open spec fn addr(self) -> SpecPAddr {
+        SpecPAddr(self.0 * 8)
     }
 
     /// Convert to int.
@@ -104,12 +104,12 @@ impl PIdx {
 
 /// (EXEC-MODE) Physical Address.
 #[derive(PartialEq, Eq, Clone, Copy)]
-pub struct PAddrExec(pub usize);
+pub struct PAddr(pub usize);
 
-impl PAddrExec {
-    /// Convert to spec PAddr.
-    pub open spec fn view(self) -> PAddr {
-        PAddr(self.0 as nat)
+impl PAddr {
+    /// Convert to SpecPAddr.
+    pub open spec fn view(self) -> SpecPAddr {
+        SpecPAddr(self.0 as nat)
     }
 
     /// If addr is aligned to `size` bytes.
@@ -125,12 +125,12 @@ impl PAddrExec {
 
 /// (EXEC-MODE) Virtual Address.
 #[derive(PartialEq, Eq, Clone, Copy)]
-pub struct VAddrExec(pub usize);
+pub struct VAddr(pub usize);
 
-impl VAddrExec {
-    /// Convert to spec VAddr.
-    pub open spec fn view(self) -> VAddr {
-        VAddr(self.0 as nat)
+impl VAddr {
+    /// Convert to SpecVAddr.
+    pub open spec fn view(self) -> SpecVAddr {
+        SpecVAddr(self.0 as nat)
     }
 
     /// If addr is aligned to `size` bytes.

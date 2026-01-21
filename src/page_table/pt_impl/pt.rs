@@ -5,8 +5,8 @@ use vstd::prelude::*;
 use super::{path::PTTreePath, spec_pt::SpecPageTable};
 use crate::{
     address::{
-        addr::{PAddrExec, VAddr, VAddrExec},
-        frame::{Frame, FrameExec, FrameSize, MemAttr},
+        addr::{PAddr, SpecVAddr, VAddr},
+        frame::{SpecFrame, Frame, FrameSize, MemAttr},
     },
     page_table::{
         pt_arch::SpecPTArch,
@@ -66,7 +66,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     }
 
     /// If all pte in a table are invalid.
-    pub fn is_table_empty(&self, base: PAddrExec, level: usize) -> (res: bool)
+    pub fn is_table_empty(&self, base: PAddr, level: usize) -> (res: bool)
         requires
             self.invariants(),
             self@.pt_mem.contains_table(base@),
@@ -94,7 +94,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
 
     /// Traverse the page table for the given virtual address and return the matching
     /// entry and level. Proven consistent with the specification-level walk.
-    pub fn walk(&self, vaddr: VAddrExec, base: PAddrExec, level: usize) -> (res: (E, usize))
+    pub fn walk(&self, vaddr: VAddr, base: PAddr, level: usize) -> (res: (E, usize))
         requires
             self.invariants(),
             self.pt_mem@.contains_table(base@),
@@ -119,8 +119,8 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     /// `new_pte` is the entry to be inserted.
     pub fn insert(
         &mut self,
-        vbase: VAddrExec,
-        base: PAddrExec,
+        vbase: VAddr,
+        base: PAddr,
         level: usize,
         target_level: usize,
         new_pte: E,
@@ -195,7 +195,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     }
 
     /// Recursively remove a page table entry.
-    pub fn remove(&mut self, vbase: VAddrExec, base: PAddrExec, level: usize) -> (res: PagingResult)
+    pub fn remove(&mut self, vbase: VAddr, base: PAddr, level: usize) -> (res: PagingResult)
         requires
             old(self).invariants(),
             level < old(self).arch().level_count(),
@@ -238,7 +238,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     }
 
     /// Recursively deallocate empty tables along `vaddr` from `base`.
-    pub fn prune(&mut self, vaddr: VAddrExec, base: PAddrExec, level: usize)
+    pub fn prune(&mut self, vaddr: VAddr, base: PAddr, level: usize)
         requires
             old(self).invariants(),
             level < old(self).arch().level_count(),
@@ -287,7 +287,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     }
 
     /// Resolve a virtual address to its mapped physical frame.
-    pub fn query(&self, vaddr: VAddrExec) -> (res: PagingResult<(VAddrExec, FrameExec)>)
+    pub fn query(&self, vaddr: VAddr) -> (res: PagingResult<(VAddr, Frame)>)
         requires
             self.invariants(),
         ensures
@@ -319,7 +319,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
                 assert(self@@.query(vaddr@) == PagingResult::Ok(
                     (
                         self.arch().vbase(vaddr@, level as nat),
-                        Frame {
+                        SpecFrame {
                             base: pte@.addr(),
                             size: self.arch().frame_size(level as nat),
                             attr: pte@.attr(),
@@ -327,14 +327,14 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
                     ),
                 ));
             } else {
-                assert(self@@.query(vaddr@) == PagingResult::<(VAddr, Frame)>::Err(()));
+                assert(self@@.query(vaddr@) == PagingResult::<(SpecVAddr, SpecFrame)>::Err(()));
             }
         }
         if pte.valid() {
             Ok(
                 (
                     self.constants.arch.vbase(vaddr, level),
-                    FrameExec {
+                    Frame {
                         base: pte.addr(),
                         size: self.constants.arch.frame_size(level),
                         attr: pte.attr(),
@@ -347,7 +347,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     }
 
     /// Insert a mapping from a virtual base address to a physical frame.
-    pub fn map(&mut self, vbase: VAddrExec, frame: FrameExec) -> (res: PagingResult)
+    pub fn map(&mut self, vbase: VAddr, frame: Frame) -> (res: PagingResult)
         requires
             old(self).invariants(),
             old(self)@.constants.arch.is_valid_frame_size(frame.size),
@@ -391,7 +391,7 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
     }
 
     /// Remove the mapping for a given virtual base address.
-    pub fn unmap(&mut self, vbase: VAddrExec) -> (res: PagingResult)
+    pub fn unmap(&mut self, vbase: VAddr) -> (res: PagingResult)
         requires
             old(self).invariants(),
         ensures

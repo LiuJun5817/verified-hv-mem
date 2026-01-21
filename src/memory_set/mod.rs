@@ -1,16 +1,15 @@
 //! A memory set is a collection of memory areas that can be mapped into the virtual address
 //! space of a zone (process). It manages the page table for the zone, and provides methods to
 //! insert, remove, and find memory areas.
-
-use vstd::{invariant, prelude::*};
-use std::marker::PhantomData;
 use crate::{
     address::{
-        addr::VAddrExec,
-        frame::{FrameExec, FrameSize, MemoryRegion, PAGE_SIZE},
+        addr::VAddr,
+        frame::{Frame, FrameSize, MemoryRegion, PAGE_SIZE},
     },
     page_table::{PageTable, PageTableMem},
 };
+use std::marker::PhantomData;
+use vstd::{invariant, prelude::*};
 
 verus! {
 
@@ -40,7 +39,7 @@ pub trait MemorySet {
     ;
 
     /// Remove a memory region from the memory set by its starting virtual address.
-    fn remove(&mut self, start: VAddrExec) -> (res: Result<(), ()>)
+    fn remove(&mut self, start: VAddr) -> (res: Result<(), ()>)
         requires
             old(self).invariants(),
         ensures
@@ -164,10 +163,10 @@ impl<M, PT> MemorySet for VecMemorySet<M, PT> where PT: PageTable<M>, M: PageTab
                 self.pt.invariants(),
                 self@ == old(self)@,
         {
-            let vaddr = VAddrExec(region.start.0 + i * PAGE_SIZE);
+            let vaddr = VAddr(region.start.0 + i * PAGE_SIZE);
             let paddr = region.mapper.map(vaddr);
             // TODO: support huge pages
-            let frame = FrameExec {
+            let frame = Frame {
                 base: paddr,
                 size: FrameSize::Size4K,
                 attr: region.attr.clone(),
@@ -217,7 +216,7 @@ impl<M, PT> MemorySet for VecMemorySet<M, PT> where PT: PageTable<M>, M: PageTab
         Ok(())
     }
 
-    fn remove(&mut self, start: VAddrExec) -> (res: Result<(), ()>) {
+    fn remove(&mut self, start: VAddr) -> (res: Result<(), ()>) {
         let len = self.regions.len();
         for i in 0..len
             invariant
@@ -239,7 +238,7 @@ impl<M, PT> MemorySet for VecMemorySet<M, PT> where PT: PageTable<M>, M: PageTab
                         self.pt.invariants(),
                         old(self).regions == self.regions,
                 {
-                    let vaddr = VAddrExec(r.start.0 + j * PAGE_SIZE);
+                    let vaddr = VAddr(r.start.0 + j * PAGE_SIZE);
                     // TODO: prove addr alignment
                     assume(self.pt.view().unmap_pre(vaddr@));
                     self.pt.unmap(vaddr);

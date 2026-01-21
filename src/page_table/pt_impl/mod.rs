@@ -6,8 +6,8 @@ use super::{
     pte::{ExecPTE, GhostPTE},
 };
 use crate::address::{
-    addr::{PAddr, VAddrExec},
-    frame::FrameExec,
+    addr::{SpecPAddr, VAddr},
+    frame::Frame,
 };
 use vstd::prelude::*;
 
@@ -42,13 +42,15 @@ impl<M, G, E> PageTable<M> for ExPageTable<M, G, E> where
     fn new(pt_mem: M, constants: PTConstants) -> (pt: Self) {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
-        proof { pt_mem.view().lemma_init_implies_wf(); }
+        proof {
+            pt_mem.view().lemma_init_implies_wf();
+        }
         let pt = pt::PageTable::<M, G, E>::new(pt_mem, constants);
         proof {
             pt.view().pt_mem.lemma_contains_root();
             pt.view().construct_node_facts(pt.view().pt_mem.root(), 0);
 
-            assert forall|base: PAddr, idx: nat| pt.pt_mem@.accessible(base, idx) implies {
+            assert forall|base: SpecPAddr, idx: nat| pt.pt_mem@.accessible(base, idx) implies {
                 let pt_mem = pt.pt_mem@;
                 let table = pt_mem.table(base);
                 let pte = G::from_u64(pt_mem.read(base, idx));
@@ -63,7 +65,7 @@ impl<M, G, E> PageTable<M> for ExPageTable<M, G, E> where
         ExPageTable(pt)
     }
 
-    fn map(&mut self, vbase: VAddrExec, frame: FrameExec) -> (res: Result<(), ()>) {
+    fn map(&mut self, vbase: VAddr, frame: Frame) -> (res: Result<(), ()>) {
         proof {
             self.0.view().lemma_wf_implies_node_wf();
             self.0.view().pt_mem.lemma_contains_root();
@@ -73,7 +75,7 @@ impl<M, G, E> PageTable<M> for ExPageTable<M, G, E> where
         self.0.map(vbase, frame)
     }
 
-    fn unmap(&mut self, vbase: VAddrExec) -> (res: Result<(), ()>) {
+    fn unmap(&mut self, vbase: VAddr) -> (res: Result<(), ()>) {
         proof {
             self.0.view().lemma_wf_implies_node_wf();
             self.0.view().pt_mem.lemma_contains_root();
@@ -83,7 +85,7 @@ impl<M, G, E> PageTable<M> for ExPageTable<M, G, E> where
         self.0.unmap(vbase)
     }
 
-    fn query(&self, vaddr: VAddrExec) -> (res: Result<(VAddrExec, FrameExec), ()>) {
+    fn query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>) {
         proof {
             self.0.view().lemma_wf_implies_node_wf();
             self.0.view().pt_mem.lemma_contains_root();

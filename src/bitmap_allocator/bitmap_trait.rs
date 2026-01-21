@@ -19,7 +19,8 @@ pub trait BitmapAllocator {
     spec fn spec_cap() -> (res: usize);
 
     spec fn cascade_not_overflow() -> bool;
-      // cap_not_overflow
+
+    // cap_not_overflow
     /// The default value. Workaround for `const fn new() -> Self`.
     fn default() -> Self where Self: Sized;
 

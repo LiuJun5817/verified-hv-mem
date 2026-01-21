@@ -1,7 +1,7 @@
 use super::frame_trait::FrameAllocator;
 use crate::{
     address::{
-        addr::{PAddr, PAddrExec},
+        addr::{PAddr, SpecPAddr},
         frame::FrameSize,
     },
     bitmap_allocator::bitmap_impl::{BitAlloc, BitAlloc1M, BitAllocView},
@@ -12,7 +12,7 @@ verus! {
 
 /// A frame allocator implementation using a 1M-bitmap to track allocated frames.
 pub struct FrameAllocator1M {
-    pub base: PAddrExec,
+    pub base: PAddr,
     pub inner: BitAlloc1M,
 }
 
@@ -21,7 +21,7 @@ impl FrameAllocator for FrameAllocator1M {
         self.inner@
     }
 
-    open spec fn base(&self) -> PAddr {
+    open spec fn base(&self) -> SpecPAddr {
         self.base@
     }
 
@@ -42,34 +42,34 @@ impl FrameAllocator for FrameAllocator1M {
     }
 
     fn empty() -> Self where Self: Sized {
-        Self { base: PAddrExec(0), inner: BitAlloc1M::default() }
+        Self { base: PAddr(0), inner: BitAlloc1M::default() }
     }
 
-    fn init(&mut self, base: PAddrExec, size: usize) {
+    fn init(&mut self, base: PAddr, size: usize) {
         self.base = base;
         let page_count = (size / Self::page_size());
         self.inner.insert(0..page_count);
     }
 
-    unsafe fn alloc(&mut self) -> (res: Option<PAddrExec>) {
-        let ret = self.inner.alloc().map(|idx| PAddrExec(idx * Self::page_size() + self.base.0));
+    unsafe fn alloc(&mut self) -> (res: Option<PAddr>) {
+        let ret = self.inner.alloc().map(|idx| PAddr(idx * Self::page_size() + self.base.0));
         ret
     }
 
     unsafe fn alloc_contiguous(&mut self, frame_count: usize, align_log2: usize) -> (res: Option<
-        PAddrExec,
+        PAddr,
     >) {
         let ret = self.inner.alloc_contiguous(frame_count, align_log2).map(
-            |idx| PAddrExec(idx * Self::page_size() + self.base.0),
+            |idx| PAddr(idx * Self::page_size() + self.base.0),
         );
         ret
     }
 
-    unsafe fn dealloc(&mut self, target: PAddrExec) {
+    unsafe fn dealloc(&mut self, target: PAddr) {
         self.inner.dealloc((target.0 - self.base.0) / Self::page_size())
     }
 
-    unsafe fn dealloc_contiguous(&mut self, target: PAddrExec, frame_count: usize) {
+    unsafe fn dealloc_contiguous(&mut self, target: PAddr, frame_count: usize) {
         let start_idx = (target.0 - self.base.0) / Self::page_size();
         self.inner.remove(start_idx..(start_idx + frame_count));
     }
@@ -108,19 +108,19 @@ impl FrameAllocator for FrameAllocator1M {
 //     // }
 // }
 // pub struct BitmapFrameAllocator {
-//     base: PAddr,
+//     base: SpecPAddr,
 //     region_pages_exec: usize,
 //     inner: BitAlloc1M,
 // }
 // impl BitmapFrameAllocator {
 //     pub fn empty() -> Self {
-//         Self { base: PAddr(0), region_pages_exec: 0, inner: BitAlloc1M::default() }
+//         Self { base: SpecPAddr(0), region_pages_exec: 0, inner: BitAlloc1M::default() }
 //     }
 //     ///（可选）运行时查询
 //     pub fn region_pages_usize(&self) -> usize { self.region_pages_exec }
 // }
 // impl FrameAllocView for BitmapFrameAllocator {
-//     spec fn base(&self) -> SpecPAddr { self.base.view() }
+//     spec fn base(&self) -> SpecSpecPAddr { self.base.view() }
 //     spec fn region_pages(&self) -> nat { self.region_pages_exec as nat }
 //     spec fn bits(&self) -> Seq<bool> { self.inner@ }
 //     spec fn page_size() -> nat {
@@ -141,7 +141,7 @@ impl FrameAllocator for FrameAllocator1M {
 //             sub: [T::default(); 16], // need the trait "std::marker::Copy"
 //         }
 //     }
-//     fn init(&mut self, base: PAddr, size: usize) {
+//     fn init(&mut self, base: SpecPAddr, size: usize) {
 //         let ps = Self::page_size() as usize;
 //         let pages: usize = size / ps;
 //         // reset
@@ -151,30 +151,30 @@ impl FrameAllocator for FrameAllocator1M {
 //         // 只把 [0, pages) 标记为 free；其余保持 false（不可用）
 //         self.inner.insert(0..pages);
 //     }
-// unsafe fn alloc(&mut self) -> (res: Option<PAddr>) {
+// unsafe fn alloc(&mut self) -> (res: Option<SpecPAddr>) {
 //     match self.inner.alloc() {
 //         Some(idx) => {
 //             let ps = Self::page_size() as usize;
-//             Some(PAddr(self.base.0 + idx * ps))
+//             Some(SpecPAddr(self.base.0 + idx * ps))
 //         }
 //         None => None
 //     }
 // }
-// unsafe fn alloc_contiguous(&mut self, count: usize, align_log2: usize) -> (res: Option<PAddr>) {
+// unsafe fn alloc_contiguous(&mut self, count: usize, align_log2: usize) -> (res: Option<SpecPAddr>) {
 //     match self.inner.alloc_contiguous(count, align_log2) {
 //         Some(base_idx) => {
 //             let ps = Self::page_size() as usize;
-//             Some(PAddr(self.base.0 + base_idx * ps))
+//             Some(SpecPAddr(self.base.0 + base_idx * ps))
 //         }
 //         None => None
 //     }
 // }
-// unsafe fn dealloc(&mut self, p: PAddr) {
+// unsafe fn dealloc(&mut self, p: SpecPAddr) {
 //     let ps = Self::page_size() as usize;
 //     let idx = (p.0 - self.base.0) / ps;
 //     self.inner.dealloc(idx);
 // }
-// unsafe fn dealloc_contiguous(&mut self, p: PAddr, count: usize) {
+// unsafe fn dealloc_contiguous(&mut self, p: SpecPAddr, count: usize) {
 //     let ps = Self::page_size() as usize;
 //     let base_idx = (p.0 - self.base.0) / ps;
 //     // 用 while 写，后续你要做 Verus 证明时更好加 invariant

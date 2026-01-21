@@ -1,6 +1,6 @@
 use super::{ExecPTE, GhostPTE};
 use crate::address::{
-    addr::{PAddr, PAddrExec},
+    addr::{PAddr, SpecPAddr},
     frame::{FrameSize, MemAttr},
 };
 use crate::page_table::pt_arch::{PTArchExec, PTArchLevelExec};
@@ -12,22 +12,22 @@ verus! {
 ///
 /// |addr: 63-12||padding: 11-7||attr: 6-2||huge: 1||valid: 0|
 pub struct Aarch64GhostPTE {
-    pub addr: PAddr,
+    pub addr: SpecPAddr,
     pub attr: MemAttr,
     pub huge: bool,
     pub valid: bool,
 }
 
 impl GhostPTE for Aarch64GhostPTE {
-    open spec fn new(addr: PAddr, attr: MemAttr, huge: bool) -> Self {
+    open spec fn new(addr: SpecPAddr, attr: MemAttr, huge: bool) -> Self {
         Self { addr, attr, huge, valid: true }
     }
 
     open spec fn empty() -> Self {
-        Self { addr: PAddr(0nat), attr: MemAttr::spec_default(), huge: false, valid: false }
+        Self { addr: SpecPAddr(0nat), attr: MemAttr::spec_default(), huge: false, valid: false }
     }
 
-    open spec fn addr(self) -> PAddr {
+    open spec fn addr(self) -> SpecPAddr {
         self.addr
     }
 
@@ -44,7 +44,7 @@ impl GhostPTE for Aarch64GhostPTE {
     }
 
     open spec fn from_u64(val: u64) -> Self {
-        let addr = PAddr((val >> 12 << 12) as nat);
+        let addr = SpecPAddr((val >> 12 << 12) as nat);
         let readable = val & 0b100 != 0;
         let writable = val & 0b1000 != 0;
         let executable = val & 0b10000 != 0;
@@ -111,7 +111,7 @@ impl GhostPTE for Aarch64GhostPTE {
         admit()
     }
 
-    proof fn lemma_new_keeps_value(addr: PAddr, attr: MemAttr, huge: bool) {
+    proof fn lemma_new_keeps_value(addr: SpecPAddr, attr: MemAttr, huge: bool) {
     }
 
     proof fn lemma_eq_by_u64(pte1: Self, pte2: Self) {
@@ -245,10 +245,10 @@ impl Aarch64PTE {
 impl ExecPTE<Aarch64GhostPTE> for Aarch64PTE {
     open spec fn view(self) -> Aarch64GhostPTE {
         // TODO: this is a fake implementation
-        Aarch64GhostPTE { addr: PAddr(0), attr: MemAttr::default(), huge: false, valid: true }
+        Aarch64GhostPTE { addr: SpecPAddr(0), attr: MemAttr::default(), huge: false, valid: true }
     }
 
-    fn new(addr: PAddrExec, attr: MemAttr, huge: bool) -> Self {
+    fn new(addr: PAddr, attr: MemAttr, huge: bool) -> Self {
         let mut pte = Self::empty();
         pte.set_addr(addr.0 as u64);
         pte.set_flags(DescriptorFlags::from_mem_attr(attr, huge));
@@ -259,8 +259,8 @@ impl ExecPTE<Aarch64GhostPTE> for Aarch64PTE {
         Self::empty()
     }
 
-    fn addr(&self) -> (res: PAddrExec) {
-        PAddrExec((self.0 as usize) & Self::PHYS_ADDR_MASK)
+    fn addr(&self) -> (res: PAddr) {
+        PAddr((self.0 as usize) & Self::PHYS_ADDR_MASK)
     }
 
     fn attr(&self) -> (res: MemAttr) {

@@ -98,7 +98,8 @@ pub trait BitAllocView {
     spec fn spec_cap() -> (res: usize);
 
     spec fn cascade_not_overflow() -> bool;
-      // cap_not_overflow
+
+    // cap_not_overflow
     spec fn lemma_cap_is_pow16_pre() -> bool;
 
     /// The capacity is an exponential multiple of 16.
@@ -350,16 +351,20 @@ pub struct BitAllocCascade16<T: BitAllocView> {
 
 /// A bitmap of 256 bits
 pub type BitAlloc256 = BitAllocCascade16<BitAlloc16>;
-  //8
+
+//8
 /// A bitmap of 4K bits
 pub type BitAlloc4K = BitAllocCascade16<BitAlloc256>;
-  //12
+
+//12
 /// A bitmap of 64K bits
 pub type BitAlloc64K = BitAllocCascade16<BitAlloc4K>;
-  //16
+
+//16
 /// A bitmap of 1M bits
 pub type BitAlloc1M = BitAllocCascade16<BitAlloc64K>;
-  //20
+
+//20
 /// Converts a u16 value into a sequence of boolean bits.
 pub open spec fn u16_view(u: u16) -> Seq<bool> {
     Seq::new(16, |i: int| get_bit16!(u, i as u16))

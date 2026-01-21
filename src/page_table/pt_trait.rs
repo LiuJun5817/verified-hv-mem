@@ -1,10 +1,10 @@
 //! Page table trait with formal specification.
 use vstd::prelude::*;
 
-use crate::address::addr::{PAddr, PAddrExec, VAddr, VAddrExec};
-use crate::address::frame::{Frame, FrameExec, MemAttr};
-use crate::page_table::pt_arch::{SpecPTArch, PTArch};
 use super::pt_mem::PageTableMem;
+use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
+use crate::address::frame::{SpecFrame, Frame, MemAttr};
+use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 
 verus! {
 
@@ -16,9 +16,9 @@ pub struct SpecPTConstants {
     /// Page table architecture.
     pub arch: SpecPTArch,
     /// Physical memory lower bound.
-    pub pmem_lb: PAddr,
+    pub pmem_lb: SpecPAddr,
     /// Physical memory upper bound.
-    pub pmem_ub: PAddr,
+    pub pmem_ub: SpecPAddr,
 }
 
 impl SpecPTConstants {
@@ -34,9 +34,9 @@ pub struct PTConstants {
     /// Page table architecture.
     pub arch: PTArch,
     /// Physical memory lower bound.
-    pub pmem_lb: PAddrExec,
+    pub pmem_lb: PAddr,
     /// Physical memory upper bound.
-    pub pmem_ub: PAddrExec,
+    pub pmem_ub: PAddr,
 }
 
 impl PTConstants {
@@ -49,7 +49,7 @@ impl PTConstants {
 /// Abstract page table state.
 pub struct PageTableState {
     /// Mappings from virtual address to physical frames.
-    pub mappings: Map<VAddr, Frame>,
+    pub mappings: Map<SpecVAddr, SpecFrame>,
     /// Page table constants.
     pub constants: SpecPTConstants,
 }
@@ -63,7 +63,7 @@ impl PageTableState {
     }
 
     /// Map preconditions.
-    pub open spec fn map_pre(self, vbase: VAddr, frame: Frame) -> bool {
+    pub open spec fn map_pre(self, vbase: SpecVAddr, frame: SpecFrame) -> bool {
         // Arch should support frame size
         &&& self.constants.arch.is_valid_frame_size(
             frame.size,
@@ -78,16 +78,15 @@ impl PageTableState {
         )
         // Frame should be within pmem
         &&& frame.base.0 >= self.constants.pmem_lb.0
-        &&& frame.base.0 + frame.size.as_nat()
-            <= self.constants.pmem_ub.0
+        &&& frame.base.0 + frame.size.as_nat() <= self.constants.pmem_ub.0
     }
 
     /// State transition - map a virtual address to a physical frame.
     pub open spec fn map(
         s1: Self,
         s2: Self,
-        vbase: VAddr,
-        frame: Frame,
+        vbase: SpecVAddr,
+        frame: SpecFrame,
         res: PagingResult,
     ) -> bool {
         &&& s1.constants == s2.constants
@@ -108,13 +107,13 @@ impl PageTableState {
     }
 
     /// Unmap precondition.
-    pub open spec fn unmap_pre(self, vbase: VAddr) -> bool {
+    pub open spec fn unmap_pre(self, vbase: SpecVAddr) -> bool {
         // Base vaddr should align to leaf frame size
         vbase.aligned(self.constants.arch.leaf_frame_size().as_nat())
     }
 
     /// State transition - unmap a virtual address.
-    pub open spec fn unmap(s1: Self, s2: Self, vbase: VAddr, res: PagingResult) -> bool {
+    pub open spec fn unmap(s1: Self, s2: Self, vbase: SpecVAddr, res: PagingResult) -> bool {
         &&& s1.constants == s2.constants
         // Precondition
         &&& s1.unmap_pre(vbase)
@@ -133,13 +132,13 @@ impl PageTableState {
     }
 
     /// Query precondition.
-    pub open spec fn query_pre(self, vaddr: VAddr) -> bool {
+    pub open spec fn query_pre(self, vaddr: SpecVAddr) -> bool {
         // Base vaddr should align to 8 bytes
         vaddr.aligned(8)
     }
 
     /// Query the physical frame mapped to a virtual address.
-    pub open spec fn query(self, vaddr: VAddr, res: PagingResult<(VAddr, Frame)>) -> bool {
+    pub open spec fn query(self, vaddr: SpecVAddr, res: PagingResult<(SpecVAddr, SpecFrame)>) -> bool {
         // Precondition
         &&& self.query_pre(vaddr)
         // Check result
@@ -157,16 +156,16 @@ impl PageTableState {
 /// Helper functions.
 impl PageTableState {
     /// Construct a page table state.
-    pub open spec fn new(mappings: Map<VAddr, Frame>, constants: SpecPTConstants) -> Self {
+    pub open spec fn new(mappings: Map<SpecVAddr, SpecFrame>, constants: SpecPTConstants) -> Self {
         Self { mappings, constants }
     }
 
     /// If `frame` overlaps with existing physical memory.
-    pub open spec fn overlaps_pmem(self, frame: Frame) -> bool {
-        exists|frame2: Frame|
+    pub open spec fn overlaps_pmem(self, frame: SpecFrame) -> bool {
+        exists|frame2: SpecFrame|
             {
                 &&& #[trigger] self.mappings.contains_value(frame2)
-                &&& PAddr::overlap(
+                &&& SpecPAddr::overlap(
                     frame2.base,
                     frame2.size.as_nat(),
                     frame.base,
@@ -176,11 +175,11 @@ impl PageTableState {
     }
 
     /// If mapping `(vaddr, frame)` overlaps with existing virtual memory.
-    pub open spec fn overlaps_vmem(self, vbase: VAddr, frame: Frame) -> bool {
-        exists|vbase2: VAddr|
+    pub open spec fn overlaps_vmem(self, vbase: SpecVAddr, frame: SpecFrame) -> bool {
+        exists|vbase2: SpecVAddr|
             {
                 &&& #[trigger] self.mappings.contains_key(vbase2)
-                &&& VAddr::overlap(
+                &&& SpecVAddr::overlap(
                     vbase2,
                     self.mappings[vbase2].size.as_nat(),
                     vbase,
@@ -190,8 +189,8 @@ impl PageTableState {
     }
 
     /// If there exists a mapping for `vaddr`.
-    pub open spec fn has_mapping_for(self, vaddr: VAddr) -> bool {
-        exists|vbase: VAddr, frame: Frame|
+    pub open spec fn has_mapping_for(self, vaddr: SpecVAddr) -> bool {
+        exists|vbase: SpecVAddr, frame: SpecFrame|
             {
                 &&& #[trigger] self.mappings.contains_pair(vbase, frame)
                 &&& vaddr.within(vbase, frame.size.as_nat())
@@ -199,11 +198,11 @@ impl PageTableState {
     }
 
     /// Get the mapping for `vaddr`.
-    pub open spec fn mapping_for(self, vaddr: VAddr) -> (VAddr, Frame)
+    pub open spec fn mapping_for(self, vaddr: SpecVAddr) -> (SpecVAddr, SpecFrame)
         recommends
             self.has_mapping_for(vaddr),
     {
-        choose|vbase: VAddr, frame: Frame|
+        choose|vbase: SpecVAddr, frame: SpecFrame|
             {
                 &&& #[trigger] self.mappings.contains_pair(vbase, frame)
                 &&& vaddr.within(vbase, frame.size.as_nat())
@@ -215,7 +214,7 @@ impl PageTableState {
 ///
 /// Concrete implementation must implement `PageTable` trait to satisfy the specification.
 pub trait PageTable<M> where Self: Sized, M: PageTableMem {
-    /// View as a `VAddr` to `Frame` mapping.
+    /// View as a `SpecVAddr` to `Frame` mapping.
     spec fn view(self) -> PageTableState;
 
     /// Invariants that must be implied at initial state and preseved after each operation.
@@ -235,7 +234,7 @@ pub trait PageTable<M> where Self: Sized, M: PageTableMem {
     ;
 
     /// Map a virtual address to a physical frame with given attributes.
-    fn map(&mut self, vbase: VAddrExec, frame: FrameExec) -> (res: Result<(), ()>)
+    fn map(&mut self, vbase: VAddr, frame: Frame) -> (res: Result<(), ()>)
         requires
             old(self).invariants(),
             old(self)@.map_pre(vbase@, frame@),
@@ -245,7 +244,7 @@ pub trait PageTable<M> where Self: Sized, M: PageTableMem {
     ;
 
     /// Unmap a virtual address.
-    fn unmap(&mut self, vbase: VAddrExec) -> (res: Result<(), ()>)
+    fn unmap(&mut self, vbase: VAddr) -> (res: Result<(), ()>)
         requires
             old(self).invariants(),
             old(self)@.unmap_pre(vbase@),
@@ -255,7 +254,7 @@ pub trait PageTable<M> where Self: Sized, M: PageTableMem {
     ;
 
     /// Query the physical frame mapped to a virtual address.
-    fn query(&self, vaddr: VAddrExec) -> (res: Result<(VAddrExec, FrameExec), ()>)
+    fn query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
         requires
             self.invariants(),
             self@.query_pre(vaddr@),

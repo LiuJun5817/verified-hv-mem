@@ -1,15 +1,15 @@
-use crate::address::addr::{PAddr, PAddrExec};
+use crate::address::addr::{PAddr, SpecPAddr};
 use vstd::prelude::*;
 
 verus! {
 
 /// Map page idx to physical address: base + idx * page_size
-pub open spec fn idx_to_paddr(base: PAddr, idx: nat, page_size: usize) -> PAddr {
-    PAddr((base.0 + idx * page_size) as nat)
+pub open spec fn idx_to_paddr(base: SpecPAddr, idx: nat, page_size: usize) -> SpecPAddr {
+    SpecPAddr((base.0 + idx * page_size) as nat)
 }
 
 /// Map physical address to page idx: (addr - base) / page_size
-pub open spec fn paddr_to_idx(base: PAddr, addr: PAddr, page_size: usize) -> nat
+pub open spec fn paddr_to_idx(base: SpecPAddr, addr: SpecPAddr, page_size: usize) -> nat
     recommends
         addr.0 >= base.0,
         page_size > 0,
@@ -22,7 +22,7 @@ pub open spec fn paddr_to_idx(base: PAddr, addr: PAddr, page_size: usize) -> nat
 pub trait FrameAllocator {
     spec fn view(&self) -> Seq<bool>;
 
-    spec fn base(&self) -> PAddr;
+    spec fn base(&self) -> SpecPAddr;
 
     spec fn cap_pages() -> (res: usize);
 
@@ -39,7 +39,7 @@ pub trait FrameAllocator {
     fn empty() -> Self where Self: Sized;
 
     /// Initialize the frame allocator with a base physical address and size in bytes.
-    fn init(&mut self, base: PAddrExec, size: usize)
+    fn init(&mut self, base: PAddr, size: usize)
         requires
             old(self).wf(),
             base@.aligned(Self::spec_page_size() as nat),
@@ -55,7 +55,7 @@ pub trait FrameAllocator {
     ;
 
     /// Allocate a single frame.
-    unsafe fn alloc(&mut self) -> (res: Option<PAddrExec>)
+    unsafe fn alloc(&mut self) -> (res: Option<PAddr>)
         requires
             old(self).wf(),
         ensures
@@ -77,7 +77,7 @@ pub trait FrameAllocator {
 
     /// Allocate a contiguous block of frames.
     unsafe fn alloc_contiguous(&mut self, frame_count: usize, align_log2: usize) -> (res: Option<
-        PAddrExec,
+        PAddr,
     >)
         requires
             old(self).wf(),
@@ -109,7 +109,7 @@ pub trait FrameAllocator {
     ;
 
     /// Deallocate a single frame.
-    unsafe fn dealloc(&mut self, target: PAddrExec)
+    unsafe fn dealloc(&mut self, target: PAddr)
         requires
             old(self).wf(),
             paddr_to_idx(old(self).base(), target.view(), Self::spec_page_size())
@@ -128,7 +128,7 @@ pub trait FrameAllocator {
     ;
 
     /// Deallocate a contiguous block of frames.
-    unsafe fn dealloc_contiguous(&mut self, target: PAddrExec, frame_count: usize)
+    unsafe fn dealloc_contiguous(&mut self, target: PAddr, frame_count: usize)
         requires
             old(self).wf(),
             paddr_to_idx(old(self).base(), target.view(), Self::spec_page_size()) + frame_count
