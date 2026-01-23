@@ -1175,7 +1175,11 @@ impl PTTreeNode {
     }
 
     /// Lemma. If `self.insert(path, frame)` succeeds, then `self.visit(path)` reaches an empty entry.
-    pub proof fn lemma_insert_ok_implies_visit_reaches_empty(self, path: PTTreePath, frame: SpecFrame)
+    pub proof fn lemma_insert_ok_implies_visit_reaches_empty(
+        self,
+        path: PTTreePath,
+        frame: SpecFrame,
+    )
         requires
             self.wf(),
             path.valid(self.constants.arch, self.level),

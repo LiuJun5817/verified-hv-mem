@@ -3,7 +3,7 @@ use vstd::prelude::*;
 
 use super::pt_mem::PageTableMem;
 use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
-use crate::address::frame::{SpecFrame, Frame, MemAttr};
+use crate::address::frame::{Frame, MemAttr, SpecFrame};
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 
 verus! {
@@ -138,7 +138,11 @@ impl PageTableState {
     }
 
     /// Query the physical frame mapped to a virtual address.
-    pub open spec fn query(self, vaddr: SpecVAddr, res: PagingResult<(SpecVAddr, SpecFrame)>) -> bool {
+    pub open spec fn query(
+        self,
+        vaddr: SpecVAddr,
+        res: PagingResult<(SpecVAddr, SpecFrame)>,
+    ) -> bool {
         // Precondition
         &&& self.query_pre(vaddr)
         // Check result

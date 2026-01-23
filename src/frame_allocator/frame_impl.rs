@@ -51,25 +51,23 @@ impl FrameAllocator for FrameAllocator1M {
         self.inner.insert(0..page_count);
     }
 
-    unsafe fn alloc(&mut self) -> (res: Option<PAddr>) {
+    fn alloc(&mut self) -> (res: Option<PAddr>) {
         let ret = self.inner.alloc().map(|idx| PAddr(idx * Self::page_size() + self.base.0));
         ret
     }
 
-    unsafe fn alloc_contiguous(&mut self, frame_count: usize, align_log2: usize) -> (res: Option<
-        PAddr,
-    >) {
+    fn alloc_contiguous(&mut self, frame_count: usize, align_log2: usize) -> (res: Option<PAddr>) {
         let ret = self.inner.alloc_contiguous(frame_count, align_log2).map(
             |idx| PAddr(idx * Self::page_size() + self.base.0),
         );
         ret
     }
 
-    unsafe fn dealloc(&mut self, target: PAddr) {
+    fn dealloc(&mut self, target: PAddr) {
         self.inner.dealloc((target.0 - self.base.0) / Self::page_size())
     }
 
-    unsafe fn dealloc_contiguous(&mut self, target: PAddr, frame_count: usize) {
+    fn dealloc_contiguous(&mut self, target: PAddr, frame_count: usize) {
         let start_idx = (target.0 - self.base.0) / Self::page_size();
         self.inner.remove(start_idx..(start_idx + frame_count));
     }

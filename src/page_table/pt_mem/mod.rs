@@ -10,6 +10,8 @@ use crate::address::{
 };
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 
+mod imp;
+
 verus! {
 
 /// Describe a page table stored in physical memory.

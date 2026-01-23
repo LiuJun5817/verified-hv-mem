@@ -8,7 +8,7 @@ use super::{
 };
 use crate::address::{
     addr::{SpecPAddr, SpecVAddr},
-    frame::{SpecFrame, MemAttr},
+    frame::{MemAttr, SpecFrame},
 };
 use crate::page_table::{
     pt_arch::SpecPTArch,
@@ -63,7 +63,11 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
 
     /// Construct a `Frame` from a `PTE`.
     pub open spec fn pte_to_frame(self, pte: G, level: nat) -> SpecFrame {
-        SpecFrame { base: pte.addr(), attr: pte.attr(), size: self.constants.arch.frame_size(level) }
+        SpecFrame {
+            base: pte.addr(),
+            attr: pte.attr(),
+            size: self.constants.arch.frame_size(level),
+        }
     }
 
     /// If all pte in a table are invalid.

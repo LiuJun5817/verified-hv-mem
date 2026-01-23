@@ -47,6 +47,7 @@ pub trait FrameAllocator {
             (size / Self::spec_page_size()) <= Self::cap_pages(),
         ensures
             self.wf(),
+            old(self).base() == self.base(),
             forall|loc1: int| (0 <= loc1 < (size / Self::spec_page_size())) ==> self@[loc1] == true,
             forall|loc2: int|
                 ((size / Self::spec_page_size()) <= loc2 < Self::spec_page_size()) ==> self@[loc2]
@@ -55,11 +56,12 @@ pub trait FrameAllocator {
     ;
 
     /// Allocate a single frame.
-    unsafe fn alloc(&mut self) -> (res: Option<PAddr>)
+    fn alloc(&mut self) -> (res: Option<PAddr>)
         requires
             old(self).wf(),
         ensures
             self.wf(),
+            old(self).base() == self.base(),
             match res {
                 Some(addr) => {
                     let i = paddr_to_idx(old(self).base(), addr.view(), Self::spec_page_size());
@@ -76,15 +78,14 @@ pub trait FrameAllocator {
     ;
 
     /// Allocate a contiguous block of frames.
-    unsafe fn alloc_contiguous(&mut self, frame_count: usize, align_log2: usize) -> (res: Option<
-        PAddr,
-    >)
+    fn alloc_contiguous(&mut self, frame_count: usize, align_log2: usize) -> (res: Option<PAddr>)
         requires
             old(self).wf(),
             0 < frame_count <= Self::cap_pages(),
             align_log2 < 64,
         ensures
             self.wf(),
+            old(self).base() == self.base(),
             match res {
                 Some(addr) => {
                     let i = paddr_to_idx(old(self).base(), addr.view(), Self::spec_page_size());
@@ -109,7 +110,7 @@ pub trait FrameAllocator {
     ;
 
     /// Deallocate a single frame.
-    unsafe fn dealloc(&mut self, target: PAddr)
+    fn dealloc(&mut self, target: PAddr)
         requires
             old(self).wf(),
             paddr_to_idx(old(self).base(), target.view(), Self::spec_page_size())
@@ -121,6 +122,7 @@ pub trait FrameAllocator {
             ) as int],
         ensures
             self.wf(),
+            old(self).base() == self.base(),
             self@ == old(self)@.update(
                 paddr_to_idx(old(self).base(), target.view(), Self::spec_page_size()) as int,
                 true,
@@ -128,7 +130,7 @@ pub trait FrameAllocator {
     ;
 
     /// Deallocate a contiguous block of frames.
-    unsafe fn dealloc_contiguous(&mut self, target: PAddr, frame_count: usize)
+    fn dealloc_contiguous(&mut self, target: PAddr, frame_count: usize)
         requires
             old(self).wf(),
             paddr_to_idx(old(self).base(), target.view(), Self::spec_page_size()) + frame_count
@@ -139,6 +141,7 @@ pub trait FrameAllocator {
                     + frame_count) as int ==> !old(self)@[j],
         ensures
             self.wf(),
+            old(self).base() == self.base(),
             forall|j: int|
                 paddr_to_idx(old(self).base(), target.view(), Self::spec_page_size()) <= j
                     < paddr_to_idx(old(self).base(), target.view(), Self::spec_page_size())

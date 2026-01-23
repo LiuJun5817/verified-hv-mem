@@ -166,11 +166,7 @@ impl<M, PT> MemorySet for VecMemorySet<M, PT> where PT: PageTable<M>, M: PageTab
             let vaddr = VAddr(region.start.0 + i * PAGE_SIZE);
             let paddr = region.mapper.map(vaddr);
             // TODO: support huge pages
-            let frame = Frame {
-                base: paddr,
-                size: FrameSize::Size4K,
-                attr: region.attr.clone(),
-            };
+            let frame = Frame { base: paddr, size: FrameSize::Size4K, attr: region.attr.clone() };
             // TODO: prove addr alignment and bounds
             assume(self.pt.view().map_pre(vaddr@, frame@));
 

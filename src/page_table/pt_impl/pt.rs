@@ -6,7 +6,7 @@ use super::{path::PTTreePath, spec_pt::SpecPageTable};
 use crate::{
     address::{
         addr::{PAddr, SpecVAddr, VAddr},
-        frame::{SpecFrame, Frame, FrameSize, MemAttr},
+        frame::{Frame, FrameSize, MemAttr, SpecFrame},
     },
     page_table::{
         pt_arch::SpecPTArch,
