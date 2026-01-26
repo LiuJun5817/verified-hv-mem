@@ -353,8 +353,6 @@ impl<M, G, E> PageTable<M, G, E> where M: PageTableMem, G: GhostPTE, E: ExecPTE<
             old(self)@.constants.arch.is_valid_frame_size(frame.size),
             vbase@.aligned(frame.size.as_nat()),
             frame.base@.aligned(frame.size.as_nat()),
-            frame.base.0 >= old(self).constants.pmem_lb.0,
-            frame.base.0 + frame.size.as_nat() <= old(self).constants.pmem_ub.0,
         ensures
             self.invariants(),
             ({

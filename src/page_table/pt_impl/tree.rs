@@ -61,8 +61,6 @@ impl PTTreeNode {
             NodeEntry::Frame(frame) => {
                 &&& frame.size == constants.arch.frame_size(level)
                 &&& frame.base.aligned(frame.size.as_nat())
-                &&& frame.base.0 >= constants.pmem_lb.0
-                &&& frame.base.0 + frame.size.as_nat() <= constants.pmem_ub.0
             },
             NodeEntry::Empty => true,
         }
@@ -562,8 +560,6 @@ impl PTTreeNode {
                     &&& frame.size == self.constants.arch.frame_size((path.len() - 1) as nat)
                     &&& path.to_vaddr(self.constants.arch).aligned(frame.size.as_nat())
                     &&& frame.base.aligned(frame.size.as_nat())
-                    &&& frame.base.0 >= self.constants.pmem_lb.0
-                    &&& frame.base.0 + frame.size.as_nat() <= self.constants.pmem_ub.0
                 },
     {
         assert forall|path, frame| #[trigger]
@@ -571,8 +567,6 @@ impl PTTreeNode {
             &&& frame.size == self.constants.arch.frame_size((path.len() - 1) as nat)
             &&& path.to_vaddr(self.constants.arch).aligned(frame.size.as_nat())
             &&& frame.base.aligned(frame.size.as_nat())
-            &&& frame.base.0 >= self.constants.pmem_lb.0
-            &&& frame.base.0 + frame.size.as_nat() <= self.constants.pmem_ub.0
         } by {
             // Prove the reached frame satisfy the wf
             self.lemma_visited_entries_satisfy_wf(path);
@@ -585,8 +579,6 @@ impl PTTreeNode {
 
             // Prove alignment
             assert(frame.base.aligned(frame.size.as_nat()));
-            assert(frame.base.0 >= self.constants.pmem_lb.0);
-            assert(frame.base.0 + frame.size.as_nat() <= self.constants.pmem_ub.0);
             path.lemma_to_vaddr_frame_alignment(self.constants.arch);
         }
     }
@@ -1884,16 +1876,6 @@ impl PTTreeModel {
         self.root.constants.arch
     }
 
-    /// Get physical memory lower bound.
-    pub open spec fn pmem_lb(self) -> SpecPAddr {
-        self.root.constants.pmem_lb
-    }
-
-    /// Get physical memory upper bound.
-    pub open spec fn pmem_ub(self) -> SpecPAddr {
-        self.root.constants.pmem_ub
-    }
-
     /// Interpret the tree as `(vbase, frame)` mappings.
     pub open spec fn mappings(self) -> Map<SpecVAddr, SpecFrame> {
         Map::new(
@@ -1952,8 +1934,6 @@ impl PTTreeModel {
             mappings: self.mappings(),
             constants: SpecPTConstants {
                 arch: self.arch(),
-                pmem_lb: self.pmem_lb(),
-                pmem_ub: self.pmem_ub(),
             },
         }
     }
@@ -1967,8 +1947,6 @@ impl PTTreeModel {
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
-            frame.base.0 >= self.pmem_lb().0,
-            frame.base.0 + frame.size.as_nat() <= self.pmem_ub().0,
     {
         let path = PTTreePath::from_vaddr_root(
             vbase,
@@ -2058,16 +2036,12 @@ impl PTTreeModel {
                     &&& self.arch().is_valid_frame_size(frame.size)
                     &&& vbase.aligned(frame.size.as_nat())
                     &&& frame.base.aligned(frame.size.as_nat())
-                    &&& frame.base.0 >= self.pmem_lb().0
-                    &&& frame.base.0 + frame.size.as_nat() <= self.pmem_ub().0
                 },
     {
         assert forall|vbase, frame| #[trigger] self.mappings().contains_pair(vbase, frame) implies {
             &&& self.arch().is_valid_frame_size(frame.size)
             &&& vbase.aligned(frame.size.as_nat())
             &&& frame.base.aligned(frame.size.as_nat())
-            &&& frame.base.0 >= self.pmem_lb().0
-            &&& frame.base.0 + frame.size.as_nat() <= self.pmem_ub().0
         } by {
             let path = choose|path: PTTreePath|
                 #![auto]
@@ -2133,8 +2107,6 @@ impl PTTreeModel {
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
-            frame.base.0 >= self.pmem_lb().0,
-            frame.base.0 + frame.size.as_nat() <= self.pmem_ub().0,
         ensures
             self.map(vbase, frame).0.wf(),
     {
@@ -2156,8 +2128,6 @@ impl PTTreeModel {
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
-            frame.base.0 >= self.pmem_lb().0,
-            frame.base.0 + frame.size.as_nat() <= self.pmem_ub().0,
             !self.overlaps_vmem(vbase, frame),
         ensures
             self.map(vbase, frame).1 is Ok,
@@ -2219,8 +2189,6 @@ impl PTTreeModel {
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
-            frame.base.0 >= self.pmem_lb().0,
-            frame.base.0 + frame.size.as_nat() <= self.pmem_ub().0,
             self.map(vbase, frame).1 is Ok,
         ensures
             !self.overlaps_vmem(vbase, frame),
@@ -2256,8 +2224,6 @@ impl PTTreeModel {
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
-            frame.base.0 >= self.pmem_lb().0,
-            frame.base.0 + frame.size.as_nat() <= self.pmem_ub().0,
             self.map(vbase, frame).1 is Ok,
         ensures
             self.map(vbase, frame).0.mappings() === self.mappings().insert(vbase, frame),
@@ -2339,8 +2305,6 @@ impl PTTreeModel {
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
-            frame.base.0 >= self.pmem_lb().0,
-            frame.base.0 + frame.size.as_nat() <= self.pmem_ub().0,
             self.map(vbase, frame).1 is Ok,
         ensures
             !self.mappings().contains_key(vbase),

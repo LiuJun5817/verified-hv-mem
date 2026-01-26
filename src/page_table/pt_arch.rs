@@ -182,6 +182,9 @@ impl SpecPTArch {
                 self.entry_count(level2 + 1) as int,
                 size as int,
             );
+            assert(size2 % size == 0);
+        } else {
+            assert(self.frame_size(level2).as_nat() == self.frame_size(level).as_nat());
         }
     }
 

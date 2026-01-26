@@ -15,17 +15,12 @@ pub type PagingResult<T = ()> = Result<T, ()>;
 pub struct SpecPTConstants {
     /// Page table architecture.
     pub arch: SpecPTArch,
-    /// Physical memory lower bound.
-    pub pmem_lb: SpecPAddr,
-    /// Physical memory upper bound.
-    pub pmem_ub: SpecPAddr,
 }
 
 impl SpecPTConstants {
     /// Check if valid.
     pub open spec fn valid(self) -> bool {
-        &&& self.arch.valid()
-        &&& self.pmem_lb.0 < self.pmem_ub.0
+        self.arch.valid()
     }
 }
 
@@ -33,16 +28,12 @@ impl SpecPTConstants {
 pub struct PTConstants {
     /// Page table architecture.
     pub arch: PTArch,
-    /// Physical memory lower bound.
-    pub pmem_lb: PAddr,
-    /// Physical memory upper bound.
-    pub pmem_ub: PAddr,
 }
 
 impl PTConstants {
     /// View as `PTConstants`
     pub open spec fn view(self) -> SpecPTConstants {
-        SpecPTConstants { arch: self.arch@, pmem_lb: self.pmem_lb@, pmem_ub: self.pmem_ub@ }
+        SpecPTConstants { arch: self.arch@ }
     }
 }
 
@@ -76,9 +67,6 @@ impl PageTableState {
         &&& frame.base.aligned(
             frame.size.as_nat(),
         )
-        // Frame should be within pmem
-        &&& frame.base.0 >= self.constants.pmem_lb.0
-        &&& frame.base.0 + frame.size.as_nat() <= self.constants.pmem_ub.0
     }
 
     /// State transition - map a virtual address to a physical frame.

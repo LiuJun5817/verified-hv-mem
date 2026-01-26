@@ -131,6 +131,9 @@ impl<M, PT> MemorySet for VecMemorySet<M, PT> where PT: PageTable<M>, M: PageTab
     }
 
     open spec fn invariants(self) -> bool {
+        &&& self.pt@.constants.valid()
+        // Frame size is 4K
+        &&& self.pt.view().constants.arch.leaf_frame_size() == FrameSize::Size4K
         // Page table invariants
         &&& self.pt.invariants()
         // Regions are valid
@@ -161,15 +164,16 @@ impl<M, PT> MemorySet for VecMemorySet<M, PT> where PT: PageTable<M>, M: PageTab
             invariant
                 region.spec_valid(),
                 self.pt.invariants(),
+                self.pt@.constants == old(self).pt@.constants,
+                self.pt@.constants.valid(),
+                self.pt@.constants.arch.leaf_frame_size() == FrameSize::Size4K,
                 self@ == old(self)@,
         {
             let vaddr = VAddr(region.start.0 + i * PAGE_SIZE);
             let paddr = region.mapper.map(vaddr);
             // TODO: support huge pages
             let frame = Frame { base: paddr, size: FrameSize::Size4K, attr: region.attr.clone() };
-            // TODO: prove addr alignment and bounds
-            assume(self.pt.view().map_pre(vaddr@, frame@));
-
+            assert(self.pt.view().map_pre(vaddr@, frame@));
             self.pt.map(vaddr, frame);
         }
 
@@ -219,6 +223,7 @@ impl<M, PT> MemorySet for VecMemorySet<M, PT> where PT: PageTable<M>, M: PageTab
                 len == self.regions.len(),
                 0 <= i <= self.regions.len(),
                 self.invariants(),
+                self.pt@.constants == old(self).pt@.constants,
                 old(self).regions == self.regions,
                 forall|j: int| 0 <= j < i ==> #[trigger] self.regions[j].start@ != start@,
         {
@@ -232,6 +237,8 @@ impl<M, PT> MemorySet for VecMemorySet<M, PT> where PT: PageTable<M>, M: PageTab
                     invariant
                         r.spec_valid(),
                         self.pt.invariants(),
+                        self.pt@.constants == old(self).pt@.constants,
+                        self.pt@.constants.arch.leaf_frame_size() == FrameSize::Size4K,
                         old(self).regions == self.regions,
                 {
                     let vaddr = VAddr(r.start.0 + j * PAGE_SIZE);

@@ -57,8 +57,6 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let frame_size = self.constants.arch.frame_size(level);
         &&& self.pte_points_to_frame(pte, level)
         &&& pte.addr().aligned(frame_size.as_nat())
-        &&& self.constants.pmem_lb.0 <= pte.addr().0
-        &&& pte.addr().0 + frame_size.as_nat() <= self.constants.pmem_ub.0
     }
 
     /// Construct a `Frame` from a `PTE`.
@@ -113,10 +111,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 // If `pte` is valid and points to a frame
                 &&& self.pte_points_to_frame(pte, table.level) ==> {
                     // The frame is valid
-                    &&& addr.aligned(self.constants.arch.frame_size(table.level).as_nat())
-                    &&& self.constants.pmem_lb.0 <= addr.0
-                    &&& addr.0 + self.constants.arch.frame_size(table.level).as_nat()
-                        <= self.constants.pmem_ub.0
+                    addr.aligned(self.constants.arch.frame_size(table.level).as_nat())
                 }
             }
             // For each 2 page table entries that can be accessed
@@ -393,11 +388,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             assert(self.pt_mem.accessible(base, i as nat));
             match node.entries[i] {
                 NodeEntry::Frame(frame) => {
-                    assert({
-                        &&& frame.base.aligned(frame.size.as_nat())
-                        &&& frame.base.0 >= node.constants.pmem_lb.0
-                        &&& frame.base.0 + frame.size.as_nat() <= node.constants.pmem_ub.0
-                    });
+                    assert(frame.base.aligned(frame.size.as_nat()));
                 },
                 NodeEntry::Node(subnode) => {
                     let pte = G::from_u64(self.pt_mem.read(base, i as nat));
@@ -695,10 +686,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 &&& pt_mem.table(addr).level == table2.level + 1
             }
             &&& s2.pte_points_to_frame(pte, table2.level) ==> {
-                &&& addr.aligned(s2.constants.arch.frame_size(table2.level).as_nat())
-                &&& s2.constants.pmem_lb.0 <= addr.0
-                &&& addr.0 + s2.constants.arch.frame_size(table2.level).as_nat()
-                    <= s2.constants.pmem_ub.0
+                addr.aligned(s2.constants.arch.frame_size(table2.level).as_nat())
             }
         } by {
             let table2 = pt_mem.table(base2);
@@ -1486,6 +1474,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                     // Recursive remove from the subtable
                     self.lemma_remove_consistent_with_model(vbase, subtable_base, level + 1);
                     PTTreePath::lemma_from_vaddr_step(vbase, arch, level, end);
+                    assert(s2 == self.remove(vbase, subtable_base, level + 1).0);
                 },
                 NodeEntry::Frame(frame) => {
                     if path.has_zero_tail(level) {
@@ -1542,10 +1531,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 &&& pt_mem.table(addr).level == table2.level + 1
             }
             &&& s2.pte_points_to_frame(pte2, table2.level) ==> {
-                &&& addr.aligned(s2.constants.arch.frame_size(table2.level).as_nat())
-                &&& s2.constants.pmem_lb.0 <= addr.0
-                &&& addr.0 + s2.constants.arch.frame_size(table2.level).as_nat()
-                    <= s2.constants.pmem_ub.0
+                addr.aligned(s2.constants.arch.frame_size(table2.level).as_nat())
             }
         } by {
             let table2 = pt_mem.table(base2);

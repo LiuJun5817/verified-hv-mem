@@ -183,9 +183,9 @@ impl MemoryRegion {
         match self.mapper {
             Mapper::Offset(off) => {
                 let max_vaddr = self.start.0 + self.pages * PAGE_SIZE;
-                off <= usize::MAX - max_vaddr
+                off <= usize::MAX - max_vaddr && off % PAGE_SIZE == 0
             },
-            Mapper::Fixed(_) => true,
+            Mapper::Fixed(paddr) => paddr % PAGE_SIZE == 0,
         }
     }
 
@@ -245,14 +245,16 @@ pub enum Mapper {
 impl Mapper {
     pub open spec fn valid(self, max_vaddr: nat) -> bool {
         match self {
-            Self::Offset(off) => off as nat <= usize::MAX as nat - max_vaddr,
-            Self::Fixed(paddr) => true,
+            Self::Offset(off) => off <= usize::MAX as nat - max_vaddr && off % PAGE_SIZE == 0,
+            Self::Fixed(paddr) => paddr % PAGE_SIZE == 0,
         }
     }
 
-    pub fn map(&self, vaddr: VAddr) -> PAddr
+    pub fn map(&self, vaddr: VAddr) -> (res: PAddr)
         requires
             self.valid(vaddr.0 as nat),
+        ensures
+            vaddr.0 % PAGE_SIZE == 0 ==> res.0 % PAGE_SIZE == 0,
     {
         match self {
             Self::Offset(off) => PAddr(vaddr.0 + *off),
