@@ -1,6 +1,6 @@
 //! Page table entry specification defined by Rust trait.
 use crate::address::{
-    addr::{PAddr, PAddrExec},
+    addr::{PAddr, SpecPAddr},
     frame::{FrameSize, MemAttr},
 };
 use vstd::prelude::*;
@@ -12,7 +12,7 @@ verus! {
 /// Generic specification and properties of Page Table Entry.
 pub trait GhostPTE: Sized {
     /// Construct from address and attributes.
-    spec fn new(addr: PAddr, attr: MemAttr, huge: bool) -> Self;
+    spec fn new(addr: SpecPAddr, attr: MemAttr, huge: bool) -> Self;
 
     /// Construct an empty entry.
     spec fn empty() -> Self;
@@ -24,7 +24,7 @@ pub trait GhostPTE: Sized {
     spec fn to_u64(self) -> u64;
 
     /// Returns the physical address mapped by this entry.
-    spec fn addr(self) -> PAddr;
+    spec fn addr(self) -> SpecPAddr;
 
     /// Returns the attributes of this entry.
     spec fn attr(self) -> MemAttr;
@@ -36,7 +36,7 @@ pub trait GhostPTE: Sized {
     spec fn huge(self) -> bool;
 
     /// PTE constructed by `new` keeps the same value.
-    broadcast proof fn lemma_new_keeps_value(addr: PAddr, attr: MemAttr, huge: bool)
+    broadcast proof fn lemma_new_keeps_value(addr: SpecPAddr, attr: MemAttr, huge: bool)
         requires
             addr.aligned(FrameSize::Size4K.as_nat()),
         ensures
@@ -79,7 +79,7 @@ pub trait ExecPTE<G>: Sized where G: GhostPTE {
     spec fn view(self) -> G;
 
     /// Construct from address and attributes.
-    fn new(addr: PAddrExec, attr: MemAttr, huge: bool) -> (pte: Self)
+    fn new(addr: PAddr, attr: MemAttr, huge: bool) -> (pte: Self)
         requires
             addr@.aligned(FrameSize::Size4K.as_nat()),
         ensures
@@ -105,7 +105,7 @@ pub trait ExecPTE<G>: Sized where G: GhostPTE {
     ;
 
     /// Returns the physical address mapped by this entry.
-    fn addr(&self) -> (res: PAddrExec)
+    fn addr(&self) -> (res: PAddr)
         ensures
             res@ == self@.addr(),
     ;

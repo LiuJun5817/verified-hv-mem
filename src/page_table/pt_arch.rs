@@ -8,7 +8,7 @@ use vstd::prelude::*;
 extern crate alloc;
 
 use crate::address::{
-    addr::{VAddr, VAddrExec},
+    addr::{SpecVAddr, VAddr},
     frame::FrameSize,
 };
 use alloc::{vec, vec::Vec};
@@ -79,7 +79,7 @@ impl SpecPTArch {
     }
 
     /// Calculates the page table entry index for a virtual address at the specified level.
-    pub open spec fn pte_index(self, vaddr: VAddr, level: nat) -> nat
+    pub open spec fn pte_index(self, vaddr: SpecVAddr, level: nat) -> nat
         recommends
             self.valid(),
             level < self.level_count(),
@@ -88,12 +88,12 @@ impl SpecPTArch {
     }
 
     /// Aligns the virtual address `vaddr` to the base of its page at `level`.
-    pub open spec fn vbase(self, vaddr: VAddr, level: nat) -> VAddr
+    pub open spec fn vbase(self, vaddr: SpecVAddr, level: nat) -> SpecVAddr
         recommends
             self.valid(),
             level < self.level_count(),
     {
-        VAddr(vaddr.0 / self.frame_size(level).as_nat() * self.frame_size(level).as_nat())
+        SpecVAddr(vaddr.0 / self.frame_size(level).as_nat() * self.frame_size(level).as_nat())
     }
 
     /// Check if the page table architecture is valid.
@@ -186,7 +186,7 @@ impl SpecPTArch {
     }
 
     /// Lemma. `vbase` has fixed range and alignment.
-    pub proof fn lemma_vbase_range_and_alignment(self, vaddr: VAddr, level: nat)
+    pub proof fn lemma_vbase_range_and_alignment(self, vaddr: SpecVAddr, level: nat)
         by (nonlinear_arith)
         requires
             self.valid(),
@@ -217,10 +217,7 @@ impl PTArchLevel {
 
 impl Clone for PTArchLevel {
     fn clone(&self) -> Self {
-        PTArchLevel {
-            entry_count: self.entry_count,
-            frame_size: self.frame_size,
-        }
+        PTArchLevel { entry_count: self.entry_count, frame_size: self.frame_size }
     }
 }
 
@@ -231,7 +228,7 @@ impl Clone for PTArchLevel {
 pub struct PTArch(pub Vec<PTArchLevel>);
 
 impl Clone for PTArch {
-    fn clone(&self) -> (res: Self) 
+    fn clone(&self) -> (res: Self)
         ensures
             self@ == res@,
     {
@@ -277,7 +274,7 @@ impl PTArch {
     }
 
     /// Computes the page table entry index for `vaddr` at the specified level.
-    pub fn pte_index(&self, vaddr: VAddrExec, level: usize) -> (res: usize)
+    pub fn pte_index(&self, vaddr: VAddr, level: usize) -> (res: usize)
         requires
             self@.valid(),
             level < self@.level_count(),
@@ -292,7 +289,7 @@ impl PTArch {
     ///
     /// The default implementation rounds `vaddr` down to the nearest multiple
     /// of the frame size at `level`.
-    pub fn vbase(&self, vaddr: VAddrExec, level: usize) -> (res: VAddrExec)
+    pub fn vbase(&self, vaddr: VAddr, level: usize) -> (res: VAddr)
         requires
             self@.valid(),
             level < self@.level_count(),
@@ -302,7 +299,7 @@ impl PTArch {
         let fsize = self.frame_size(level).as_usize();
         assert(fsize > 0);
         assert(vaddr.0 / fsize * fsize <= vaddr.0) by (nonlinear_arith);
-        VAddrExec(vaddr.0 / fsize * fsize)
+        VAddr(vaddr.0 / fsize * fsize)
     }
 
     /// Get the corresponding level of a frame size.

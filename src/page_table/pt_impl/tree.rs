@@ -3,8 +3,8 @@ use vstd::prelude::*;
 
 use super::path::PTTreePath;
 use crate::address::{
-    addr::{PAddr, VAddr},
-    frame::Frame,
+    addr::{SpecPAddr, SpecVAddr},
+    frame::SpecFrame,
 };
 use crate::page_table::{
     pt_arch::SpecPTArch,
@@ -33,7 +33,7 @@ pub enum NodeEntry {
     /// A sub-node in the page table, representing an intermediate level of the page table hierarchy.
     Node(PTTreeNode),
     /// A physical frame mapped by the node, representing a leaf node in the page table tree.
-    Frame(Frame),
+    Frame(SpecFrame),
     /// An empty entry in the page table, indicating that the corresponding virtual address range
     /// is not currently mapped or allocated.
     Empty,
@@ -68,10 +68,10 @@ impl PTTreeNode {
         }
     }
 
-    /// Invariants. Recursively checks the invariants of the node and its sub-nodes.
+    /// Well-formedness of the node. Recursively checks the wf of the node and its sub-nodes.
     ///
     /// This ensures a sub-tree is well-formed, and all mappings are valid and aligned.
-    pub open spec fn invariants(self) -> bool
+    pub open spec fn wf(self) -> bool
         decreases self.constants.arch.level_count() - self.level,
     {
         &&& self.constants.arch.valid()
@@ -79,18 +79,18 @@ impl PTTreeNode {
         &&& self.entries.len() == self.constants.arch.entry_count(
             self.level,
         )
-        // Invariants satisfied recursively
+        // wf satisfied recursively
         &&& forall|entry: NodeEntry| #[trigger]
             self.entries.contains(entry) ==> {
                 &&& Self::is_entry_valid(entry, self.level, self.constants)
-                &&& entry is Node ==> entry->Node_0.invariants()
+                &&& entry is Node ==> entry->Node_0.wf()
             }
     }
 
-    /// Additional invariants. If there are no empty nodes in a subtree.
+    /// Additional wf. If there are no empty nodes in a subtree.
     pub open spec fn fully_populated(self) -> bool
         recommends
-            self.invariants(),
+            self.wf(),
         decreases self.constants.arch.level_count() - self.level,
     {
         &&& if self.level >= self.constants.arch.level_count() - 1 {
@@ -141,7 +141,7 @@ impl PTTreeNode {
     /// terminates early and returns the sequence of entries visited so far.
     pub open spec fn visit(self, path: PTTreePath) -> Seq<NodeEntry>
         recommends
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         decreases path.len(),
     {
@@ -160,9 +160,9 @@ impl PTTreeNode {
     /// Inserts a frame at `path`, creates intermediate nodes if needed.
     ///
     /// Does nothing if target slot is non-empty.
-    pub open spec fn insert(self, path: PTTreePath, frame: Frame) -> (Self, PagingResult)
+    pub open spec fn insert(self, path: PTTreePath, frame: SpecFrame) -> (Self, PagingResult)
         recommends
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             Self::is_entry_valid(
                 NodeEntry::Frame(frame),
@@ -201,7 +201,7 @@ impl PTTreeNode {
     /// Does nothing if the entry at `path` is already `Empty`.
     pub open spec fn remove(self, path: PTTreePath) -> (Self, PagingResult)
         recommends
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         decreases path.len(),
     {
@@ -233,7 +233,7 @@ impl PTTreeNode {
     /// Recursively eliminate empty nodes along `path`.
     pub open spec fn prune(self, path: PTTreePath) -> Self
         recommends
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         decreases path.len(),
     {
@@ -263,7 +263,7 @@ impl PTTreeNode {
     /// Returns the longest prefix of `path` that can reach an entry without early terminating.
     pub open spec fn real_path(self, path: PTTreePath) -> PTTreePath
         recommends
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
     {
         path.trim(self.visit(path).len())
@@ -272,39 +272,39 @@ impl PTTreeNode {
     /// If `visit(path)` terminates exactly at a frame.
     pub open spec fn is_frame_path(self, path: PTTreePath) -> bool
         recommends
-            self.invariants(),
+            self.wf(),
     {
         path.valid(self.constants.arch, self.level) && self.visit(path).last() is Frame
             && self.visit(path).len() == path.len()
     }
 
     /// Collect all paths that terminate at a frame as a map.
-    pub open spec fn path_mappings(self) -> Map<PTTreePath, Frame>
+    pub open spec fn path_mappings(self) -> Map<PTTreePath, SpecFrame>
         recommends
-            self.invariants(),
+            self.wf(),
     {
         Map::new(|path| self.is_frame_path(path), |path| self.visit(path).last()->Frame_0)
     }
 
-    /// Lemma. `new` implies invariants.
-    pub proof fn lemma_new_implies_invariants(constants: SpecPTConstants, level: nat)
+    /// Lemma. `new` implies wf.
+    pub proof fn lemma_new_implies_wf(constants: SpecPTConstants, level: nat)
         requires
             level < constants.arch.level_count(),
             constants.arch.valid(),
         ensures
-            Self::new(constants, level).invariants(),
+            Self::new(constants, level).wf(),
     {
     }
 
-    /// Lemma. `update` preserves invariants.
-    pub proof fn lemma_update_preserves_invariants(self, index: nat, entry: NodeEntry)
+    /// Lemma. `update` preserves wf.
+    pub proof fn lemma_update_preserves_wf(self, index: nat, entry: NodeEntry)
         requires
-            self.invariants(),
+            self.wf(),
             0 <= index < self.entries.len(),
             Self::is_entry_valid(entry, self.level, self.constants),
-            entry is Node ==> entry->Node_0.invariants(),
+            entry is Node ==> entry->Node_0.wf(),
         ensures
-            self.update(index, entry).invariants(),
+            self.update(index, entry).wf(),
     {
         let new = self.update(index, entry);
         assert forall|entry2: NodeEntry| #[trigger]
@@ -319,7 +319,7 @@ impl PTTreeNode {
         }
         assert forall|entry2: NodeEntry| #[trigger]
             new.entries.contains(entry2) implies match entry2 {
-            NodeEntry::Node(node) => node.invariants(),
+            NodeEntry::Node(node) => node.wf(),
             _ => true,
         } by {
             if entry2 != entry {
@@ -332,7 +332,7 @@ impl PTTreeNode {
     /// Lemma. Length of `visit(path)` is between 1 and `path.len()`.
     pub proof fn lemma_visit_length_bounds(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         ensures
             1 <= self.visit(path).len() <= path.len(),
@@ -354,9 +354,9 @@ impl PTTreeNode {
     }
 
     /// Lemma. Every entry returned by `visit` satisfies `is_entry_valid`.
-    pub proof fn lemma_visited_entries_satisfy_invariants(self, path: PTTreePath)
+    pub proof fn lemma_visited_entries_satisfy_wf(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         ensures
             forall|i: int|
@@ -376,8 +376,8 @@ impl PTTreeNode {
             match entry {
                 NodeEntry::Node(node) => {
                     assert(self.visit(path) === Seq::new(1, |_i| entry).add(node.visit(remain)));
-                    // Recursively prove `node.visit(remain)` satisfies the invariants
-                    node.lemma_visited_entries_satisfy_invariants(remain);
+                    // Recursively prove `node.visit(remain)` satisfies the wf
+                    node.lemma_visited_entries_satisfy_wf(remain);
                 },
                 _ => (),
             }
@@ -387,7 +387,7 @@ impl PTTreeNode {
     /// Lemma. All visited entries except the final one must be sub-nodes.
     pub proof fn lemma_visited_entry_is_node_except_final(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         ensures
             forall|i| 0 <= i < self.visit(path).len() - 1 ==> self.visit(path)[i] is Node,
@@ -413,7 +413,7 @@ impl PTTreeNode {
     /// is a prefix of that of `path`.
     pub proof fn lemma_visit_preserves_prefix(self, path: PTTreePath, prefix: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             path.has_prefix(prefix),
         ensures
@@ -451,7 +451,7 @@ impl PTTreeNode {
     /// Lemma. If `path` is valid, then `real_path(path)` is also valid.
     pub proof fn lemma_real_path_valid(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         ensures
             self.real_path(path).valid(self.constants.arch, self.level),
@@ -462,7 +462,7 @@ impl PTTreeNode {
     /// Lemma. `real_path(path)` is a prefix of `path`.
     pub proof fn lemma_real_path_is_prefix(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         ensures
             path.has_prefix(self.real_path(path)),
@@ -473,7 +473,7 @@ impl PTTreeNode {
     /// Lemma. `self.real_path(path).step() == (idx, node.real_path(remain))`
     pub proof fn lemma_real_path_step(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             path.len() > 1,
             self.entries[path.step().0 as int] is Node,
@@ -509,7 +509,7 @@ impl PTTreeNode {
     /// Lemma. The entry sequence visited by `path` and `real_path(path)` are the same.
     pub proof fn lemma_real_path_visits_same_entry(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         ensures
             self.visit(self.real_path(path)) == self.visit(path),
@@ -554,7 +554,7 @@ impl PTTreeNode {
     /// Lemma. All `(path, frame)` mappings have valid size and alignment.
     pub proof fn lemma_path_mappings_valid(self)
         requires
-            self.invariants(),
+            self.wf(),
             self.level == 0,
         ensures
             forall|path, frame| #[trigger]
@@ -574,8 +574,8 @@ impl PTTreeNode {
             &&& frame.base.0 >= self.constants.pmem_lb.0
             &&& frame.base.0 + frame.size.as_nat() <= self.constants.pmem_ub.0
         } by {
-            // Prove the reached frame satisfy the invariants
-            self.lemma_visited_entries_satisfy_invariants(path);
+            // Prove the reached frame satisfy the wf
+            self.lemma_visited_entries_satisfy_wf(path);
             assert(PTTreeNode::is_entry_valid(
                 NodeEntry::Frame(frame),
                 (path.len() - 1) as nat,
@@ -594,7 +594,7 @@ impl PTTreeNode {
     /// Lemma. Path mappings can not have 2 keys `a` and `b` such that `a` is prefix of `b`.
     pub proof fn lemma_path_mappings_nonprefix(self)
         requires
-            self.invariants(),
+            self.wf(),
         ensures
             forall|path1, path2|
                 self.path_mappings().contains_key(path1) && self.path_mappings().contains_key(path2)
@@ -630,13 +630,13 @@ impl PTTreeNode {
     /// Lemma. All `(path, frame)` mappings do not overlap in virtual memory.
     pub proof fn lemma_path_mappings_nonoverlap_in_vmem(self)
         requires
-            self.invariants(),
+            self.wf(),
             self.level == 0,
         ensures
             forall|path1, path2, frame1, frame2|
                 self.path_mappings().contains_pair(path1, frame1)
                     && self.path_mappings().contains_pair(path2, frame2) ==> path1 == path2
-                    || !VAddr::overlap(
+                    || !SpecVAddr::overlap(
                     path1.to_vaddr(self.constants.arch),
                     frame1.size.as_nat(),
                     path2.to_vaddr(self.constants.arch),
@@ -647,7 +647,7 @@ impl PTTreeNode {
             self.path_mappings().contains_pair(path1, frame1) && self.path_mappings().contains_pair(
                 path2,
                 frame2,
-            ) implies path1 == path2 || !VAddr::overlap(
+            ) implies path1 == path2 || !SpecVAddr::overlap(
             path1.to_vaddr(self.constants.arch),
             frame1.size.as_nat(),
             path2.to_vaddr(self.constants.arch),
@@ -684,9 +684,9 @@ impl PTTreeNode {
     }
 
     /// Lemma. `path_mappings` has at most one path `path` such that `path.to_vaddr() == vbase`.
-    pub proof fn lemma_path_mappings_has_at_most_one_path_for_vbase(self, vbase: VAddr)
+    pub proof fn lemma_path_mappings_has_at_most_one_path_for_vbase(self, vbase: SpecVAddr)
         requires
-            self.invariants(),
+            self.wf(),
             self.level == 0,
         ensures
             forall|path1: PTTreePath, path2: PTTreePath|
@@ -722,7 +722,7 @@ impl PTTreeNode {
     /// Lemma. `self.fully_populated()` implies `!self.path_mappings().empty()`.
     pub proof fn lemma_fully_populated_implies_path_mappings_nonempty(self)
         requires
-            self.invariants(),
+            self.wf(),
             self.fully_populated(),
             self.level > 0,
         ensures
@@ -756,10 +756,10 @@ impl PTTreeNode {
     }
 
     /* insert related lemmas */
-    /// Lemma. `insert` preserves invariants.
-    pub proof fn lemma_insert_preserves_invariants(self, path: PTTreePath, frame: Frame)
+    /// Lemma. `insert` preserves wf.
+    pub proof fn lemma_insert_preserves_wf(self, path: PTTreePath, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             Self::is_entry_valid(
                 NodeEntry::Frame(frame),
@@ -767,7 +767,7 @@ impl PTTreeNode {
                 self.constants,
             ),
         ensures
-            self.insert(path, frame).0.invariants(),
+            self.insert(path, frame).0.wf(),
         decreases path.len(),
     {
         let (idx, remain) = path.step();
@@ -775,30 +775,30 @@ impl PTTreeNode {
         assert(self.entries.contains(entry));
         if path.len() <= 1 {
             // Base case, proved by lemma
-            self.lemma_update_preserves_invariants(idx, NodeEntry::Frame(frame));
+            self.lemma_update_preserves_wf(idx, NodeEntry::Frame(frame));
         } else {
             match entry {
                 NodeEntry::Node(node) => {
                     assert(Self::is_entry_valid(entry, self.level, self.constants));
-                    assert(node.invariants());
+                    assert(node.wf());
                     // Recursively prove `node.insert(remain, frame)`
-                    node.lemma_insert_preserves_invariants(remain, frame);
-                    // `node.update(remain, frame)` satisfies invariants,
-                    // so the updated `self` also satisfy invariants by lemma
-                    self.lemma_update_preserves_invariants(
+                    node.lemma_insert_preserves_wf(remain, frame);
+                    // `node.update(remain, frame)` satisfies wf,
+                    // so the updated `self` also satisfy wf by lemma
+                    self.lemma_update_preserves_wf(
                         idx,
                         NodeEntry::Node(node.insert(remain, frame).0),
                     );
                 },
                 NodeEntry::Empty => {
                     let new = PTTreeNode::new(self.constants, self.level + 1);
-                    // `new` satisfies invariants by construction
-                    assert(new.invariants());
+                    // `new` satisfies wf by construction
+                    assert(new.wf());
                     // Recursively prove `new.insert(remain, frame)`
-                    new.lemma_insert_preserves_invariants(remain, frame);
-                    // `new.insert(remain, frame)` satisfies invariants,
-                    // so the updated `self` also satisfy invariants by lemma
-                    self.lemma_update_preserves_invariants(
+                    new.lemma_insert_preserves_wf(remain, frame);
+                    // `new.insert(remain, frame)` satisfies wf,
+                    // so the updated `self` also satisfy wf by lemma
+                    self.lemma_update_preserves_wf(
                         idx,
                         NodeEntry::Node(new.insert(remain, frame).0),
                     );
@@ -812,10 +812,10 @@ impl PTTreeNode {
     pub proof fn lemma_path_mappings_after_insertion_contains_new_mapping(
         self,
         path: PTTreePath,
-        frame: Frame,
+        frame: SpecFrame,
     )
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.insert(path, frame).1 is Ok,
         ensures
@@ -838,14 +838,14 @@ impl PTTreeNode {
             match entry {
                 NodeEntry::Node(node) => {
                     assert(Self::is_entry_valid(entry, self.level, self.constants));
-                    assert(node.invariants());
+                    assert(node.wf());
                     // Recursively prove `node.insert(remain, frame)`
                     node.lemma_path_mappings_after_insertion_contains_new_mapping(remain, frame);
                 },
                 NodeEntry::Empty => {
                     let node = PTTreeNode::new(self.constants, self.level + 1);
-                    // `node` satisfies invariants by construction
-                    assert(node.invariants());
+                    // `node` satisfies wf by construction
+                    assert(node.wf());
                     // Recursively prove `node.insert(remain, frame)`
                     node.lemma_path_mappings_after_insertion_contains_new_mapping(remain, frame);
                 },
@@ -858,13 +858,13 @@ impl PTTreeNode {
     pub proof fn lemma_path_mappings_after_insertion_is_superset(
         self,
         path: PTTreePath,
-        frame: Frame,
+        frame: SpecFrame,
     )
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         ensures
-            forall|path2: PTTreePath, frame2: Frame| #[trigger]
+            forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
                 self.path_mappings().contains_pair(path2, frame2) ==> self.insert(
                     path,
                     frame,
@@ -872,7 +872,7 @@ impl PTTreeNode {
         decreases path.len(),
     {
         let new = self.insert(path, frame).0;
-        assert forall|path2: PTTreePath, frame2: Frame| #[trigger]
+        assert forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
             self.path_mappings().contains_pair(
                 path2,
                 frame2,
@@ -920,9 +920,9 @@ impl PTTreeNode {
     }
 
     // Lemma. `insert` does not affect other mappings.
-    pub proof fn lemma_insert_not_affect_other_mappings(self, path: PTTreePath, frame: Frame)
+    pub proof fn lemma_insert_not_affect_other_mappings(self, path: PTTreePath, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             Self::is_entry_valid(
                 NodeEntry::Frame(frame),
@@ -931,15 +931,15 @@ impl PTTreeNode {
             ),
             self.insert(path, frame).1 is Ok,
         ensures
-            forall|path2: PTTreePath, frame2: Frame| #[trigger]
+            forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
                 self.insert(path, frame).0.path_mappings().contains_pair(path2, frame2) ==> path2
                     == path || self.path_mappings().contains_pair(path2, frame2),
         decreases path.len(),
     {
         let new = self.insert(path, frame).0;
-        self.lemma_insert_preserves_invariants(path, frame);
+        self.lemma_insert_preserves_wf(path, frame);
 
-        assert forall|path2: PTTreePath, frame2: Frame| #[trigger]
+        assert forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
             new.path_mappings().contains_pair(path2, frame2) implies path2 == path
             || self.path_mappings().contains_pair(path2, frame2) by {
             let (idx, remain) = path.step();
@@ -1035,9 +1035,9 @@ impl PTTreeNode {
     }
 
     /// Lemma. `insert` adds a mapping to `path_mappings`.
-    pub proof fn lemma_insert_adds_path_mapping(self, path: PTTreePath, frame: Frame)
+    pub proof fn lemma_insert_adds_path_mapping(self, path: PTTreePath, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             Self::is_entry_valid(
                 NodeEntry::Frame(frame),
@@ -1057,7 +1057,7 @@ impl PTTreeNode {
         self.lemma_insert_not_affect_other_mappings(path, frame);
 
         // `new.path_mappings()` is a subset of `self.path_mappings().insert(path, frame)`
-        assert forall|path2: PTTreePath, frame2: Frame| #[trigger]
+        assert forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
             new.path_mappings().contains_pair(path2, frame2) implies self.path_mappings().insert(
             path,
             frame,
@@ -1067,7 +1067,7 @@ impl PTTreeNode {
             }
         }
         // `self.path_mappings().insert(path, frame)` is a subset of `new.path_mappings()`
-        assert forall|path2: PTTreePath, frame2: Frame| #[trigger]
+        assert forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
             self.path_mappings().insert(path, frame).contains_pair(
                 path2,
                 frame2,
@@ -1083,9 +1083,9 @@ impl PTTreeNode {
 
     /// Lemma. `insert` fails for `path` implies `self.path_mappings()` contains `path2`
     /// such that `path2` is a prefix of `path` or `path` is a prefix of `path2`.
-    pub proof fn lemma_insert_fails_implies_prefix(self, path: PTTreePath, frame: Frame)
+    pub proof fn lemma_insert_fails_implies_prefix(self, path: PTTreePath, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.insert(path, frame).1 is Err,
             self.fully_populated(),
@@ -1140,9 +1140,9 @@ impl PTTreeNode {
     }
 
     /// Lemma. If an empty entry is reached during `insert`, the result must be `Ok`.
-    pub proof fn lemma_empty_entry_implies_insert_ok(self, path: PTTreePath, frame: Frame)
+    pub proof fn lemma_empty_entry_implies_insert_ok(self, path: PTTreePath, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.entries[path.0[0] as int] is Empty,
         ensures
@@ -1159,9 +1159,9 @@ impl PTTreeNode {
     }
 
     /// Lemma. `insert` always succeeds if `self` is empty.
-    pub proof fn lemma_empty_implies_insert_ok(self, path: PTTreePath, frame: Frame)
+    pub proof fn lemma_empty_implies_insert_ok(self, path: PTTreePath, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.empty(),
         ensures
@@ -1175,9 +1175,13 @@ impl PTTreeNode {
     }
 
     /// Lemma. If `self.insert(path, frame)` succeeds, then `self.visit(path)` reaches an empty entry.
-    pub proof fn lemma_insert_ok_implies_visit_reaches_empty(self, path: PTTreePath, frame: Frame)
+    pub proof fn lemma_insert_ok_implies_visit_reaches_empty(
+        self,
+        path: PTTreePath,
+        frame: SpecFrame,
+    )
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.insert(path, frame).1 is Ok,
         ensures
@@ -1198,9 +1202,9 @@ impl PTTreeNode {
     }
 
     /// Lemma. `insert` preserves `fully_populated` property.
-    pub proof fn lemma_insert_preserves_fully_populated(self, path: PTTreePath, frame: Frame)
+    pub proof fn lemma_insert_preserves_fully_populated(self, path: PTTreePath, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.insert(path, frame).1 is Ok,
             self.fully_populated() || self.empty(),
@@ -1265,13 +1269,13 @@ impl PTTreeNode {
     }
 
     /* remove related lemmas */
-    /// Lemma. `remove` preserves invariants.
-    pub proof fn lemma_remove_preserves_invariants(self, path: PTTreePath)
+    /// Lemma. `remove` preserves wf.
+    pub proof fn lemma_remove_preserves_wf(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         ensures
-            self.remove(path).0.invariants(),
+            self.remove(path).0.wf(),
         decreases path.len(),
     {
         let (idx, remain) = path.step();
@@ -1279,24 +1283,21 @@ impl PTTreeNode {
         assert(self.entries.contains(entry));
         if path.len() <= 1 {
             // Base case, proved by lemma
-            self.lemma_update_preserves_invariants(idx, NodeEntry::Empty);
+            self.lemma_update_preserves_wf(idx, NodeEntry::Empty);
         } else {
             match entry {
                 NodeEntry::Node(node) => {
                     assert(Self::is_entry_valid(entry, self.level, self.constants));
-                    assert(node.invariants());
+                    assert(node.wf());
                     // Recursively prove `node.remove(remain)`
-                    node.lemma_remove_preserves_invariants(remain);
-                    // `node.remove(remain)` satisfies invariants,
-                    // so the updated `self` also satisfy invariants by lemma
-                    self.lemma_update_preserves_invariants(
-                        idx,
-                        NodeEntry::Node(node.remove(remain).0),
-                    );
+                    node.lemma_remove_preserves_wf(remain);
+                    // `node.remove(remain)` satisfies wf,
+                    // so the updated `self` also satisfy wf by lemma
+                    self.lemma_update_preserves_wf(idx, NodeEntry::Node(node.remove(remain).0));
                 },
                 NodeEntry::Frame(_) => {
                     if remain.is_zero() {
-                        self.lemma_update_preserves_invariants(idx, NodeEntry::Empty);
+                        self.lemma_update_preserves_wf(idx, NodeEntry::Empty);
                     }
                 },
                 _ => (),
@@ -1307,7 +1308,7 @@ impl PTTreeNode {
     /// Lemma. `path_mappings` after removal does not contain the removed mapping.
     pub proof fn lemma_path_mappings_after_removal_not_contain_mapping(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.remove(path).1 is Ok,
         ensures
@@ -1330,7 +1331,7 @@ impl PTTreeNode {
             match entry {
                 NodeEntry::Node(node) => {
                     assert(Self::is_entry_valid(entry, self.level, self.constants));
-                    assert(node.invariants());
+                    assert(node.wf());
                     // Recursively prove `node.remove(remain)`
                     node.lemma_path_mappings_after_removal_not_contain_mapping(remain);
                     self.lemma_real_path_step(path);
@@ -1343,17 +1344,17 @@ impl PTTreeNode {
     /// Lemma. `path_mappings` after `remove` is subset of before.
     pub proof fn lemma_path_mappings_after_removal_is_subset(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.remove(path).1 is Ok,
         ensures
-            forall|path2: PTTreePath, frame2: Frame| #[trigger]
+            forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
                 self.remove(path).0.path_mappings().contains_pair(path2, frame2)
                     ==> self.path_mappings().contains_pair(path2, frame2),
         decreases path.len(),
     {
         let new = self.remove(path).0;
-        assert forall|path2: PTTreePath, frame2: Frame| #[trigger]
+        assert forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
             new.path_mappings().contains_pair(
                 path2,
                 frame2,
@@ -1397,19 +1398,19 @@ impl PTTreeNode {
     /// Lemma. `remove` does not affect other mappings.
     pub proof fn lemma_remove_not_affect_other_mappings(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.remove(path).1 is Ok,
         ensures
-            forall|path2: PTTreePath, frame2: Frame| #[trigger]
+            forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
                 self.path_mappings().contains_pair(path2, frame2) ==> path2 == self.real_path(path)
                     || self.remove(path).0.path_mappings().contains_pair(path2, frame2),
         decreases path.len(),
     {
         let new = self.remove(path).0;
-        self.lemma_remove_preserves_invariants(path);
+        self.lemma_remove_preserves_wf(path);
 
-        assert forall|path2: PTTreePath, frame2: Frame| #[trigger]
+        assert forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
             self.path_mappings().contains_pair(path2, frame2) implies path2 == self.real_path(path)
             || new.path_mappings().contains_pair(path2, frame2) by {
             let (idx, remain) = path.step();
@@ -1488,7 +1489,7 @@ impl PTTreeNode {
     /// Lemma. `remove` removes a mapping from `path_mappings`.
     pub proof fn lemma_remove_removes_path_mapping(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.remove(path).1 is Ok,
         ensures
@@ -1497,7 +1498,7 @@ impl PTTreeNode {
             ),
     {
         let new = self.remove(path).0;
-        self.lemma_remove_preserves_invariants(path);
+        self.lemma_remove_preserves_wf(path);
         let real_path = self.real_path(path);
 
         // `new.path_mappings()` does not contain the mapping `(path, frame)`
@@ -1508,14 +1509,14 @@ impl PTTreeNode {
         self.lemma_remove_not_affect_other_mappings(path);
 
         // `new.path_mappings()` is a subset of `self.path_mappings().remove(path)`
-        assert forall|path2: PTTreePath, frame2: Frame| #[trigger]
+        assert forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
             new.path_mappings().contains_pair(path2, frame2) implies self.path_mappings().remove(
             real_path,
         ).contains_pair(path2, frame2) by {
             assert(path2 != real_path);
         }
         // `self.path_mappings().remove(path)` is a subset of `new.path_mappings()`
-        assert forall|path2: PTTreePath, frame2: Frame| #[trigger]
+        assert forall|path2: PTTreePath, frame2: SpecFrame| #[trigger]
             self.path_mappings().remove(real_path).contains_pair(
                 path2,
                 frame2,
@@ -1530,7 +1531,7 @@ impl PTTreeNode {
     /// of `path`, then `self.remove(path)` succeeds.
     pub proof fn lemma_remove_real_prefix_ok(self, path: PTTreePath, path2: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.path_mappings().contains_key(path2),
             path.has_real_prefix(path2),
@@ -1552,7 +1553,7 @@ impl PTTreeNode {
     /// Lemma. If `self.remove(path)` succeeds, then `self.visit(path)` reaches a frame.
     pub proof fn lemma_remove_ok_implies_visit_reaches_frame(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.remove(path).1 is Ok,
         ensures
@@ -1586,7 +1587,7 @@ impl PTTreeNode {
     /// Lemma. `remove` always fails if `self` is empty.
     pub proof fn lemma_empty_implies_remove_fail(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.empty(),
         ensures
@@ -1599,13 +1600,13 @@ impl PTTreeNode {
     }
 
     /* prune related lemmas */
-    /// Lemma. `prune` preserves invariants.
-    pub proof fn lemma_prune_preserves_invariants(self, path: PTTreePath)
+    /// Lemma. `prune` preserves wf.
+    pub proof fn lemma_prune_preserves_wf(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         ensures
-            self.prune(path).invariants(),
+            self.prune(path).wf(),
         decreases path.len(),
     {
         let (idx, remain) = path.step();
@@ -1615,10 +1616,10 @@ impl PTTreeNode {
             let node = entry->Node_0;
             let new_node = node.prune(remain);
             if new_node.empty() {
-                self.lemma_update_preserves_invariants(idx, NodeEntry::Empty);
+                self.lemma_update_preserves_wf(idx, NodeEntry::Empty);
             } else {
-                node.lemma_prune_preserves_invariants(remain);
-                self.lemma_update_preserves_invariants(idx, NodeEntry::Node(new_node));
+                node.lemma_prune_preserves_wf(remain);
+                self.lemma_update_preserves_wf(idx, NodeEntry::Node(new_node));
             }
         }
     }
@@ -1626,7 +1627,7 @@ impl PTTreeNode {
     /// Lemma. `prune` does not introduce new frame paths.
     pub proof fn lemma_prune_not_add_frame_path(self, path: PTTreePath, path2: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.prune(path).is_frame_path(path2),
         ensures
@@ -1635,7 +1636,7 @@ impl PTTreeNode {
         decreases path.len(),
     {
         let new = self.prune(path);
-        self.lemma_prune_preserves_invariants(path);
+        self.lemma_prune_preserves_wf(path);
 
         let (idx, remain) = path.step();
         let (idx2, remain2) = path2.step();
@@ -1680,7 +1681,7 @@ impl PTTreeNode {
     /// Lemma. `prune` does not remove existing frame paths.
     pub proof fn lemma_prune_not_remove_frame_path(self, path: PTTreePath, path2: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.is_frame_path(path2),
         ensures
@@ -1712,7 +1713,7 @@ impl PTTreeNode {
                     match entry {
                         NodeEntry::Node(node) => {
                             let new_node = node.prune(remain);
-                            node.lemma_prune_preserves_invariants(remain);
+                            node.lemma_prune_preserves_wf(remain);
                             node.lemma_prune_not_remove_frame_path(remain, remain2);
 
                             let entry2 = new_node.entries[remain2.step().0 as int];
@@ -1741,7 +1742,7 @@ impl PTTreeNode {
     /// Lemma. `prune` does not affect path mappings.
     pub proof fn lemma_prune_not_affect_path_mappings(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
         ensures
             self.path_mappings() == self.prune(path).path_mappings(),
@@ -1767,7 +1768,7 @@ impl PTTreeNode {
     /// Lemma. `prune` after `remove` will eliminate empty nodes
     pub proof fn lemma_prune_after_remove_preserves_fully_populated(self, path: PTTreePath)
         requires
-            self.invariants(),
+            self.wf(),
             path.valid(self.constants.arch, self.level),
             self.remove(path).1 is Ok,
             self.fully_populated(),
@@ -1870,11 +1871,11 @@ impl PTTreeModel {
         Self::new(PTTreeNode::new(config, 0))
     }
 
-    /// Invariants. The tree structure and node configurations are valid.
+    /// wf. The tree structure and node configurations are valid.
     /// The tree is fully populated or empty.
-    pub open spec fn invariants(self) -> bool {
+    pub open spec fn wf(self) -> bool {
         &&& self.root.level == 0
-        &&& self.root.invariants()
+        &&& self.root.wf()
         &&& self.root.fully_populated() || self.root.empty()
     }
 
@@ -1884,23 +1885,23 @@ impl PTTreeModel {
     }
 
     /// Get physical memory lower bound.
-    pub open spec fn pmem_lb(self) -> PAddr {
+    pub open spec fn pmem_lb(self) -> SpecPAddr {
         self.root.constants.pmem_lb
     }
 
     /// Get physical memory upper bound.
-    pub open spec fn pmem_ub(self) -> PAddr {
+    pub open spec fn pmem_ub(self) -> SpecPAddr {
         self.root.constants.pmem_ub
     }
 
     /// Interpret the tree as `(vbase, frame)` mappings.
-    pub open spec fn mappings(self) -> Map<VAddr, Frame> {
+    pub open spec fn mappings(self) -> Map<SpecVAddr, SpecFrame> {
         Map::new(
-            |vbase: VAddr|
+            |vbase: SpecVAddr|
                 exists|path| #[trigger]
                     self.root.path_mappings().contains_key(path) && path.to_vaddr(self.arch())
                         == vbase,
-            |vbase: VAddr|
+            |vbase: SpecVAddr|
                 {
                     let path = choose|path| #[trigger]
                         self.root.path_mappings().contains_key(path) && path.to_vaddr(self.arch())
@@ -1911,8 +1912,8 @@ impl PTTreeModel {
     }
 
     /// If there exists a mapping for `vaddr`.
-    pub open spec fn has_mapping_for(self, vaddr: VAddr) -> bool {
-        exists|vbase: VAddr, frame: Frame|
+    pub open spec fn has_mapping_for(self, vaddr: SpecVAddr) -> bool {
+        exists|vbase: SpecVAddr, frame: SpecFrame|
             {
                 &&& #[trigger] self.mappings().contains_pair(vbase, frame)
                 &&& vaddr.within(vbase, frame.size.as_nat())
@@ -1920,11 +1921,11 @@ impl PTTreeModel {
     }
 
     /// Get the mapping for `vaddr`.
-    pub open spec fn mapping_for(self, vaddr: VAddr) -> (VAddr, Frame)
+    pub open spec fn mapping_for(self, vaddr: SpecVAddr) -> (SpecVAddr, SpecFrame)
         recommends
             self.has_mapping_for(vaddr),
     {
-        choose|vbase: VAddr, frame: Frame|
+        choose|vbase: SpecVAddr, frame: SpecFrame|
             {
                 &&& #[trigger] self.mappings().contains_pair(vbase, frame)
                 &&& vaddr.within(vbase, frame.size.as_nat())
@@ -1932,11 +1933,11 @@ impl PTTreeModel {
     }
 
     /// If mapping `(vaddr, frame)` overlaps with existing virtual memory.
-    pub open spec fn overlaps_vmem(self, vbase: VAddr, frame: Frame) -> bool {
-        exists|vbase2: VAddr|
+    pub open spec fn overlaps_vmem(self, vbase: SpecVAddr, frame: SpecFrame) -> bool {
+        exists|vbase2: SpecVAddr|
             {
                 &&& #[trigger] self.mappings().contains_key(vbase2)
-                &&& VAddr::overlap(
+                &&& SpecVAddr::overlap(
                     vbase2,
                     self.mappings()[vbase2].size.as_nat(),
                     vbase,
@@ -1960,9 +1961,9 @@ impl PTTreeModel {
     /// Map a virtual address to a physical frame.
     ///
     /// If mapping succeeds, return `Ok` and the updated tree.
-    pub open spec fn map(self, vbase: VAddr, frame: Frame) -> (Self, PagingResult)
+    pub open spec fn map(self, vbase: SpecVAddr, frame: SpecFrame) -> (Self, PagingResult)
         recommends
-            self.invariants(),
+            self.wf(),
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
@@ -1985,9 +1986,9 @@ impl PTTreeModel {
     /// Unmap a virtual address.
     ///
     /// If unmapping succeeds, return `Ok` and the updated tree.
-    pub open spec fn unmap(self, vbase: VAddr) -> (Self, PagingResult)
+    pub open spec fn unmap(self, vbase: SpecVAddr) -> (Self, PagingResult)
         recommends
-            self.invariants(),
+            self.wf(),
     {
         let path = PTTreePath::from_vaddr_root(
             vbase,
@@ -2005,9 +2006,9 @@ impl PTTreeModel {
     /// Query a virtual address, return the mapped physical frame.
     ///
     /// If there is no mapping for the virtual address, return `Err(())`.
-    pub open spec fn query(self, vaddr: VAddr) -> PagingResult<(VAddr, Frame)>
+    pub open spec fn query(self, vaddr: SpecVAddr) -> PagingResult<(SpecVAddr, SpecFrame)>
         recommends
-            self.invariants(),
+            self.wf(),
     {
         let path = PTTreePath::from_vaddr_root(
             vaddr,
@@ -2026,13 +2027,13 @@ impl PTTreeModel {
     /// Lemma. `mappings` is consistent with `root.path_mappings`.
     pub proof fn lemma_mappings_consistent_with_path_mappings(self)
         requires
-            self.invariants(),
+            self.wf(),
         ensures
-            forall|path: PTTreePath, frame: Frame| #[trigger]
+            forall|path: PTTreePath, frame: SpecFrame| #[trigger]
                 self.root.path_mappings().contains_pair(path, frame)
                     ==> self.mappings().contains_pair(path.to_vaddr(self.arch()), frame),
     {
-        assert forall|path: PTTreePath, frame: Frame| #[trigger]
+        assert forall|path: PTTreePath, frame: SpecFrame| #[trigger]
             self.root.path_mappings().contains_pair(
                 path,
                 frame,
@@ -2050,7 +2051,7 @@ impl PTTreeModel {
     /// Lemma. All `(vbase, frame)` mappings have valid size and alignment.
     pub proof fn lemma_mappings_valid(self)
         requires
-            self.invariants(),
+            self.wf(),
         ensures
             forall|vbase, frame| #[trigger]
                 self.mappings().contains_pair(vbase, frame) ==> {
@@ -2084,13 +2085,13 @@ impl PTTreeModel {
     /// Lemma. All `(vbase, frame)` mappings do not overlap in virtual memory.
     pub proof fn lemma_mappings_nonoverlap_in_vmem(self)
         requires
-            self.invariants(),
+            self.wf(),
         ensures
             forall|vbase1, frame1, vbase2, frame2|
                 self.mappings().contains_pair(vbase1, frame1) && self.mappings().contains_pair(
                     vbase2,
                     frame2,
-                ) ==> vbase1 == vbase2 || !VAddr::overlap(
+                ) ==> vbase1 == vbase2 || !SpecVAddr::overlap(
                     vbase1,
                     frame1.size.as_nat(),
                     vbase2,
@@ -2101,7 +2102,7 @@ impl PTTreeModel {
             self.mappings().contains_pair(vbase1, frame1) && self.mappings().contains_pair(
                 vbase2,
                 frame2,
-            ) implies vbase1 == vbase2 || !VAddr::overlap(
+            ) implies vbase1 == vbase2 || !SpecVAddr::overlap(
             vbase1,
             frame1.size.as_nat(),
             vbase2,
@@ -2125,33 +2126,33 @@ impl PTTreeModel {
         }
     }
 
-    /// Theorem. `map` preserves invariants.
-    pub proof fn map_preserves_invariants(self, vbase: VAddr, frame: Frame)
+    /// Theorem. `map` preserves wf.
+    pub proof fn map_preserves_wf(self, vbase: SpecVAddr, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
             frame.base.0 >= self.pmem_lb().0,
             frame.base.0 + frame.size.as_nat() <= self.pmem_ub().0,
         ensures
-            self.map(vbase, frame).0.invariants(),
+            self.map(vbase, frame).0.wf(),
     {
         let path = PTTreePath::from_vaddr_root(
             vbase,
             self.arch(),
             self.arch().level_of_frame_size(frame.size),
         );
-        self.root.lemma_insert_preserves_invariants(path, frame);
+        self.root.lemma_insert_preserves_wf(path, frame);
         if self.map(vbase, frame).1 is Ok {
             self.root.lemma_insert_preserves_fully_populated(path, frame);
         }
     }
 
     /// Lemma. `map` succeeds if the address does not overlap with any existing mapped region.
-    pub proof fn lemma_nonoverlap_implies_map_ok(self, vbase: VAddr, frame: Frame)
+    pub proof fn lemma_nonoverlap_implies_map_ok(self, vbase: SpecVAddr, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
@@ -2191,7 +2192,7 @@ impl PTTreeModel {
                 if path.has_prefix(path2) {
                     PTTreePath::lemma_to_vaddr_lower_bound(self.arch(), path, path2);
                     PTTreePath::lemma_to_vaddr_upper_bound(self.arch(), path, path2);
-                    assert(VAddr::overlap(
+                    assert(SpecVAddr::overlap(
                         path.to_vaddr(self.arch()),
                         frame.size.as_nat(),
                         path2.to_vaddr(self.arch()),
@@ -2200,7 +2201,7 @@ impl PTTreeModel {
                 } else {
                     PTTreePath::lemma_to_vaddr_lower_bound(self.arch(), path2, path);
                     PTTreePath::lemma_to_vaddr_upper_bound(self.arch(), path2, path);
-                    assert(VAddr::overlap(
+                    assert(SpecVAddr::overlap(
                         path2.to_vaddr(self.arch()),
                         frame2.size.as_nat(),
                         path.to_vaddr(self.arch()),
@@ -2212,9 +2213,9 @@ impl PTTreeModel {
     }
 
     /// Lemma. The address does not overlap with any existing mapped region if `map` succeeds.
-    pub proof fn lemma_map_ok_implies_nonoverlap(self, vbase: VAddr, frame: Frame)
+    pub proof fn lemma_map_ok_implies_nonoverlap(self, vbase: SpecVAddr, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
@@ -2225,7 +2226,7 @@ impl PTTreeModel {
             !self.overlaps_vmem(vbase, frame),
     {
         let (new, res) = self.map(vbase, frame);
-        self.map_preserves_invariants(vbase, frame);
+        self.map_preserves_wf(vbase, frame);
 
         self.lemma_map_adds_mapping(vbase, frame);
         assert(new.mappings() == self.mappings().insert(vbase, frame));
@@ -2239,7 +2240,7 @@ impl PTTreeModel {
         self.lemma_mappings_nonoverlap_in_vmem();
         // So the newly added mapping cannot overlap with any existing mapping
         assert(forall|vbase2, frame2| #[trigger]
-            self.mappings().contains_pair(vbase2, frame2) ==> !VAddr::overlap(
+            self.mappings().contains_pair(vbase2, frame2) ==> !SpecVAddr::overlap(
                 vbase2,
                 frame2.size.as_nat(),
                 vbase,
@@ -2249,9 +2250,9 @@ impl PTTreeModel {
     }
 
     /// Lemma. A successful `map` operation adds the `(vbase, frame)` pair to mappings.
-    pub proof fn lemma_map_adds_mapping(self, vbase: VAddr, frame: Frame)
+    pub proof fn lemma_map_adds_mapping(self, vbase: SpecVAddr, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
@@ -2262,7 +2263,7 @@ impl PTTreeModel {
             self.map(vbase, frame).0.mappings() === self.mappings().insert(vbase, frame),
     {
         let new = self.map(vbase, frame).0;
-        self.map_preserves_invariants(vbase, frame);
+        self.map_preserves_wf(vbase, frame);
 
         // `path` is the path to the entry containing the mapping.
         let path = PTTreePath::from_vaddr_root(
@@ -2332,9 +2333,9 @@ impl PTTreeModel {
     }
 
     /// Lemma. `map` succeeds implies `vbase` not in `mappings()`.
-    pub proof fn lemma_map_ok_implies_vbase_nonexist(self, vbase: VAddr, frame: Frame)
+    pub proof fn lemma_map_ok_implies_vbase_nonexist(self, vbase: SpecVAddr, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
@@ -2345,7 +2346,7 @@ impl PTTreeModel {
             !self.mappings().contains_key(vbase),
     {
         let new = self.map(vbase, frame).0;
-        self.map_preserves_invariants(vbase, frame);
+        self.map_preserves_wf(vbase, frame);
 
         let path = PTTreePath::from_vaddr_root(
             vbase,
@@ -2373,21 +2374,21 @@ impl PTTreeModel {
         }
     }
 
-    /// Theorem. `unmap` preserves invariants.
-    pub proof fn unmap_preserves_invariants(self, vbase: VAddr)
+    /// Theorem. `unmap` preserves wf.
+    pub proof fn unmap_preserves_wf(self, vbase: SpecVAddr)
         requires
-            self.invariants(),
+            self.wf(),
             self.unmap(vbase).1 is Ok,
         ensures
-            self.unmap(vbase).0.invariants(),
+            self.unmap(vbase).0.wf(),
     {
         let path = PTTreePath::from_vaddr_root(
             vbase,
             self.arch(),
             (self.arch().level_count() - 1) as nat,
         );
-        self.root.lemma_remove_preserves_invariants(path);
-        self.root.remove(path).0.lemma_prune_preserves_invariants(path);
+        self.root.lemma_remove_preserves_wf(path);
+        self.root.remove(path).0.lemma_prune_preserves_wf(path);
 
         if self.root.empty() {
             self.root.lemma_empty_implies_remove_fail(path);
@@ -2397,9 +2398,9 @@ impl PTTreeModel {
     }
 
     /// Lemma. `unmap` succeeds implies `vbase` in `mappings()`.
-    pub proof fn lemma_unmap_ok_implies_vbase_exist(self, vbase: VAddr)
+    pub proof fn lemma_unmap_ok_implies_vbase_exist(self, vbase: SpecVAddr)
         requires
-            self.invariants(),
+            self.wf(),
             self@.unmap_pre(vbase),
             self.unmap(vbase).1 is Ok,
         ensures
@@ -2426,9 +2427,9 @@ impl PTTreeModel {
     }
 
     /// Lemma. `vbase` in `mappings()` implies `unmap` succeeds.
-    pub proof fn lemma_vbase_exist_implies_unmap_ok(self, vbase: VAddr)
+    pub proof fn lemma_vbase_exist_implies_unmap_ok(self, vbase: SpecVAddr)
         requires
-            self.invariants(),
+            self.wf(),
             self@.unmap_pre(vbase),
             self.mappings().contains_key(vbase),
         ensures
@@ -2449,16 +2450,16 @@ impl PTTreeModel {
     }
 
     /// Lemma. A successful `unmap` operation removes the `(vbase, frame)` pair from mappings.
-    pub proof fn lemma_unmap_removes_mapping(self, vbase: VAddr)
+    pub proof fn lemma_unmap_removes_mapping(self, vbase: SpecVAddr)
         requires
-            self.invariants(),
+            self.wf(),
             self@.unmap_pre(vbase),
             self.unmap(vbase).1 is Ok,
         ensures
             self.unmap(vbase).0.mappings() === self.mappings().remove(vbase),
     {
         let new = self.unmap(vbase).0;
-        self.unmap_preserves_invariants(vbase);
+        self.unmap_preserves_wf(vbase);
 
         // `path` is the path to the entry containing the mapping.
         let path = PTTreePath::from_vaddr_root(
@@ -2477,7 +2478,7 @@ impl PTTreeModel {
 
         // `path_mappings` is updated according to lemma.
         self.root.lemma_remove_removes_path_mapping(path);
-        self.root.lemma_remove_preserves_invariants(path);
+        self.root.lemma_remove_preserves_wf(path);
         self.root.remove(path).0.lemma_prune_not_affect_path_mappings(path);
 
         // `new.mappings()` is a subset of `self.mappings().remove(vbase)`.
@@ -2527,9 +2528,9 @@ impl PTTreeModel {
     }
 
     /// Lemma. `query` succeeds if the address is within a mapped region.
-    pub proof fn lemma_mapping_exist_implies_query_ok(self, vaddr: VAddr)
+    pub proof fn lemma_mapping_exist_implies_query_ok(self, vaddr: SpecVAddr)
         requires
-            self.invariants(),
+            self.wf(),
             self.has_mapping_for(vaddr),
         ensures
             self.query(vaddr) is Ok,
@@ -2605,9 +2606,9 @@ impl PTTreeModel {
     }
 
     /// Lemma. The address is within a mapped region if `query` succeeds.
-    pub proof fn lemma_query_ok_implies_mapping_exist(self, vaddr: VAddr)
+    pub proof fn lemma_query_ok_implies_mapping_exist(self, vaddr: SpecVAddr)
         requires
-            self.invariants(),
+            self.wf(),
             self.query(vaddr) is Ok,
         ensures
             self.has_mapping_for(vaddr),
@@ -2643,15 +2644,15 @@ impl PTTreeModel {
                 frame2.size.as_nat(),
             ) implies vbase2 == vbase by {
             // Prove by contradiction
-            assert(VAddr::overlap(vbase, frame.size.as_nat(), vbase2, frame2.size.as_nat()));
+            assert(SpecVAddr::overlap(vbase, frame.size.as_nat(), vbase2, frame2.size.as_nat()));
             self.lemma_mappings_nonoverlap_in_vmem();
         }
     }
 
     /// Theorem. `map` refines `PageTableState::map`.
-    pub proof fn map_refinement(self, vbase: VAddr, frame: Frame)
+    pub proof fn map_refinement(self, vbase: SpecVAddr, frame: SpecFrame)
         requires
-            self.invariants(),
+            self.wf(),
             self@.map_pre(vbase, frame),
         ensures
             ({
@@ -2672,9 +2673,9 @@ impl PTTreeModel {
     }
 
     /// Theorem. `unmap` refines `PageTableState::unmap`.
-    pub proof fn unmap_refinement(self, vbase: VAddr)
+    pub proof fn unmap_refinement(self, vbase: SpecVAddr)
         requires
-            self.invariants(),
+            self.wf(),
             self@.unmap_pre(vbase),
         ensures
             ({
@@ -2699,9 +2700,9 @@ impl PTTreeModel {
     }
 
     /// Theorem. `query` refines `PageTableState::query`.
-    pub proof fn query_refinement(self, vaddr: VAddr)
+    pub proof fn query_refinement(self, vaddr: SpecVAddr)
         requires
-            self.invariants(),
+            self.wf(),
             self@.query_pre(vaddr),
         ensures
             self@.query(vaddr, self.query(vaddr)),

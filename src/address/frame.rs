@@ -1,4 +1,4 @@
-use super::addr::{PAddr, PAddrExec, VAddr, VAddrExec};
+use super::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 use vstd::prelude::*;
 
 verus! {
@@ -116,6 +116,16 @@ impl MemAttr {
 }
 
 /// Represents a physical memory frame (Page or Block).
+pub struct SpecFrame {
+    /// The base address of the frame.
+    pub base: SpecPAddr,
+    /// The size of the frame in bytes.
+    pub size: FrameSize,
+    /// The attributes of the frame.
+    pub attr: MemAttr,
+}
+
+/// (EXEC-MODE) represents a physical memory frame (Page or Block).
 pub struct Frame {
     /// The base address of the frame.
     pub base: PAddr,
@@ -125,20 +135,10 @@ pub struct Frame {
     pub attr: MemAttr,
 }
 
-/// (EXEC-MODE) represents a physical memory frame (Page or Block).
-pub struct FrameExec {
-    /// The base address of the frame.
-    pub base: PAddrExec,
-    /// The size of the frame in bytes.
-    pub size: FrameSize,
-    /// The attributes of the frame.
-    pub attr: MemAttr,
-}
-
-impl FrameExec {
+impl Frame {
     /// Convert to Frame.
-    pub open spec fn view(self) -> Frame {
-        Frame { base: self.base@, size: self.size, attr: self.attr }
+    pub open spec fn view(self) -> SpecFrame {
+        SpecFrame { base: self.base@, size: self.size, attr: self.attr }
     }
 }
 
@@ -148,7 +148,7 @@ pub const PAGE_SIZE: usize = 0x1000;
 /// A memory region represents a contiguous range of virtual addresses with specific properties.
 pub struct MemoryRegion {
     /// The starting virtual address of the region.
-    pub start: VAddrExec,
+    pub start: VAddr,
     /// The number of 4KB pages in the region.
     pub pages: usize,
     /// The memory attributes of the region.
@@ -163,9 +163,7 @@ impl MemoryRegion {
         &&& 0 < self.pages <= usize::MAX / PAGE_SIZE
         &&& self.start@.aligned(PAGE_SIZE as nat)
         &&& self.start@.0 <= usize::MAX as nat - (self.pages as nat * PAGE_SIZE as nat)
-        &&& self.mapper.valid(
-            self.start@.0 + (self.pages as nat * PAGE_SIZE as nat),
-        )
+        &&& self.mapper.valid(self.start@.0 + (self.pages as nat * PAGE_SIZE as nat))
     }
 
     /// Check if the region is within valid virtual address space.
@@ -186,24 +184,24 @@ impl MemoryRegion {
             Mapper::Offset(off) => {
                 let max_vaddr = self.start.0 + self.pages * PAGE_SIZE;
                 off <= usize::MAX - max_vaddr
-            }
+            },
             Mapper::Fixed(_) => true,
         }
     }
 
     /// Calculate the end virtual address of the region.
-    pub fn end(&self) -> (res: VAddrExec)
+    pub fn end(&self) -> (res: VAddr)
         requires
             self.spec_valid(),
         ensures
             res@ == self.start@.offset(self.pages as nat * PAGE_SIZE as nat),
     {
-        VAddrExec(self.start.0 + self.pages * PAGE_SIZE)
+        VAddr(self.start.0 + self.pages * PAGE_SIZE)
     }
 
     /// Spec-mode overlap check.
     pub open spec fn spec_overlaps(self, other: MemoryRegion) -> bool {
-        VAddr::overlap(
+        SpecVAddr::overlap(
             self.start@,
             self.pages as nat * PAGE_SIZE as nat,
             other.start@,
@@ -252,13 +250,13 @@ impl Mapper {
         }
     }
 
-    pub fn map(&self, vaddr: VAddrExec) -> PAddrExec
+    pub fn map(&self, vaddr: VAddr) -> PAddr
         requires
             self.valid(vaddr.0 as nat),
     {
         match self {
-            Self::Offset(off) => PAddrExec(vaddr.0 + *off),
-            Self::Fixed(paddr) => PAddrExec(*paddr),
+            Self::Offset(off) => PAddr(vaddr.0 + *off),
+            Self::Fixed(paddr) => PAddr(*paddr),
         }
     }
 }

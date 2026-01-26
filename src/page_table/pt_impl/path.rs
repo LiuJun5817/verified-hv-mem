@@ -1,7 +1,7 @@
 //! Visit path of the page table tree model.
 use vstd::prelude::*;
 
-use crate::address::addr::VAddr;
+use crate::address::addr::SpecVAddr;
 use crate::page_table::pt_arch::SpecPTArch;
 
 verus! {
@@ -81,7 +81,7 @@ impl PTTreePath {
 
     /// Get a `PTTreePath` from a virtual address, used to query the page table from
     /// a given start level.
-    pub open spec fn from_vaddr(vaddr: VAddr, arch: SpecPTArch, start: nat, end: nat) -> Self
+    pub open spec fn from_vaddr(vaddr: SpecVAddr, arch: SpecPTArch, start: nat, end: nat) -> Self
         recommends
             arch.valid(),
             start <= end < arch.level_count(),
@@ -90,7 +90,7 @@ impl PTTreePath {
     }
 
     /// Get a `PTTreePath` from a virtual address, used to query the page table from root.
-    pub open spec fn from_vaddr_root(vaddr: VAddr, arch: SpecPTArch, end: nat) -> Self
+    pub open spec fn from_vaddr_root(vaddr: SpecVAddr, arch: SpecPTArch, end: nat) -> Self
         recommends
             arch.valid(),
             end < arch.level_count(),
@@ -99,7 +99,7 @@ impl PTTreePath {
     }
 
     /// Calculate the virtual address corresponding to the path from root.
-    pub open spec fn to_vaddr(self, arch: SpecPTArch) -> VAddr
+    pub open spec fn to_vaddr(self, arch: SpecPTArch) -> SpecVAddr
         recommends
             arch.valid(),
             self.valid(arch, 0),
@@ -108,7 +108,7 @@ impl PTTreePath {
             self.len(),
             |i: int| self.0[i] * arch.frame_size(i as nat).as_nat(),
         );
-        VAddr(parts.fold_left(0, |sum: nat, part| sum + part))
+        SpecVAddr(parts.fold_left(0, |sum: nat, part| sum + part))
     }
 
     /// Lemma. Two paths are equal if they have the same first element and the same tail.
@@ -221,7 +221,7 @@ impl PTTreePath {
 
     /// Lemma. `from_vaddr` produces a valid path.
     pub broadcast proof fn lemma_from_vaddr_yields_valid_path(
-        vaddr: VAddr,
+        vaddr: SpecVAddr,
         arch: SpecPTArch,
         start: nat,
         end: nat,
@@ -242,7 +242,7 @@ impl PTTreePath {
 
     /// Lemma. `from_vaddr_root` produces a valid path.
     pub broadcast proof fn lemma_from_vaddr_root_yields_valid_path(
-        vaddr: VAddr,
+        vaddr: SpecVAddr,
         arch: SpecPTArch,
         end: nat,
     )
@@ -257,7 +257,7 @@ impl PTTreePath {
 
     /// Lemma. from_vaddr(vaddr, arch, start, end).step().1 == from_vaddr(vaddr, arch, start + 1, end)
     pub broadcast proof fn lemma_from_vaddr_step(
-        vaddr: VAddr,
+        vaddr: SpecVAddr,
         arch: SpecPTArch,
         start: nat,
         end: nat,
@@ -557,7 +557,11 @@ impl PTTreePath {
 
     /// Lemma. The computed base virtual address of a path and the frame size guarantee that
     /// any derived `to_vaddr` falls within the address window.
-    pub broadcast proof fn lemma_vaddr_range_from_path(arch: SpecPTArch, vaddr: VAddr, path: Self)
+    pub broadcast proof fn lemma_vaddr_range_from_path(
+        arch: SpecPTArch,
+        vaddr: SpecVAddr,
+        path: Self,
+    )
         requires
             arch.valid(),
             path.valid(arch, 0),
@@ -582,7 +586,7 @@ impl PTTreePath {
     /// Lemma. Converting a vaddr into a path and then back exactly inverts the operation.
     pub broadcast proof fn lemma_to_vaddr_inverts_from_vaddr(
         arch: SpecPTArch,
-        vaddr: VAddr,
+        vaddr: SpecVAddr,
         path: Self,
     )
         requires

@@ -7,8 +7,8 @@ use super::{
     tree::{NodeEntry, PTTreeModel, PTTreeNode},
 };
 use crate::address::{
-    addr::{PAddr, VAddr},
-    frame::{Frame, MemAttr},
+    addr::{SpecPAddr, SpecVAddr},
+    frame::{MemAttr, SpecFrame},
 };
 use crate::page_table::{
     pt_arch::SpecPTArch,
@@ -62,14 +62,18 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     }
 
     /// Construct a `Frame` from a `PTE`.
-    pub open spec fn pte_to_frame(self, pte: G, level: nat) -> Frame {
-        Frame { base: pte.addr(), attr: pte.attr(), size: self.constants.arch.frame_size(level) }
+    pub open spec fn pte_to_frame(self, pte: G, level: nat) -> SpecFrame {
+        SpecFrame {
+            base: pte.addr(),
+            attr: pte.attr(),
+            size: self.constants.arch.frame_size(level),
+        }
     }
 
     /// If all pte in a table are invalid.
-    pub open spec fn is_table_empty(self, base: PAddr) -> bool
+    pub open spec fn is_table_empty(self, base: SpecPAddr) -> bool
         recommends
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
     {
         let level = self.pt_mem.table(base).level;
@@ -80,15 +84,15 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             ).valid()
     }
 
-    /// Invariants that ensure the page table is well-formed.
-    pub open spec fn invariants(self) -> bool {
+    /// Well-formedness of the page table.
+    pub open spec fn wf(self) -> bool {
         // Architecture
         &&& self.pt_mem.arch
             == self.constants.arch
-        // Page table memory invariants
-        &&& self.pt_mem.invariants()
+        // Page table memory well-formed
+        &&& self.pt_mem.wf()
         // For each page table entry that can be accessed
-        &&& forall|base: PAddr, idx: nat|
+        &&& forall|base: SpecPAddr, idx: nat|
             self.pt_mem.accessible(base, idx) ==> {
                 let pt_mem = self.pt_mem;
                 let table = pt_mem.table(base);
@@ -116,7 +120,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 }
             }
             // For each 2 page table entries that can be accessed
-        &&& forall|base1: PAddr, idx1: nat, base2: PAddr, idx2: nat|
+        &&& forall|base1: SpecPAddr, idx1: nat, base2: SpecPAddr, idx2: nat|
             self.pt_mem.accessible(base1, idx1) && self.pt_mem.accessible(base2, idx2) ==> {
                 let pte1 = G::from_u64(self.pt_mem.read(base1, idx1));
                 let pte2 = G::from_u64(self.pt_mem.read(base2, idx2));
@@ -132,9 +136,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     }
 
     /// Recursively construct a `PTTreeNode` from a subtable.
-    pub uninterp spec fn construct_node(self, base: PAddr, level: nat) -> PTTreeNode
+    pub uninterp spec fn construct_node(self, base: SpecPAddr, level: nat) -> PTTreeNode
         recommends
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
@@ -142,9 +146,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
 
     /// Illustrate the refinement relationship between `PageTable` and `PTTreeModel`.
     #[verifier::external_body]
-    pub proof fn construct_node_facts(self, base: PAddr, level: nat)
+    pub proof fn construct_node_facts(self, base: SpecPAddr, level: nat)
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
@@ -179,7 +183,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// View the page table implementation as a tree-model abstraction.
     pub open spec fn view(self) -> PTTreeModel
         recommends
-            self.invariants(),
+            self.wf(),
     {
         PTTreeModel { root: self.construct_node(self.pt_mem.root(), 0) }
     }
@@ -187,9 +191,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// Perform a recursive specification-level page table walk starting from a given base.
     ///
     /// Terminate upon reaching an invalid or block entry, or reaching the leaf level.
-    pub open spec fn walk(self, vaddr: VAddr, base: PAddr, level: nat) -> (G, nat)
+    pub open spec fn walk(self, vaddr: SpecVAddr, base: SpecPAddr, level: nat) -> (G, nat)
         recommends
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             level < self.constants.arch.level_count(),
@@ -206,14 +210,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// Perform a recursive specification-level page table insertion starting from a given base.
     pub open spec fn insert(
         self,
-        vbase: VAddr,
-        base: PAddr,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
         target_level: nat,
         new_pte: G,
     ) -> (Self, PagingResult)
         recommends
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             level <= target_level < self.constants.arch.level_count(),
@@ -259,9 +263,12 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     }
 
     /// Perform a recursive specification-level page table removal starting from a given base.
-    pub open spec fn remove(self, vbase: VAddr, base: PAddr, level: nat) -> (Self, PagingResult)
+    pub open spec fn remove(self, vbase: SpecVAddr, base: SpecPAddr, level: nat) -> (
+        Self,
+        PagingResult,
+    )
         recommends
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             level < self.constants.arch.level_count(),
@@ -307,9 +314,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     }
 
     /// Recursively remove empty tables along `vaddr` from `base`.
-    pub open spec fn prune(self, vaddr: VAddr, base: PAddr, level: nat) -> Self
+    pub open spec fn prune(self, vaddr: SpecVAddr, base: SpecPAddr, level: nat) -> Self
         recommends
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             level < self.constants.arch.level_count(),
@@ -341,9 +348,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
 
     /// Return the sequence of page-table base addresses visited when walking the
     /// page-table path for `vaddr` starting at table `base` on level `level`.
-    pub open spec fn collect_table_chain(self, vaddr: VAddr, base: PAddr, level: nat) -> Seq<PAddr>
+    pub open spec fn collect_table_chain(
+        self,
+        vaddr: SpecVAddr,
+        base: SpecPAddr,
+        level: nat,
+    ) -> Seq<SpecPAddr>
         recommends
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             level < self.constants.arch.level_count(),
@@ -360,15 +372,15 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     }
 
     /// Lemma. Constructing a node from memory with a valid table results in a
-    /// structurally invariant model node.
-    pub proof fn lemma_construct_node_implies_invariants(self, base: PAddr, level: nat)
+    /// well-formed node.
+    pub proof fn lemma_construct_node_implies_node_wf(self, base: SpecPAddr, level: nat)
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
         ensures
-            self.construct_node(base, level).invariants(),
+            self.construct_node(base, level).wf(),
         decreases self.constants.arch.level_count() - level,
     {
         let node = self.construct_node(base, level);
@@ -376,7 +388,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
 
         assert forall|i| 0 <= i < node.entries.len() implies {
             &&& PTTreeNode::is_entry_valid(#[trigger] node.entries[i], node.level, node.constants)
-            &&& node.entries[i] is Node ==> node.entries[i]->Node_0.invariants()
+            &&& node.entries[i] is Node ==> node.entries[i]->Node_0.wf()
         } by {
             assert(self.pt_mem.accessible(base, i as nat));
             match node.entries[i] {
@@ -390,35 +402,34 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 NodeEntry::Node(subnode) => {
                     let pte = G::from_u64(self.pt_mem.read(base, i as nat));
                     assert(self.pt_mem.accessible(base, i as nat));
-                    // Invariants ensures this
+                    // wf ensures this
                     assert(self.pt_mem.contains_table(pte.addr()));
                     assert(self.pt_mem.table(pte.addr()).level == level + 1);
                     self.construct_node_facts(pte.addr(), level + 1);
-                    self.lemma_construct_node_implies_invariants(pte.addr(), level + 1);
+                    self.lemma_construct_node_implies_node_wf(pte.addr(), level + 1);
                 },
                 NodeEntry::Empty => (),
             }
         }
     }
 
-    /// Lemma. The tree model derived from the executable page table maintains the
-    /// required invariants.
-    pub proof fn lemma_view_implies_invariants(self)
+    /// Lemma. The tree model derived from the executable page table is well-formed.
+    pub proof fn lemma_wf_implies_node_wf(self)
         requires
-            self.invariants(),
+            self.wf(),
         ensures
-            self@.invariants(),
+            self@.wf(),
     {
         self.pt_mem.lemma_contains_root();
-        self.lemma_construct_node_implies_invariants(self.pt_mem.root(), 0);
+        self.lemma_construct_node_implies_node_wf(self.pt_mem.root(), 0);
         // TODO: fully_populated not checked
         assume(false);
     }
 
     /// Lemma. Empty table --construct_node--> empty node.
-    pub proof fn lemma_empty_table_constructs_empty_node(self, base: PAddr)
+    pub proof fn lemma_empty_table_constructs_empty_node(self, base: SpecPAddr)
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
         ensures
             self.is_table_empty(base) <==> self.construct_node(
@@ -443,9 +454,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// Lemma. The chain returned by `collect_table_chain` is well-formed: each address
     /// corresponds to a valid table, table levels increase by one, and consecutive
     /// tables are linked via the PTE at the corresponding index.
-    pub proof fn lemma_table_chain_entries_valid(self, vaddr: VAddr, base: PAddr, level: nat)
+    pub proof fn lemma_table_chain_entries_valid(
+        self,
+        vaddr: SpecVAddr,
+        base: SpecPAddr,
+        level: nat,
+    )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             level < self.constants.arch.level_count(),
@@ -479,13 +495,13 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// chosen by `vaddr` cannot appear in the chain collected for `vaddr`.
     pub proof fn lemma_other_index_not_in_chain(
         self,
-        vaddr: VAddr,
-        base: PAddr,
+        vaddr: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
         idx2: nat,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             level < self.constants.arch.level_count(),
@@ -524,14 +540,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// the child table addressed by the PTE at `base2[idx2]` is also not in that chain.
     pub proof fn lemma_table_not_in_chain_implies_child_not_in_chain(
         self,
-        vaddr: VAddr,
-        base: PAddr,
+        vaddr: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
-        base2: PAddr,
+        base2: SpecPAddr,
         idx2: nat,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             level < self.constants.arch.level_count(),
@@ -572,9 +588,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
 
     /// Lemma. The specification-level walk is consistent with the node model traversal
     /// via `PTTreeNode::visit`.
-    pub proof fn lemma_walk_consistent_with_model(self, vaddr: VAddr, base: PAddr, level: nat)
+    pub proof fn lemma_walk_consistent_with_model(
+        self,
+        vaddr: SpecVAddr,
+        base: SpecPAddr,
+        level: nat,
+    )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
@@ -606,8 +627,8 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let arch = self.constants.arch;
         let end = (arch.level_count() - 1) as nat;
         let path = PTTreePath::from_vaddr(vaddr, arch, level, end);
-        // Precondition of `visit`: node.invariants and path.valid
-        self.lemma_construct_node_implies_invariants(base, level);
+        // Precondition of `visit`: node.wf and path.valid
+        self.lemma_construct_node_implies_node_wf(base, level);
         let visited = node.visit(path);
 
         let (idx, remain) = path.step();
@@ -628,15 +649,15 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         }
     }
 
-    /// Lemma. Allocating an intermediate table preserves invariants.
-    pub proof fn lemma_alloc_intermediate_table_preserves_invariants(
+    /// Lemma. Allocating an intermediate table preserves wf.
+    pub proof fn lemma_alloc_intermediate_table_preserves_wf(
         self,
-        base: PAddr,
+        base: SpecPAddr,
         level: nat,
         idx: nat,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level + 1 < self.constants.arch.level_count(),
@@ -650,7 +671,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                     idx,
                     G::new(table.base, MemAttr::spec_default(), false).to_u64(),
                 );
-                Self::new(pt_mem, self.constants).invariants()
+                Self::new(pt_mem, self.constants).wf()
             }),
     {
         broadcast use crate::page_table::pte::group_pte_lemmas;
@@ -663,7 +684,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         );
         let s2 = Self::new(pt_mem, self.constants);
 
-        assert forall|base2: PAddr, idx2: nat| pt_mem.accessible(base2, idx2) implies {
+        assert forall|base2: SpecPAddr, idx2: nat| pt_mem.accessible(base2, idx2) implies {
             let table2 = pt_mem.table(base2);
             let pte = G::from_u64(pt_mem.read(base2, idx2));
             let addr = pte.addr();
@@ -706,7 +727,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 }
             }
         }
-        assert forall|base1: PAddr, idx1: nat, base2: PAddr, idx2: nat|
+        assert forall|base1: SpecPAddr, idx1: nat, base2: SpecPAddr, idx2: nat|
             pt_mem.accessible(base1, idx1) && pt_mem.accessible(base2, idx2) implies {
             let pte1 = G::from_u64(pt_mem.read(base1, idx1));
             let pte2 = G::from_u64(pt_mem.read(base2, idx2));
@@ -734,15 +755,15 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// Lemma. `insert` does not affect existing tables.
     pub proof fn lemma_insert_preserves_old_tables(
         self,
-        vbase: VAddr,
-        base: PAddr,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
         target_level: nat,
         new_pte: G,
-        base2: PAddr,
+        base2: SpecPAddr,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level <= target_level < self.constants.arch.level_count(),
@@ -761,7 +782,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         if level < target_level {
             if pte.valid() {
                 if !pte.huge() {
-                    self.lemma_insert_preserves_invariants(
+                    self.lemma_insert_preserves_wf(
                         vbase,
                         pte.addr(),
                         level + 1,
@@ -784,8 +805,8 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                     idx,
                     G::new(table.base, MemAttr::spec_default(), false).to_u64(),
                 );
-                self.lemma_alloc_intermediate_table_preserves_invariants(base, level, idx);
-                // Ensures `pt_mem` after `alloc_table` satisfies the invariants
+                self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
+                // Ensures `pt_mem` after `alloc_table` satisfies the wf
                 Self::new(pt_mem, self.constants).lemma_insert_preserves_old_tables(
                     vbase,
                     table.base,
@@ -801,14 +822,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// Lemma. `insert` does not change the root of the page table.
     pub proof fn lemma_insert_preserves_root(
         self,
-        vbase: VAddr,
-        base: PAddr,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
         target_level: nat,
         new_pte: G,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level <= target_level < self.constants.arch.level_count(),
@@ -845,31 +866,31 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
 
-                self.lemma_alloc_intermediate_table_preserves_invariants(base, level, idx);
-                assert(s2.invariants());
+                self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
+                assert(s2.wf());
                 s2.lemma_insert_preserves_root(vbase, table.base, level + 1, target_level, new_pte)
             }
         }
     }
 
-    /// Lemma. Inserting an entry using `insert` preserves the page table invariants.
-    pub proof fn lemma_insert_preserves_invariants(
+    /// Lemma. Inserting an entry using `insert` preserves the page table wf.
+    pub proof fn lemma_insert_preserves_wf(
         self,
-        vbase: VAddr,
-        base: PAddr,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
         target_level: nat,
         new_pte: G,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
         ensures
             self.insert(vbase, base, level, target_level, new_pte).0.constants == self.constants,
-            self.insert(vbase, base, level, target_level, new_pte).0.invariants(),
+            self.insert(vbase, base, level, target_level, new_pte).0.wf(),
         decreases target_level - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
@@ -880,7 +901,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             if pte.valid() {
                 if !pte.huge() {
                     // Recursively insert into the next table
-                    self.lemma_insert_preserves_invariants(
+                    self.lemma_insert_preserves_wf(
                         vbase,
                         pte.addr(),
                         level + 1,
@@ -899,15 +920,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
 
-                self.lemma_alloc_intermediate_table_preserves_invariants(base, level, idx);
-                assert(s2.invariants());
-                s2.lemma_insert_preserves_invariants(
-                    vbase,
-                    table.base,
-                    level + 1,
-                    target_level,
-                    new_pte,
-                );
+                self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
+                assert(s2.wf());
+                s2.lemma_insert_preserves_wf(vbase, table.base, level + 1, target_level, new_pte);
             }
         }
     }
@@ -915,14 +930,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// Lemma. When `insert` allocates an intermediate table, the result must succeed (`Ok`).
     pub proof fn lemma_insert_intermediate_node_results_ok(
         self,
-        vbase: VAddr,
-        base: PAddr,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
         target_level: nat,
         new_pte: G,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level <= target_level < self.constants.arch.level_count(),
@@ -953,8 +968,8 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             );
             // `s2` is the state after allocating an intermediate table
             let s2 = Self::new(pt_mem, self.constants);
-            self.lemma_alloc_intermediate_table_preserves_invariants(base, level, idx);
-            assert(s2.invariants());
+            self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
+            assert(s2.wf());
 
             let (_, insert_res) = s2.insert(vbase, table.base, level + 1, target_level, new_pte);
             let idx = s2.constants.arch.pte_index(vbase, level + 1);
@@ -978,15 +993,15 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// Tables outside the path are preserved unchanged.
     pub proof fn lemma_insert_preserves_tables_outside_chain(
         self,
-        vbase: VAddr,
-        base: PAddr,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
         target_level: nat,
         new_pte: G,
-        base2: PAddr,
+        base2: SpecPAddr,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             level <= target_level < self.constants.arch.level_count(),
@@ -1038,8 +1053,8 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 );
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
-                self.lemma_alloc_intermediate_table_preserves_invariants(base, level, idx);
-                assert(s2.invariants());
+                self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
+                assert(s2.wf());
 
                 let pte = G::new(table.base, MemAttr::spec_default(), false);
                 let tables = s2.collect_table_chain(vbase, base, level);
@@ -1068,16 +1083,16 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// on the path.
     pub proof fn lemma_insert_preserves_unrelated_node(
         self,
-        vbase: VAddr,
-        base: PAddr,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
         target_level: nat,
         new_pte: G,
-        base2: PAddr,
+        base2: SpecPAddr,
         level2: nat,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             self.pt_mem.contains_table(base2),
@@ -1097,7 +1112,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases self.constants.arch.level_count() - level2,
     {
         let s2 = self.insert(vbase, base, level, target_level, new_pte).0;
-        self.lemma_insert_preserves_invariants(vbase, base, level, target_level, new_pte);
+        self.lemma_insert_preserves_wf(vbase, base, level, target_level, new_pte);
         self.lemma_insert_preserves_tables_outside_chain(
             vbase,
             base,
@@ -1159,14 +1174,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// Lemma. The implementation-level insertion is consistent with the tree model.
     pub proof fn lemma_insert_consistent_with_model(
         self,
-        vbase: VAddr,
-        base: PAddr,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
         target_level: nat,
         new_pte: G,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level <= target_level < self.constants.arch.level_count(),
@@ -1185,7 +1200,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
 
         let new_frame = self.pte_to_frame(new_pte, target_level);
         let (s2, res) = self.insert(vbase, base, level, target_level, new_pte);
-        self.lemma_insert_preserves_invariants(vbase, base, level, target_level, new_pte);
+        self.lemma_insert_preserves_wf(vbase, base, level, target_level, new_pte);
         self.lemma_insert_preserves_old_tables(vbase, base, level, target_level, new_pte, base);
 
         let node = self.construct_node(base, level);
@@ -1195,8 +1210,8 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
 
         let arch = self.constants.arch;
         let path = PTTreePath::from_vaddr(vbase, arch, level, target_level);
-        self.lemma_construct_node_implies_invariants(base, level);
-        s2.lemma_construct_node_implies_invariants(base, level);
+        self.lemma_construct_node_implies_node_wf(base, level);
+        s2.lemma_construct_node_implies_node_wf(base, level);
 
         let (idx, remain) = path.step();
         let entry = node.entries[idx as int];
@@ -1204,7 +1219,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let pte = G::from_u64(self.pt_mem.read(base, idx));
 
         let right = node.insert(path, new_frame).0;
-        node.lemma_insert_preserves_invariants(path, new_frame);
+        node.lemma_insert_preserves_wf(path, new_frame);
 
         if level >= target_level {
             if !pte.valid() {
@@ -1292,7 +1307,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                     G::new(table.base, MemAttr::spec_default(), false).to_u64(),
                 );
                 let subtable_base = table.base;
-                self.lemma_alloc_intermediate_table_preserves_invariants(base, level, idx);
+                self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
 
                 // s3 is the state after allocating a new intermediate table
                 let s3 = Self::new(written, self.constants);
@@ -1336,35 +1351,35 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         }
     }
 
-    /// Lemma. Removing a page table entry using `remove` maintains the page table invariants.
-    pub proof fn lemma_remove_preserves_invariants(self, vbase: VAddr, base: PAddr, level: nat)
+    /// Lemma. Removing a page table entry using `remove` maintains the page table wf.
+    pub proof fn lemma_remove_preserves_wf(self, vbase: SpecVAddr, base: SpecPAddr, level: nat)
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
         ensures
-            self.remove(vbase, base, level).0.invariants(),
+            self.remove(vbase, base, level).0.wf(),
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
         let pte = G::from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
         if self.pte_points_to_table(pte, level) {
-            self.lemma_remove_preserves_invariants(vbase, pte.addr(), level + 1)
+            self.lemma_remove_preserves_wf(vbase, pte.addr(), level + 1)
         }
     }
 
     /// Lemma. `remove` does not affect existing tables.
     pub proof fn lemma_remove_preserves_old_tables(
         self,
-        vbase: VAddr,
-        base: PAddr,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
-        base2: PAddr,
+        base2: SpecPAddr,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
@@ -1383,9 +1398,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     }
 
     /// Lemma. `remove` does not change the root of the page table.
-    pub proof fn lemma_remove_preserves_root(self, vbase: VAddr, base: PAddr, level: nat)
+    pub proof fn lemma_remove_preserves_root(self, vbase: SpecVAddr, base: SpecPAddr, level: nat)
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
@@ -1402,9 +1417,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     }
 
     /// Lemma. The implementation-level removal is consistent with the tree model.
-    pub proof fn lemma_remove_consistent_with_model(self, vbase: VAddr, base: PAddr, level: nat)
+    pub proof fn lemma_remove_consistent_with_model(
+        self,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
+        level: nat,
+    )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
@@ -1426,7 +1446,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
         let s2 = self.remove(vbase, base, level).0;
-        self.lemma_remove_preserves_invariants(vbase, base, level);
+        self.lemma_remove_preserves_wf(vbase, base, level);
         self.lemma_remove_preserves_old_tables(vbase, base, level, base);
 
         let node = self.construct_node(base, level);
@@ -1437,9 +1457,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let arch = self.constants.arch;
         let end = (arch.level_count() - 1) as nat;
         let path = PTTreePath::from_vaddr(vbase, arch, level, end);
-        // Precondition of `remove`: node.invariants and path.valid
-        self.lemma_construct_node_implies_invariants(base, level);
-        s2.lemma_construct_node_implies_invariants(base, level);
+        // Precondition of `remove`: node.wf and path.valid
+        self.lemma_construct_node_implies_node_wf(base, level);
+        s2.lemma_construct_node_implies_node_wf(base, level);
 
         let (idx, remain) = path.step();
         let entry = node.entries[idx as int];
@@ -1479,15 +1499,15 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         }
     }
 
-    /// Lemma. Deallocating an intermediate table preserves invariants.
-    pub proof fn lemma_dealloc_intermediate_table_preserves_invariants(
+    /// Lemma. Deallocating an intermediate table preserves wf.
+    pub proof fn lemma_dealloc_intermediate_table_preserves_wf(
         self,
-        base: PAddr,
+        base: SpecPAddr,
         level: nat,
         idx: nat,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count() - 1,
@@ -1501,7 +1521,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 let pte = G::from_u64(self.pt_mem.read(base, idx));
                 let pt_mem = self.pt_mem.dealloc_table(pte.addr());
                 let pt_mem = pt_mem.write(base, idx, G::empty().to_u64());
-                Self::new(pt_mem, self.constants).invariants()
+                Self::new(pt_mem, self.constants).wf()
             }),
     {
         broadcast use crate::page_table::pte::group_pte_lemmas;
@@ -1510,7 +1530,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let pt_mem = self.pt_mem.dealloc_table(pte.addr()).write(base, idx, G::empty().to_u64());
         let s2 = Self::new(pt_mem, self.constants);
 
-        assert forall|base2: PAddr, idx2: nat| pt_mem.accessible(base2, idx2) implies {
+        assert forall|base2: SpecPAddr, idx2: nat| pt_mem.accessible(base2, idx2) implies {
             let table2 = pt_mem.table(base2);
             let pte2 = G::from_u64(pt_mem.read(base2, idx2));
             let addr = pte2.addr();
@@ -1539,12 +1559,12 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 assert(self.pt_mem.accessible(base2, idx2));
                 G::lemma_eq_by_u64(pte2, G::from_u64(self.pt_mem.read(base2, idx2)));
                 if s2.pte_points_to_table(pte2, table2.level) {
-                    // Invariants ensures no double reference
+                    // wf ensures no double reference
                     assert(pte2.addr() != pte.addr());
                 }
             }
         }
-        assert forall|base1: PAddr, idx1: nat, base2: PAddr, idx2: nat|
+        assert forall|base1: SpecPAddr, idx1: nat, base2: SpecPAddr, idx2: nat|
             pt_mem.accessible(base1, idx1) && pt_mem.accessible(base2, idx2) implies {
             let pte1 = G::from_u64(pt_mem.read(base1, idx1));
             let pte2 = G::from_u64(pt_mem.read(base2, idx2));
@@ -1569,15 +1589,15 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         }
     }
 
-    /// Lemma. `prune` mantains the page table invariants.
-    pub proof fn lemma_prune_preserves_invariants(self, vaddr: VAddr, base: PAddr, level: nat)
+    /// Lemma. `prune` mantains the page table wf.
+    pub proof fn lemma_prune_preserves_wf(self, vaddr: SpecVAddr, base: SpecPAddr, level: nat)
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
         ensures
-            self.prune(vaddr, base, level).invariants(),
+            self.prune(vaddr, base, level).wf(),
             self.prune(vaddr, base, level).constants == self.constants,
         decreases self.constants.arch.level_count() - level,
     {
@@ -1586,12 +1606,12 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         assert(self.pt_mem.accessible(base, idx));
 
         if self.pte_points_to_table(pte, level) {
-            self.lemma_prune_preserves_invariants(vaddr, pte.addr(), level + 1);
+            self.lemma_prune_preserves_wf(vaddr, pte.addr(), level + 1);
             self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, base);
             self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, pte.addr());
             let s2 = self.prune(vaddr, pte.addr(), level + 1);
             if s2.is_table_empty(pte.addr()) {
-                s2.lemma_dealloc_intermediate_table_preserves_invariants(base, level, idx);
+                s2.lemma_dealloc_intermediate_table_preserves_wf(base, level, idx);
             }
         }
     }
@@ -1599,13 +1619,13 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// Lemma. `prune` does not remove tables with level lower than the current level.
     pub proof fn lemma_prune_preserves_lower_tables(
         self,
-        vaddr: VAddr,
-        base: PAddr,
+        vaddr: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
-        base2: PAddr,
+        base2: SpecPAddr,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
@@ -1626,7 +1646,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         assert(self.pt_mem.accessible(base, idx));
 
         if self.pte_points_to_table(pte, level) {
-            self.lemma_prune_preserves_invariants(vaddr, pte.addr(), level + 1);
+            self.lemma_prune_preserves_wf(vaddr, pte.addr(), level + 1);
             // `base`, `pte.addr()`, `base2` are not affected after `prune`
             self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, base);
             self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, pte.addr());
@@ -1635,9 +1655,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     }
 
     /// Lemma. `prune` does not change the root of the page table.
-    pub proof fn lemma_prune_preserves_root(self, vaddr: VAddr, base: PAddr, level: nat)
+    pub proof fn lemma_prune_preserves_root(self, vaddr: SpecVAddr, base: SpecPAddr, level: nat)
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
@@ -1650,7 +1670,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         assert(self.pt_mem.accessible(base, idx));
 
         if self.pte_points_to_table(pte, level) {
-            self.lemma_prune_preserves_invariants(vaddr, pte.addr(), level + 1);
+            self.lemma_prune_preserves_wf(vaddr, pte.addr(), level + 1);
             self.lemma_prune_preserves_root(vaddr, pte.addr(), level + 1);
             self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, base);
             self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, pte.addr());
@@ -1661,13 +1681,13 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// provided `vaddr` — all tables outside that chain are preserved unchanged.
     pub proof fn lemma_prune_preserves_tables_outside_chain(
         self,
-        vaddr: VAddr,
-        base: PAddr,
+        vaddr: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
-        base2: PAddr,
+        base2: SpecPAddr,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             level < self.constants.arch.level_count(),
@@ -1690,7 +1710,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         if self.pte_points_to_table(pte, level) {
             // PTE points to a child table: continue walk into the child table
             let s2 = self.prune(vaddr, pte.addr(), level + 1);
-            self.lemma_prune_preserves_invariants(vaddr, pte.addr(), level + 1);
+            self.lemma_prune_preserves_wf(vaddr, pte.addr(), level + 1);
             self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, base);
             self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, pte.addr());
             let tables2 = self.collect_table_chain(vaddr, pte.addr(), level + 1);
@@ -1703,7 +1723,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             assert(s2.pt_mem.table_view(base2) == self.pt_mem.table_view(base2));
             if s2.is_table_empty(pte.addr()) {
                 // Child table became empty after prune: deallocate it and update the parent PTE
-                s2.lemma_dealloc_intermediate_table_preserves_invariants(base, level, idx);
+                s2.lemma_dealloc_intermediate_table_preserves_wf(base, level, idx);
                 assert(s2.pt_mem.dealloc_table(pte.addr()).accessible(base, idx));
                 assert(base2 != pte.addr() && base2 != base);
 
@@ -1718,14 +1738,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// structurally identical after pruning.
     pub proof fn lemma_prune_preserves_unrelated_node(
         self,
-        vaddr: VAddr,
-        base: PAddr,
+        vaddr: SpecVAddr,
+        base: SpecPAddr,
         level: nat,
-        base2: PAddr,
+        base2: SpecPAddr,
         level2: nat,
     )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             self.pt_mem.table(base).level == level,
             self.pt_mem.contains_table(base2),
@@ -1740,7 +1760,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases self.constants.arch.level_count() - level2,
     {
         let s2 = self.prune(vaddr, base, level);
-        self.lemma_prune_preserves_invariants(vaddr, base, level);
+        self.lemma_prune_preserves_wf(vaddr, base, level);
         self.lemma_prune_preserves_tables_outside_chain(vaddr, base, level, base2);
         assert(self.pt_mem.table_view(base2) == s2.pt_mem.table_view(base2));
 
@@ -1790,9 +1810,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     }
 
     /// Lemma. The implementation-level prune is consistent with the tree model.
-    pub proof fn lemma_prune_consistent_with_model(self, vaddr: VAddr, base: PAddr, level: nat)
+    pub proof fn lemma_prune_consistent_with_model(
+        self,
+        vaddr: SpecVAddr,
+        base: SpecPAddr,
+        level: nat,
+    )
         requires
-            self.invariants(),
+            self.wf(),
             self.pt_mem.contains_table(base),
             level == self.pt_mem.table(base).level,
             level < self.constants.arch.level_count(),
@@ -1814,7 +1839,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
         let s2 = self.prune(vaddr, base, level);
-        self.lemma_prune_preserves_invariants(vaddr, base, level);
+        self.lemma_prune_preserves_wf(vaddr, base, level);
         self.lemma_prune_preserves_lower_tables(vaddr, base, level, base);
 
         let node = self.construct_node(base, level);
@@ -1825,8 +1850,8 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let arch = self.constants.arch;
         let end = (arch.level_count() - 1) as nat;
         let path = PTTreePath::from_vaddr(vaddr, arch, level, end);
-        self.lemma_construct_node_implies_invariants(base, level);
-        s2.lemma_construct_node_implies_invariants(base, level);
+        self.lemma_construct_node_implies_node_wf(base, level);
+        s2.lemma_construct_node_implies_node_wf(base, level);
 
         let (idx, remain) = path.step();
         let entry = node.entries[idx as int];
@@ -1834,7 +1859,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let pte = G::from_u64(self.pt_mem.read(base, idx));
 
         let right = node.prune(path);
-        node.lemma_prune_preserves_invariants(path);
+        node.lemma_prune_preserves_wf(path);
 
         if self.pte_points_to_table(pte, level) {
             // `pte` points to a subtable
@@ -1844,7 +1869,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             let s3 = self.prune(vaddr, subtable_base, level + 1);
             let new_subnode = subnode.prune(remain);
             // Recursive call shows subnode is updated according to model
-            self.lemma_prune_preserves_invariants(vaddr, subtable_base, level + 1);
+            self.lemma_prune_preserves_wf(vaddr, subtable_base, level + 1);
             self.lemma_prune_consistent_with_model(vaddr, subtable_base, level + 1);
             PTTreePath::lemma_from_vaddr_step(vaddr, arch, level, end);
             assert(s3.construct_node(subtable_base, level + 1) == new_subnode);
