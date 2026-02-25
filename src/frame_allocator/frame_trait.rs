@@ -20,16 +20,23 @@ pub open spec fn paddr_to_idx(base: SpecPAddr, addr: SpecPAddr, page_size: usize
 
 /// Physical frame allocator, supporting allocation and deallocation of frames.
 pub trait FrameAllocator {
+    /// View the frame allocator as a sequence of booleans, where true means the frame is free 
+    /// and false means the frame is allocated.
     spec fn view(&self) -> Seq<bool>;
 
+    /// Base address of the memory region managed by the frame allocator.
     spec fn base(&self) -> SpecPAddr;
 
+    /// Spec function to return the capacity of the frame allocator in number of pages.
     spec fn cap_pages() -> (res: usize);
 
+    /// The well-formedness of the frame allocator.
     spec fn wf(&self) -> bool;
 
+    /// Spec function to return the page size in bytes.
     spec fn spec_page_size() -> usize;
 
+    /// The page size in bytes.
     fn page_size() -> (res: usize)
         ensures
             res == Self::spec_page_size(),
@@ -151,6 +158,14 @@ pub trait FrameAllocator {
                     || paddr_to_idx(old(self).base(), target.view(), Self::spec_page_size())
                     + frame_count <= j < Self::cap_pages()) ==> self@[j] == old(self)@[j],
             self@.len() == old(self)@.len(),
+    ;
+
+    /// Lemma. Prove that the view length equals the capacity in pages.
+    proof fn lemma_view_len_eq_cap_pages(&self)
+        requires
+            self.wf(),
+        ensures
+            self.view().len() == Self::cap_pages(),
     ;
 }
 
