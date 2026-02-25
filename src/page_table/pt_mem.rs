@@ -2,15 +2,19 @@
 //!
 //! Page Table Memory is a collection of page tables, and provides read/write, alloc/dealloc functionality.
 //! The implementation should refine the specification defined in `spec::memory::PageTableMem`.
+use std::marker::PhantomData;
 use vstd::prelude::*;
 
-use crate::address::{
-    addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
-    frame::FrameSize,
-};
+use crate::global_allocator::frame::{self, GlobalFrameAllocator};
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
-
-mod imp;
+use crate::{
+    address::{
+        addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
+        frame::FrameSize,
+    },
+    frame_allocator::frame_trait::FrameAllocator,
+    global_allocator::{frame::Frame4K, GlobalAllocator, Resource},
+};
 
 verus! {
 
@@ -513,87 +517,123 @@ pub broadcast group group_pt_mem_lemmas {
     SpecPageTableMem::lemma_write_preserves_wf,
 }
 
-/// Specifiaction that executable page table memory should satisfy.
-pub trait PageTableMem: Sized {
-    /// View as an abstract page table memory.
-    open spec fn view(self) -> SpecPageTableMem {
-        // If the exec-mode page table memory implementation doesn't want to provide proof,
-        // it could just use this default version, which will not affect functionality.
-        //
-        // However, this may lead to unsafety since Verus cannot reason about the page table memory structure.
-        SpecPageTableMem { arch: SpecPTArch(Seq::empty()), tables: Seq::empty() }
+/// Concrete page table memory implementation. The type parameter `A` is the backend frame
+/// allocator used to allocate/deallocate page tables.
+pub struct PageTableMem<A> where A: FrameAllocator {
+    /// Page table architecture
+    pub arch: PTArch,
+    /// Global frame allocator client id
+    pub cid: usize,
+    /// Root page table address, should be allocated at initialization and never change after that.
+    pub root: PAddr,
+    /// Phantom data
+    pub _phantom: PhantomData<A>,
+}
+
+impl<A> PageTableMem<A> where A: FrameAllocator {
+    /// Get the abstract view of the page table memory, based on the global frame allocator state.
+    pub open spec fn view(&self, allocator: &GlobalFrameAllocator<A>) -> SpecPageTableMem {
+        // TODO
+        SpecPageTableMem { tables: Seq::empty(), arch: self.arch.view() }
     }
 
     /// Invariants that must be implied at initial state and preseved after each operation.
-    spec fn invariants(self) -> bool;
+    pub open spec fn invariants(&self, allocator: &GlobalFrameAllocator<A>) -> bool {
+        // Invariants of the page table memory.
+        &&& self.arch.view().valid()
+        // Invariants of the global allocator.
+        &&& allocator.invariants()
+        // The client is valid.
+        &&& allocator.view().clients.contains_key(
+            self.cid as nat,
+        )
+        // The root table is allocated and has level 0.
+        &&& allocator.view().clients[self.cid as nat].contains(Frame4K(self.root).to_nat())
+    }
 
-    /// Physical address of the root page table.
-    fn root(&self) -> (res: PAddr)
+    /// Create a new page table memory.
+    pub fn new(allocator: &mut GlobalFrameAllocator<A>, cid: usize, arch: PTArch) -> (res: Self)
         requires
-            self@.tables.len() > 0,
+            allocator.has_client(cid),
+            allocator.invariants(),
+            allocator.view().clients[cid as nat].is_empty(),
         ensures
-            res@ == self@.root(),
-    ;
+            res.view(allocator).init(),
+    {
+        let root_frame = allocator.alloc(cid);
+        Self { arch, cid, root: root_frame.0, _phantom: PhantomData }
+    }
 
-    /// If a table is empty.
-    fn is_table_empty(&self, base: PAddr) -> (res: bool)
+    /// Check if a table is empty.
+    pub fn is_table_empty(&self, allocator: &GlobalFrameAllocator<A>, base: PAddr) -> (res: bool)
         requires
-            self@.contains_table(base@),
+            self.invariants(allocator),
+            allocator.view().clients.contains_key(self.cid as nat),
+            allocator.invariants(),
+            allocator.view().clients[self.cid as nat].contains(Frame4K(base).to_nat()),
         ensures
-            res == self@.is_table_empty(base@),
-    ;
+            res == self.view(allocator).is_table_empty(base@),
+    {
+        false
+    }
 
     /// Allocate a new table and returns the table base address and size.
-    fn alloc_table(&mut self, level: usize) -> (res: (PAddr, FrameSize))
+    pub fn alloc_table(&self, allocator: &mut GlobalFrameAllocator<A>, level: usize) -> (res: (
+        PAddr,
+        FrameSize,
+    ))
         requires
-            old(self).invariants(),
-            old(self)@.alloc_table_pre(level as nat),
-        ensures
-            self.invariants(),
-            SpecPageTableMem::alloc_table_spec(
-                old(self)@,
-                self@,
-                level as nat,
-                SpecTable { base: res.0@, size: res.1, level: level as nat },
-            ),
-    ;
+            self.invariants(old(allocator)),
+            old(allocator).view().clients.contains_key(self.cid as nat),
+            old(allocator).invariants(),
+            !old(allocator).view().free.is_empty(),
+    {
+        let frame = allocator.alloc(self.cid);
+        // The client should get a new frame.
+        proof {
+            assert(allocator.view().clients[self.cid as nat].contains(frame.to_nat()));
+        }
+        (frame.0, FrameSize::Size4K)
+    }
 
     /// Deallocate a table.
-    fn dealloc_table(&mut self, base: PAddr)
+    pub fn dealloc_table(&self, allocator: &mut GlobalFrameAllocator<A>, base: PAddr)
         requires
-            old(self).invariants(),
-            old(self)@.dealloc_table_pre(base@),
-        ensures
-            self.invariants(),
-            SpecPageTableMem::dealloc_table_spec(old(self)@, self@, base@),
-    ;
+            self.invariants(old(allocator)),
+            old(allocator).view().clients.contains_key(self.cid as nat),
+            old(allocator).invariants(),
+            old(allocator).view().clients[self.cid as nat].contains(Frame4K(base).to_nat()),
+    {
+        // For simplicity we assume the deallocated table is always empty, so we don't need to zero it.
+        allocator.dealloc(self.cid, Frame4K(base));
+    }
 
     /// Get the value at the given index in the given table.
-    fn read(&self, base: PAddr, index: usize) -> (res: u64)
+    pub fn read(&self, allocator: &GlobalFrameAllocator<A>, base: PAddr, index: usize) -> u64
         requires
-            self.invariants(),
-            self@.accessible(base@, index as nat),
-        ensures
-            self@.read(base@, index as nat) == res,
-    ;
+            self.invariants(allocator),
+            self.view(allocator).accessible(base@, index as nat),
+    {
+        unsafe { (base.0 as *const u64).offset(index as isize).read_volatile() }
+    }
 
     /// Write the value to the given index in the given table.
-    fn write(&mut self, base: PAddr, index: usize, value: u64)
+    pub fn write(&self, allocator: &GlobalFrameAllocator<A>, base: PAddr, index: usize, value: u64)
         requires
-            old(self).invariants(),
-            old(self)@.write_pre(base@, index as nat),
-        ensures
-            self.invariants(),
-            SpecPageTableMem::write_spec(old(self)@, self@, base@, index as nat, value),
-    ;
+            self.invariants(allocator),
+            self.view(allocator).accessible(base@, index as nat),
+    {
+        unsafe { (base.0 as *mut u64).offset(index as isize).write_volatile(value) }
+    }
 
     /// Lemma. Invariants implies well-formedness.
-    broadcast proof fn lemma_invariants_implies_wf(self)
+    broadcast proof fn lemma_invariants_implies_wf(&self, allocator: &GlobalFrameAllocator<A>)
         requires
-            #[trigger] self.invariants(),
+            #[trigger] self.invariants(allocator),
         ensures
-            self@.wf(),
-    ;
+            self.view(allocator).wf(),
+    {
+    }
 }
 
 } // verus!
