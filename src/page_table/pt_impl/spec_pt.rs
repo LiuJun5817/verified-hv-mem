@@ -6,15 +6,17 @@ use super::{
     path::PTTreePath,
     tree::{NodeEntry, PTTreeModel, PTTreeNode},
 };
-use crate::address::{
-    addr::{SpecPAddr, SpecVAddr},
-    frame::{MemAttr, SpecFrame},
-};
 use crate::page_table::{
     pt_arch::SpecPTArch,
     pt_mem::SpecPageTableMem,
     pt_trait::{PagingResult, SpecPTConstants},
-    pte::GhostPTE,
+};
+use crate::{
+    address::{
+        addr::{SpecPAddr, SpecVAddr},
+        frame::{MemAttr, SpecFrame},
+    },
+    page_table::pte::PageTableEntry,
 };
 
 verus! {
@@ -23,47 +25,47 @@ verus! {
 broadcast use crate::page_table::pt_mem::group_pt_mem_lemmas;
 
 /// Spec-mode page table implementation.
-pub struct SpecPageTable<G: GhostPTE> {
+pub struct SpecPageTable<E: PageTableEntry> {
     /// Page table memory.
     pub pt_mem: SpecPageTableMem,
     /// Page table config constants.
     pub constants: SpecPTConstants,
     /// Phantom data.
-    pub _phantom: PhantomData<G>,
+    pub _phantom: PhantomData<E>,
 }
 
-impl<G> SpecPageTable<G> where G: GhostPTE {
+impl<E> SpecPageTable<E> where E: PageTableEntry {
     /// Wrap a page table memory and constants into a spec-mode page table.
     pub open spec fn new(pt_mem: SpecPageTableMem, constants: SpecPTConstants) -> Self {
         Self { pt_mem, constants, _phantom: PhantomData }
     }
 
     /// If `pte` points to a frame.
-    pub open spec fn pte_points_to_frame(self, pte: G, level: nat) -> bool {
-        pte.valid() && if level < self.constants.arch.level_count() - 1 {
-            pte.huge()
+    pub open spec fn pte_points_to_frame(self, pte: E, level: nat) -> bool {
+        pte.spec_valid() && if level < self.constants.arch.level_count() - 1 {
+            pte.spec_huge()
         } else {
-            !pte.huge()
+            !pte.spec_huge()
         }
     }
 
     /// If `pte` points to a table.
-    pub open spec fn pte_points_to_table(self, pte: G, level: nat) -> bool {
-        pte.valid() && level < self.constants.arch.level_count() - 1 && !pte.huge()
+    pub open spec fn pte_points_to_table(self, pte: E, level: nat) -> bool {
+        pte.spec_valid() && level < self.constants.arch.level_count() - 1 && !pte.spec_huge()
     }
 
     /// If `pte` points to a frame with valid address and size.
-    pub open spec fn pte_valid_frame(self, pte: G, level: nat) -> bool {
+    pub open spec fn pte_valid_frame(self, pte: E, level: nat) -> bool {
         let frame_size = self.constants.arch.frame_size(level);
         &&& self.pte_points_to_frame(pte, level)
-        &&& pte.addr().aligned(frame_size.as_nat())
+        &&& pte.spec_addr().aligned(frame_size.as_nat())
     }
 
     /// Construct a `Frame` from a `PTE`.
-    pub open spec fn pte_to_frame(self, pte: G, level: nat) -> SpecFrame {
+    pub open spec fn pte_to_frame(self, pte: E, level: nat) -> SpecFrame {
         SpecFrame {
-            base: pte.addr(),
-            attr: pte.attr(),
+            base: pte.spec_addr(),
+            attr: pte.spec_attr(),
             size: self.constants.arch.frame_size(level),
         }
     }
@@ -77,9 +79,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let level = self.pt_mem.table(base).level;
         forall|idx: nat|
             #![auto]
-            idx < self.constants.arch.entry_count(level) ==> !G::from_u64(
+            idx < self.constants.arch.entry_count(level) ==> !E::spec_from_u64(
                 self.pt_mem.read(base, idx),
-            ).valid()
+            ).spec_valid()
     }
 
     /// Well-formedness of the page table.
@@ -94,11 +96,11 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             self.pt_mem.accessible(base, idx) ==> {
                 let pt_mem = self.pt_mem;
                 let table = pt_mem.table(base);
-                let pte = G::from_u64(pt_mem.read(base, idx));
-                let addr = pte.addr();
+                let pte = E::spec_from_u64(pt_mem.read(base, idx));
+                let addr = pte.spec_addr();
                 // If `table` is a leaf table, `pte` is either invalid or points to a frame
-                &&& (table.level == self.constants.arch.level_count() - 1 && pte.valid())
-                    ==> !pte.huge()
+                &&& (table.level == self.constants.arch.level_count() - 1 && pte.spec_valid())
+                    ==> !pte.spec_huge()
                 // If `pte` is valid and points to a subtable
                 &&& self.pte_points_to_table(pte, table.level) ==> {
                     // The subtable is not root
@@ -117,15 +119,15 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             // For each 2 page table entries that can be accessed
         &&& forall|base1: SpecPAddr, idx1: nat, base2: SpecPAddr, idx2: nat|
             self.pt_mem.accessible(base1, idx1) && self.pt_mem.accessible(base2, idx2) ==> {
-                let pte1 = G::from_u64(self.pt_mem.read(base1, idx1));
-                let pte2 = G::from_u64(self.pt_mem.read(base2, idx2));
+                let pte1 = E::spec_from_u64(self.pt_mem.read(base1, idx1));
+                let pte2 = E::spec_from_u64(self.pt_mem.read(base2, idx2));
                 // If two pte points to the same table, they must be equal
                 ({
                     &&& self.pte_points_to_table(pte1, self.pt_mem.table(base1).level)
                     &&& self.pte_points_to_table(pte2, self.pt_mem.table(base2).level)
                 }) ==> {
                     ||| base1 == base2 && idx1 == idx2
-                    ||| (pte1.addr() != pte2.addr())
+                    ||| (pte1.spec_addr() != pte2.spec_addr())
                 }
             }
     }
@@ -155,20 +157,20 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 &&& node.entries.len() == self.constants.arch.entry_count(level)
                 &&& forall|idx: nat|
                     idx < self.constants.arch.entry_count(level) ==> {
-                        let pte = G::from_u64(self.pt_mem.read(base, idx));
+                        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
                         let entry = #[trigger] node.entries[idx as int];
                         match entry {
                             NodeEntry::Frame(frame) => {
                                 &&& self.pte_points_to_frame(pte, level)
-                                &&& frame.base == pte.addr()
-                                &&& frame.attr == pte.attr()
+                                &&& frame.base == pte.spec_addr()
+                                &&& frame.attr == pte.spec_attr()
                                 &&& frame.size == self.constants.arch.frame_size(level)
                             },
                             NodeEntry::Node(subnode) => {
                                 &&& self.pte_points_to_table(pte, level)
-                                &&& subnode == self.construct_node(pte.addr(), level + 1)
+                                &&& subnode == self.construct_node(pte.spec_addr(), level + 1)
                             },
-                            NodeEntry::Empty => !pte.valid(),
+                            NodeEntry::Empty => !pte.spec_valid(),
                         }
                     }
             }),
@@ -186,7 +188,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
     /// Perform a recursive specification-level page table walk starting from a given base.
     ///
     /// Terminate upon reaching an invalid or block entry, or reaching the leaf level.
-    pub open spec fn walk(self, vaddr: SpecVAddr, base: SpecPAddr, level: nat) -> (G, nat)
+    pub open spec fn walk(self, vaddr: SpecVAddr, base: SpecPAddr, level: nat) -> (E, nat)
         recommends
             self.wf(),
             self.pt_mem.contains_table(base),
@@ -194,9 +196,11 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             level < self.constants.arch.level_count(),
         decreases self.constants.arch.level_count() - level,
     {
-        let pte = G::from_u64(self.pt_mem.read(base, self.constants.arch.pte_index(vaddr, level)));
+        let pte = E::spec_from_u64(
+            self.pt_mem.read(base, self.constants.arch.pte_index(vaddr, level)),
+        );
         if self.pte_points_to_table(pte, level) {
-            self.walk(vaddr, pte.addr(), level + 1)
+            self.walk(vaddr, pte.spec_addr(), level + 1)
         } else {
             (pte, level)
         }
@@ -209,7 +213,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         base: SpecPAddr,
         level: nat,
         target_level: nat,
-        new_pte: G,
+        new_pte: E,
     ) -> (Self, PagingResult)
         recommends
             self.wf(),
@@ -220,21 +224,24 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases target_level - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         if level >= target_level {
             // Insert at current level
-            if pte.valid() {
+            if pte.spec_valid() {
                 (self, Err(()))
             } else {
-                (Self::new(self.pt_mem.write(base, idx, new_pte.to_u64()), self.constants), Ok(()))
+                (
+                    Self::new(self.pt_mem.write(base, idx, new_pte.spec_to_u64()), self.constants),
+                    Ok(()),
+                )
             }
         } else {
-            if pte.valid() {
-                if pte.huge() {
+            if pte.spec_valid() {
+                if pte.spec_huge() {
                     (self, Err(()))
                 } else {
                     // Insert at next level
-                    self.insert(vbase, pte.addr(), level + 1, target_level, new_pte)
+                    self.insert(vbase, pte.spec_addr(), level + 1, target_level, new_pte)
                 }
             } else {
                 // Insert intermediate table
@@ -244,7 +251,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    G::new(table.base, MemAttr::spec_default(), false).to_u64(),
+                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 Self::new(pt_mem, self.constants).insert(
                     vbase,
@@ -270,14 +277,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
-        if pte.valid() {
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+        if pte.spec_valid() {
             if level >= self.constants.arch.level_count() - 1 {
                 // Leaf node
                 if vbase.aligned(self.constants.arch.frame_size(level).as_nat()) {
                     (
                         Self::new(
-                            self.pt_mem.write(base, idx, G::empty().to_u64()),
+                            self.pt_mem.write(base, idx, E::spec_empty().spec_to_u64()),
                             self.constants,
                         ),
                         Ok(()),
@@ -287,11 +294,11 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 }
             } else {
                 // Intermediate node
-                if pte.huge() {
+                if pte.spec_huge() {
                     if vbase.aligned(self.constants.arch.frame_size(level).as_nat()) {
                         (
                             Self::new(
-                                self.pt_mem.write(base, idx, G::empty().to_u64()),
+                                self.pt_mem.write(base, idx, E::spec_empty().spec_to_u64()),
                                 self.constants,
                             ),
                             Ok(()),
@@ -300,7 +307,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                         (self, Err(()))
                     }
                 } else {
-                    self.remove(vbase, pte.addr(), level + 1)
+                    self.remove(vbase, pte.spec_addr(), level + 1)
                 }
             }
         } else {
@@ -318,18 +325,22 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vaddr, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         if level >= self.constants.arch.level_count() - 1 {
             // Leaf table
             self
         } else {
-            if pte.valid() && !pte.huge() {
+            if pte.spec_valid() && !pte.spec_huge() {
                 // Recycle from subtable
-                let s2 = self.prune(vaddr, pte.addr(), level + 1);
-                if s2.is_table_empty(pte.addr()) {
+                let s2 = self.prune(vaddr, pte.spec_addr(), level + 1);
+                if s2.is_table_empty(pte.spec_addr()) {
                     // If subtable is empty, deallocate it and mark the entry as invalid
                     Self::new(
-                        s2.pt_mem.dealloc_table(pte.addr()).write(base, idx, G::empty().to_u64()),
+                        s2.pt_mem.dealloc_table(pte.spec_addr()).write(
+                            base,
+                            idx,
+                            E::spec_empty().spec_to_u64(),
+                        ),
                         self.constants,
                     )
                 } else {
@@ -356,10 +367,12 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             level < self.constants.arch.level_count(),
         decreases self.constants.arch.level_count() - level,
     {
-        let pte = G::from_u64(self.pt_mem.read(base, self.constants.arch.pte_index(vaddr, level)));
+        let pte = E::spec_from_u64(
+            self.pt_mem.read(base, self.constants.arch.pte_index(vaddr, level)),
+        );
         if self.pte_points_to_table(pte, level) {
             // PTE points to a child table: continue walk into the child table
-            Seq::new(1, |_i| base).add(self.collect_table_chain(vaddr, pte.addr(), level + 1))
+            Seq::new(1, |_i| base).add(self.collect_table_chain(vaddr, pte.spec_addr(), level + 1))
         } else {
             // PTE does not point to another table: chain ends here
             Seq::new(1, |_i| base)
@@ -391,13 +404,13 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                     assert(frame.base.aligned(frame.size.as_nat()));
                 },
                 NodeEntry::Node(subnode) => {
-                    let pte = G::from_u64(self.pt_mem.read(base, i as nat));
+                    let pte = E::spec_from_u64(self.pt_mem.read(base, i as nat));
                     assert(self.pt_mem.accessible(base, i as nat));
                     // wf ensures this
-                    assert(self.pt_mem.contains_table(pte.addr()));
-                    assert(self.pt_mem.table(pte.addr()).level == level + 1);
-                    self.construct_node_facts(pte.addr(), level + 1);
-                    self.lemma_construct_node_implies_node_wf(pte.addr(), level + 1);
+                    assert(self.pt_mem.contains_table(pte.spec_addr()));
+                    assert(self.pt_mem.table(pte.spec_addr()).level == level + 1);
+                    self.construct_node_facts(pte.spec_addr(), level + 1);
+                    self.lemma_construct_node_implies_node_wf(pte.spec_addr(), level + 1);
                 },
                 NodeEntry::Empty => (),
             }
@@ -434,9 +447,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         if node.empty() {
             assert forall|idx: nat|
                 #![auto]
-                idx < self.constants.arch.entry_count(level) implies !G::from_u64(
+                idx < self.constants.arch.entry_count(level) implies !E::spec_from_u64(
                 self.pt_mem.read(base, idx),
-            ).valid() by {
+            ).spec_valid() by {
                 assert(node.entries.contains(node.entries[idx as int]));
             }
         }
@@ -466,19 +479,19 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 &&& forall|i|
                     0 <= i < tables.len() - 1 ==> {
                         let idx = self.constants.arch.pte_index(vaddr, level + i as nat);
-                        let pte = G::from_u64(self.pt_mem.read(#[trigger] tables[i], idx));
-                        self.pte_points_to_table(pte, level + i as nat) && pte.addr() == tables[i
-                            + 1]
+                        let pte = E::spec_from_u64(self.pt_mem.read(#[trigger] tables[i], idx));
+                        self.pte_points_to_table(pte, level + i as nat) && pte.spec_addr()
+                            == tables[i + 1]
                     }
             }),
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vaddr, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
         if self.pte_points_to_table(pte, level) {
             // PTE points to a child table: continue walk into the child table
-            self.lemma_table_chain_entries_valid(vaddr, pte.addr(), level + 1);
+            self.lemma_table_chain_entries_valid(vaddr, pte.spec_addr(), level + 1);
         }
     }
 
@@ -498,31 +511,31 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             level < self.constants.arch.level_count(),
             self.pt_mem.accessible(base, idx2),
             idx2 != self.constants.arch.pte_index(vaddr, level),
-            self.pte_points_to_table(G::from_u64(self.pt_mem.read(base, idx2)), level),
+            self.pte_points_to_table(E::spec_from_u64(self.pt_mem.read(base, idx2)), level),
         ensures
             !self.collect_table_chain(vaddr, base, level).contains(
-                G::from_u64(self.pt_mem.read(base, idx2)).addr(),
+                E::spec_from_u64(self.pt_mem.read(base, idx2)).spec_addr(),
             ),
     {
         let idx = self.constants.arch.pte_index(vaddr, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
-        let pte2 = G::from_u64(self.pt_mem.read(base, idx2));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+        let pte2 = E::spec_from_u64(self.pt_mem.read(base, idx2));
         let tables = self.collect_table_chain(vaddr, base, level);
         self.lemma_table_chain_entries_valid(vaddr, base, level);
 
-        if tables.contains(pte2.addr()) {
+        if tables.contains(pte2.spec_addr()) {
             // Assume pte2's address in the collected chain
-            assert(pte2.addr() != base);
+            assert(pte2.spec_addr() != base);
             assert(tables[0] == base);
-            let i = choose|i| 0 <= i < tables.len() && tables[i] == pte2.addr();
+            let i = choose|i| 0 <= i < tables.len() && tables[i] == pte2.spec_addr();
             assert(i > 0);
 
             let idx3 = self.constants.arch.pte_index(vaddr, (level + i - 1) as nat);
             assert(self.pt_mem.accessible(tables[i - 1], idx3));
-            let pte3 = G::from_u64(self.pt_mem.read(tables[i - 1], idx3));
+            let pte3 = E::spec_from_u64(self.pt_mem.read(tables[i - 1], idx3));
             assert(self.pte_points_to_table(pte3, (level + i - 1) as nat));
             // Found 2 pte points to the same table — derive contradiction
-            assert(pte3.addr() == pte2.addr());
+            assert(pte3.spec_addr() == pte2.spec_addr());
             assert(false);
         }
     }
@@ -545,34 +558,34 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             self.pt_mem.accessible(base2, idx2),
             self.pt_mem.table(base2).level >= level,
             self.pte_points_to_table(
-                G::from_u64(self.pt_mem.read(base2, idx2)),
+                E::spec_from_u64(self.pt_mem.read(base2, idx2)),
                 self.pt_mem.table(base2).level,
             ),
             !self.collect_table_chain(vaddr, base, level).contains(base2),
         ensures
             !self.collect_table_chain(vaddr, base, level).contains(
-                G::from_u64(self.pt_mem.read(base2, idx2)).addr(),
+                E::spec_from_u64(self.pt_mem.read(base2, idx2)).spec_addr(),
             ),
     {
         let tables = self.collect_table_chain(vaddr, base, level);
         self.lemma_table_chain_entries_valid(vaddr, base, level);
 
-        let pte2 = G::from_u64(self.pt_mem.read(base2, idx2));
-        if tables.contains(pte2.addr()) {
+        let pte2 = E::spec_from_u64(self.pt_mem.read(base2, idx2));
+        if tables.contains(pte2.spec_addr()) {
             // Assume pte2's address in the collected chain
-            assert(pte2.addr() != base);
+            assert(pte2.spec_addr() != base);
             assert(tables[0] == base);
-            let i = choose|i| 0 <= i < tables.len() && tables[i] == pte2.addr();
+            let i = choose|i| 0 <= i < tables.len() && tables[i] == pte2.spec_addr();
             let base3 = tables[i - 1];
             assert(tables.contains(base3));
             let level3 = self.pt_mem.table(base3).level;
             let idx3 = self.constants.arch.pte_index(vaddr, level3);
             assert(self.pt_mem.accessible(base3, idx3));
 
-            let pte3 = G::from_u64(self.pt_mem.read(base3, idx3));
+            let pte3 = E::spec_from_u64(self.pt_mem.read(base3, idx3));
             assert(self.pte_points_to_table(pte3, level3));
             // Found 2 pte points to the same table — derive contradiction
-            assert(pte3.addr() != pte2.addr());
+            assert(pte3.spec_addr() != pte2.spec_addr());
             assert(false);
         }
     }
@@ -603,7 +616,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 let visited = node.visit(path);
                 // This last entry returned by `visit` is consistent with
                 // the page table entry returned by `walk`.
-                level2 == level + visited.len() - 1 && visited.last() == if pte.valid() {
+                level2 == level + visited.len() - 1 && visited.last() == if pte.spec_valid() {
                     NodeEntry::Frame(self.pte_to_frame(pte, level2))
                 } else {
                     NodeEntry::Empty
@@ -630,9 +643,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             assert(visited == Seq::new(1, |_i| entry));
         } else {
             if let NodeEntry::Node(subnode) = entry {
-                let pte2 = G::from_u64(self.pt_mem.read(base, idx));
+                let pte2 = E::spec_from_u64(self.pt_mem.read(base, idx));
                 // `pte2` points to a subtable
-                let subtable_base = pte2.addr();
+                let subtable_base = pte2.spec_addr();
                 // Recursive visit from the subtable
                 self.lemma_walk_consistent_with_model(vaddr, subtable_base, level + 1);
                 PTTreePath::lemma_from_vaddr_step(vaddr, arch, level, end);
@@ -653,14 +666,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             level == self.pt_mem.table(base).level,
             level + 1 < self.constants.arch.level_count(),
             self.pt_mem.accessible(base, idx),
-            !G::from_u64(self.pt_mem.read(base, idx)).valid(),
+            !E::spec_from_u64(self.pt_mem.read(base, idx)).spec_valid(),
         ensures
             ({
                 let (pt_mem, table) = self.pt_mem.alloc_table(level + 1);
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    G::new(table.base, MemAttr::spec_default(), false).to_u64(),
+                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 Self::new(pt_mem, self.constants).wf()
             }),
@@ -671,15 +684,16 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let pt_mem = pt_mem.write(
             base,
             idx,
-            G::new(table.base, MemAttr::spec_default(), false).to_u64(),
+            E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
         );
         let s2 = Self::new(pt_mem, self.constants);
 
         assert forall|base2: SpecPAddr, idx2: nat| pt_mem.accessible(base2, idx2) implies {
             let table2 = pt_mem.table(base2);
-            let pte = G::from_u64(pt_mem.read(base2, idx2));
-            let addr = pte.addr();
-            &&& (table2.level == s2.constants.arch.level_count() - 1 && pte.valid()) ==> !pte.huge()
+            let pte = E::spec_from_u64(pt_mem.read(base2, idx2));
+            let addr = pte.spec_addr();
+            &&& (table2.level == s2.constants.arch.level_count() - 1 && pte.spec_valid())
+                ==> !pte.spec_huge()
             &&& s2.pte_points_to_table(pte, table2.level) ==> {
                 &&& addr != pt_mem.root()
                 &&& pt_mem.contains_table(addr)
@@ -691,44 +705,44 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         } by {
             let table2 = pt_mem.table(base2);
             let val = pt_mem.read(base2, idx2);
-            let pte = G::from_u64(val);
+            let pte = E::spec_from_u64(val);
 
             if base2 == base && idx2 == idx {
                 // `(base2, idx2)` is the entry just inserted
-                G::lemma_eq_by_u64(pte, G::new(table.base, MemAttr::spec_default(), false));
+                E::lemma_eq_by_u64(pte, E::spec_new(table.base, MemAttr::spec_default(), false));
             } else {
                 if base2 == table.base {
                     // `base2` is the newly allocated table
-                    assert(pte == G::from_u64(0));
+                    assert(pte == E::spec_from_u64(0));
                 } else {
                     // Entry at `(base2, idx2)` is not updated
                     assert(self.pt_mem.accessible(base2, idx2));
                     assert(val == self.pt_mem.read(base2, idx2));
                     if self.pte_points_to_table(pte, table2.level) {
-                        assert(pte.addr() != pt_mem.root());
-                        assert(pt_mem.contains_table(pte.addr()));
-                        assert(pt_mem.table(pte.addr()).level == table2.level + 1);
+                        assert(pte.spec_addr() != pt_mem.root());
+                        assert(pt_mem.contains_table(pte.spec_addr()));
+                        assert(pt_mem.table(pte.spec_addr()).level == table2.level + 1);
                     }
-                    if table2.level == self.constants.arch.level_count() - 1 && pte.valid() {
-                        assert(!pte.huge());
+                    if table2.level == self.constants.arch.level_count() - 1 && pte.spec_valid() {
+                        assert(!pte.spec_huge());
                     }
                 }
             }
         }
         assert forall|base1: SpecPAddr, idx1: nat, base2: SpecPAddr, idx2: nat|
             pt_mem.accessible(base1, idx1) && pt_mem.accessible(base2, idx2) implies {
-            let pte1 = G::from_u64(pt_mem.read(base1, idx1));
-            let pte2 = G::from_u64(pt_mem.read(base2, idx2));
+            let pte1 = E::spec_from_u64(pt_mem.read(base1, idx1));
+            let pte2 = E::spec_from_u64(pt_mem.read(base2, idx2));
             ({
                 &&& s2.pte_points_to_table(pte1, pt_mem.table(base1).level)
                 &&& s2.pte_points_to_table(pte2, pt_mem.table(base2).level)
             }) ==> {
                 ||| base1 == base2 && idx1 == idx2
-                ||| (pte1.addr() != pte2.addr())
+                ||| (pte1.spec_addr() != pte2.spec_addr())
             }
         } by {
-            let pte1 = G::from_u64(pt_mem.read(base1, idx1));
-            let pte2 = G::from_u64(pt_mem.read(base2, idx2));
+            let pte1 = E::spec_from_u64(pt_mem.read(base1, idx1));
+            let pte2 = E::spec_from_u64(pt_mem.read(base2, idx2));
             if s2.pte_points_to_table(pte1, pt_mem.table(base1).level) && s2.pte_points_to_table(
                 pte2,
                 pt_mem.table(base2).level,
@@ -747,7 +761,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         base: SpecPAddr,
         level: nat,
         target_level: nat,
-        new_pte: G,
+        new_pte: E,
         base2: SpecPAddr,
     )
         requires
@@ -764,22 +778,22 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases target_level - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
 
         if level < target_level {
-            if pte.valid() {
-                if !pte.huge() {
+            if pte.spec_valid() {
+                if !pte.spec_huge() {
                     self.lemma_insert_preserves_wf(
                         vbase,
-                        pte.addr(),
+                        pte.spec_addr(),
                         level + 1,
                         target_level,
                         new_pte,
                     );
                     self.lemma_insert_preserves_old_tables(
                         vbase,
-                        pte.addr(),
+                        pte.spec_addr(),
                         level + 1,
                         target_level,
                         new_pte,
@@ -791,7 +805,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    G::new(table.base, MemAttr::spec_default(), false).to_u64(),
+                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
                 // Ensures `pt_mem` after `alloc_table` satisfies the wf
@@ -814,7 +828,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         base: SpecPAddr,
         level: nat,
         target_level: nat,
-        new_pte: G,
+        new_pte: E,
     )
         requires
             self.wf(),
@@ -828,16 +842,16 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases target_level - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
 
         if level < target_level {
-            if pte.valid() {
-                if !pte.huge() {
+            if pte.spec_valid() {
+                if !pte.spec_huge() {
                     // Recursively insert into the next table
                     self.lemma_insert_preserves_root(
                         vbase,
-                        pte.addr(),
+                        pte.spec_addr(),
                         level + 1,
                         target_level,
                         new_pte,
@@ -849,7 +863,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    G::new(table.base, MemAttr::spec_default(), false).to_u64(),
+                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
@@ -868,7 +882,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         base: SpecPAddr,
         level: nat,
         target_level: nat,
-        new_pte: G,
+        new_pte: E,
     )
         requires
             self.wf(),
@@ -882,16 +896,16 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases target_level - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
 
         if level < target_level {
-            if pte.valid() {
-                if !pte.huge() {
+            if pte.spec_valid() {
+                if !pte.spec_huge() {
                     // Recursively insert into the next table
                     self.lemma_insert_preserves_wf(
                         vbase,
-                        pte.addr(),
+                        pte.spec_addr(),
                         level + 1,
                         target_level,
                         new_pte,
@@ -903,7 +917,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    G::new(table.base, MemAttr::spec_default(), false).to_u64(),
+                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
@@ -922,7 +936,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         base: SpecPAddr,
         level: nat,
         target_level: nat,
-        new_pte: G,
+        new_pte: E,
     )
         requires
             self.wf(),
@@ -933,8 +947,8 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         ensures
             ({
                 let idx = self.constants.arch.pte_index(vbase, level);
-                let pte = G::from_u64(self.pt_mem.read(base, idx));
-                level < target_level && !pte.valid() ==> self.insert(
+                let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+                level < target_level && !pte.spec_valid() ==> self.insert(
                     vbase,
                     base,
                     level,
@@ -945,14 +959,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases target_level - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
-        if level < target_level && !pte.valid() {
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+        if level < target_level && !pte.spec_valid() {
             // Allocate intermediate table
             let (pt_mem, table) = self.pt_mem.alloc_table(level + 1);
             let pt_mem = pt_mem.write(
                 base,
                 idx,
-                G::new(table.base, MemAttr::spec_default(), false).to_u64(),
+                E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
             );
             // `s2` is the state after allocating an intermediate table
             let s2 = Self::new(pt_mem, self.constants);
@@ -961,10 +975,10 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
 
             let (_, insert_res) = s2.insert(vbase, table.base, level + 1, target_level, new_pte);
             let idx = s2.constants.arch.pte_index(vbase, level + 1);
-            let pte = G::from_u64(s2.pt_mem.read(table.base, idx));
+            let pte = E::spec_from_u64(s2.pt_mem.read(table.base, idx));
             // New table is empty
             assert(s2.pt_mem.read(table.base, idx) == 0);
-            assert(!pte.valid());
+            assert(!pte.spec_valid());
 
             // Recursive proof for the next level
             s2.lemma_insert_intermediate_node_results_ok(
@@ -985,7 +999,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         base: SpecPAddr,
         level: nat,
         target_level: nat,
-        new_pte: G,
+        new_pte: E,
         base2: SpecPAddr,
     )
         requires
@@ -1007,24 +1021,24 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
         let idx = self.constants.arch.pte_index(vbase, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
 
         if level < target_level {
-            if pte.valid() {
+            if pte.spec_valid() {
                 // PTE is present: either a huge mapping or a pointer to a next-level table
-                if !pte.huge() {
+                if !pte.spec_huge() {
                     // Not a huge mapping: descend into the next-level table
-                    assert(self.pt_mem.contains_table(pte.addr()));
+                    assert(self.pt_mem.contains_table(pte.spec_addr()));
                     let tables = self.collect_table_chain(vbase, base, level);
-                    let tables2 = self.collect_table_chain(vbase, pte.addr(), level + 1);
+                    let tables2 = self.collect_table_chain(vbase, pte.spec_addr(), level + 1);
 
                     assert(tables == Seq::new(1, |_i| base).add(tables2));
                     lemma_not_in_seq_implies_not_in_subseq(tables, tables2, base, base2);
                     assert(!tables2.contains(base2));
                     self.lemma_insert_preserves_tables_outside_chain(
                         vbase,
-                        pte.addr(),
+                        pte.spec_addr(),
                         level + 1,
                         target_level,
                         new_pte,
@@ -1037,18 +1051,18 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    G::new(table.base, MemAttr::spec_default(), false).to_u64(),
+                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
                 assert(s2.wf());
 
-                let pte = G::new(table.base, MemAttr::spec_default(), false);
+                let pte = E::spec_new(table.base, MemAttr::spec_default(), false);
                 let tables = s2.collect_table_chain(vbase, base, level);
-                let tables2 = s2.collect_table_chain(vbase, pte.addr(), level + 1);
-                assert(s2.pt_mem.read(base, idx) == pte.to_u64());
-                G::lemma_eq_by_u64(G::from_u64(s2.pt_mem.read(base, idx)), pte);
+                let tables2 = s2.collect_table_chain(vbase, pte.spec_addr(), level + 1);
+                assert(s2.pt_mem.read(base, idx) == pte.spec_to_u64());
+                E::lemma_eq_by_u64(E::spec_from_u64(s2.pt_mem.read(base, idx)), pte);
                 assert(s2.pte_points_to_table(pte, level));
 
                 assert(tables == Seq::new(1, |_i| base).add(tables2));
@@ -1075,7 +1089,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         base: SpecPAddr,
         level: nat,
         target_level: nat,
-        new_pte: G,
+        new_pte: E,
         base2: SpecPAddr,
         level2: nat,
     )
@@ -1122,15 +1136,15 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         } by {
             let entry = node.entries[i];
             let entry2 = node2.entries[i];
-            let pte = G::from_u64(self.pt_mem.read(base2, i as nat));
+            let pte = E::spec_from_u64(self.pt_mem.read(base2, i as nat));
             assert(self.pt_mem.accessible(base2, i as nat));
-            let pte2 = G::from_u64(s2.pt_mem.read(base2, i as nat));
-            G::lemma_eq_by_u64(pte, pte2);
+            let pte2 = E::spec_from_u64(s2.pt_mem.read(base2, i as nat));
+            E::lemma_eq_by_u64(pte, pte2);
 
             match entry {
                 NodeEntry::Node(node) => {
                     assert(self.pte_points_to_table(pte, level2));
-                    assert(self.pt_mem.contains_table(pte.addr()));
+                    assert(self.pt_mem.contains_table(pte.spec_addr()));
                     self.lemma_table_not_in_chain_implies_child_not_in_chain(
                         vbase,
                         base,
@@ -1144,7 +1158,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                         level,
                         target_level,
                         new_pte,
-                        pte.addr(),
+                        pte.spec_addr(),
                         level2 + 1,
                     );
                 },
@@ -1152,7 +1166,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                     assert(self.pte_points_to_frame(pte, level2));
                 },
                 NodeEntry::Empty => {
-                    assert(!pte.valid());
+                    assert(!pte.spec_valid());
                 },
             }
         }
@@ -1166,7 +1180,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         base: SpecPAddr,
         level: nat,
         target_level: nat,
-        new_pte: G,
+        new_pte: E,
     )
         requires
             self.wf(),
@@ -1204,22 +1218,22 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let (idx, remain) = path.step();
         let entry = node.entries[idx as int];
         assert(self.pt_mem.accessible(base, idx));
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
 
         let right = node.insert(path, new_frame).0;
         node.lemma_insert_preserves_wf(path, new_frame);
 
         if level >= target_level {
-            if !pte.valid() {
-                G::lemma_eq_by_u64(G::from_u64(s2.pt_mem.read(base, idx)), new_pte);
+            if !pte.spec_valid() {
+                E::lemma_eq_by_u64(E::spec_from_u64(s2.pt_mem.read(base, idx)), new_pte);
                 // Update `pte` to `new_pte`, empty entry to frame
                 assert(right == node.update(idx, NodeEntry::Frame(new_frame)));
             }
         } else {
-            if pte.valid() {
-                if !pte.huge() {
+            if pte.spec_valid() {
+                if !pte.spec_huge() {
                     // `pte` points to a subtable
-                    let subtable_base = pte.addr();
+                    let subtable_base = pte.spec_addr();
                     let subnode: PTTreeNode = entry->Node_0;
 
                     let new_subnode = subnode.insert(remain, new_frame).0;
@@ -1256,9 +1270,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
 
                     assert forall|i| 0 <= i < node2.entries.len() implies node2.entries[i]
                         == right.entries[i] by {
-                        G::lemma_eq_by_u64(
-                            G::from_u64(s2.pt_mem.read(base, i as nat)),
-                            G::from_u64(self.pt_mem.read(base, i as nat)),
+                        E::lemma_eq_by_u64(
+                            E::spec_from_u64(s2.pt_mem.read(base, i as nat)),
+                            E::spec_from_u64(self.pt_mem.read(base, i as nat)),
                         );
                         if i == idx {
                             // Entry `i` is the subtree constructed from `subtable_base`
@@ -1267,10 +1281,10 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                             ));
                         } else {
                             // Other entries are unchanged
-                            let pte_i = G::from_u64(self.pt_mem.read(base, i as nat));
+                            let pte_i = E::spec_from_u64(self.pt_mem.read(base, i as nat));
                             assert(self.pt_mem.accessible(base, i as nat));
                             if self.pte_points_to_table(pte_i, level) {
-                                assert(self.pt_mem.contains_table(pte_i.addr()));
+                                assert(self.pt_mem.contains_table(pte_i.spec_addr()));
                                 self.lemma_other_index_not_in_chain(vbase, base, level, i as nat);
                                 self.lemma_insert_preserves_unrelated_node(
                                     vbase,
@@ -1278,7 +1292,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                                     level,
                                     target_level,
                                     new_pte,
-                                    pte_i.addr(),
+                                    pte_i.spec_addr(),
                                     level + 1,
                                 );
                             }
@@ -1292,7 +1306,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 let written = allocated.write(
                     base,
                     idx,
-                    G::new(table.base, MemAttr::spec_default(), false).to_u64(),
+                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 let subtable_base = table.base;
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
@@ -1300,9 +1314,9 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 // s3 is the state after allocating a new intermediate table
                 let s3 = Self::new(written, self.constants);
                 let subnode = PTTreeNode::new(self.constants, level + 1);
-                G::lemma_eq_by_u64(
-                    G::from_u64(s3.pt_mem.read(base, idx)),
-                    G::new(table.base, MemAttr::spec_default(), false),
+                E::lemma_eq_by_u64(
+                    E::spec_from_u64(s3.pt_mem.read(base, idx)),
+                    E::spec_new(table.base, MemAttr::spec_default(), false),
                 );
                 assert(s3.construct_node(base, level).entries[idx as int] == NodeEntry::Node(
                     subnode,
@@ -1351,10 +1365,10 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
         if self.pte_points_to_table(pte, level) {
-            self.lemma_remove_preserves_wf(vbase, pte.addr(), level + 1)
+            self.lemma_remove_preserves_wf(vbase, pte.spec_addr(), level + 1)
         }
     }
 
@@ -1378,10 +1392,10 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
         if self.pte_points_to_table(pte, level) {
-            self.lemma_remove_preserves_old_tables(vbase, pte.addr(), level + 1, base2)
+            self.lemma_remove_preserves_old_tables(vbase, pte.spec_addr(), level + 1, base2)
         }
     }
 
@@ -1397,10 +1411,10 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
         if self.pte_points_to_table(pte, level) {
-            self.lemma_remove_preserves_root(vbase, pte.addr(), level + 1)
+            self.lemma_remove_preserves_root(vbase, pte.spec_addr(), level + 1)
         }
     }
 
@@ -1453,15 +1467,19 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let entry = node.entries[idx as int];
         let entry2 = node2.entries[idx as int];
         assert(self.pt_mem.accessible(base, idx));
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
-        let pte2 = G::from_u64(s2.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+        let pte2 = E::spec_from_u64(s2.pt_mem.read(base, idx));
 
         if path.len() <= 1 {
             match entry {
                 NodeEntry::Frame(_) => {
                     // Update frame entry to empty
-                    assert(s2.pt_mem == self.pt_mem.write(base, idx, G::empty().to_u64()));
-                    G::lemma_eq_by_u64(pte2, G::empty());
+                    assert(s2.pt_mem == self.pt_mem.write(
+                        base,
+                        idx,
+                        E::spec_empty().spec_to_u64(),
+                    ));
+                    E::lemma_eq_by_u64(pte2, E::spec_empty());
                     assert(entry2 == NodeEntry::Empty);
                 },
                 _ => (),
@@ -1470,7 +1488,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             match entry {
                 NodeEntry::Node(subnode) => {
                     // `pte` points to a subtable
-                    let subtable_base = pte.addr();
+                    let subtable_base = pte.spec_addr();
                     // Recursive remove from the subtable
                     self.lemma_remove_consistent_with_model(vbase, subtable_base, level + 1);
                     PTTreePath::lemma_from_vaddr_step(vbase, arch, level, end);
@@ -1478,8 +1496,12 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                 },
                 NodeEntry::Frame(frame) => {
                     if path.has_zero_tail(level) {
-                        assert(s2.pt_mem == self.pt_mem.write(base, idx, G::empty().to_u64()));
-                        G::lemma_eq_by_u64(pte2, G::empty());
+                        assert(s2.pt_mem == self.pt_mem.write(
+                            base,
+                            idx,
+                            E::spec_empty().spec_to_u64(),
+                        ));
+                        E::lemma_eq_by_u64(pte2, E::spec_empty());
                         assert(entry2 == NodeEntry::Empty);
                     }
                 },
@@ -1502,29 +1524,33 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             level < self.constants.arch.level_count() - 1,
             self.pt_mem.accessible(base, idx),
             ({
-                let pte = G::from_u64(self.pt_mem.read(base, idx));
-                pte.valid() && !pte.huge() && self.is_table_empty(pte.addr())
+                let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+                pte.spec_valid() && !pte.spec_huge() && self.is_table_empty(pte.spec_addr())
             }),
         ensures
             ({
-                let pte = G::from_u64(self.pt_mem.read(base, idx));
-                let pt_mem = self.pt_mem.dealloc_table(pte.addr());
-                let pt_mem = pt_mem.write(base, idx, G::empty().to_u64());
+                let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+                let pt_mem = self.pt_mem.dealloc_table(pte.spec_addr());
+                let pt_mem = pt_mem.write(base, idx, E::spec_empty().spec_to_u64());
                 Self::new(pt_mem, self.constants).wf()
             }),
     {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
-        let pt_mem = self.pt_mem.dealloc_table(pte.addr()).write(base, idx, G::empty().to_u64());
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+        let pt_mem = self.pt_mem.dealloc_table(pte.spec_addr()).write(
+            base,
+            idx,
+            E::spec_empty().spec_to_u64(),
+        );
         let s2 = Self::new(pt_mem, self.constants);
 
         assert forall|base2: SpecPAddr, idx2: nat| pt_mem.accessible(base2, idx2) implies {
             let table2 = pt_mem.table(base2);
-            let pte2 = G::from_u64(pt_mem.read(base2, idx2));
-            let addr = pte2.addr();
-            &&& (table2.level == s2.constants.arch.level_count() - 1 && pte2.valid())
-                ==> !pte2.huge()
+            let pte2 = E::spec_from_u64(pt_mem.read(base2, idx2));
+            let addr = pte2.spec_addr();
+            &&& (table2.level == s2.constants.arch.level_count() - 1 && pte2.spec_valid())
+                ==> !pte2.spec_huge()
             &&& s2.pte_points_to_table(pte2, table2.level) ==> {
                 &&& addr != pt_mem.root()
                 &&& pt_mem.contains_table(addr)
@@ -1536,39 +1562,39 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         } by {
             let table2 = pt_mem.table(base2);
             let val = pt_mem.read(base2, idx2);
-            let pte2 = G::from_u64(val);
+            let pte2 = E::spec_from_u64(val);
 
             if base2 == base && idx2 == idx {
                 // `(base2, idx2)` is the entry we just inserted
-                G::lemma_eq_by_u64(pte2, G::empty());
+                E::lemma_eq_by_u64(pte2, E::spec_empty());
             } else {
                 assert(self.pt_mem.accessible(base2, idx2));
-                G::lemma_eq_by_u64(pte2, G::from_u64(self.pt_mem.read(base2, idx2)));
+                E::lemma_eq_by_u64(pte2, E::spec_from_u64(self.pt_mem.read(base2, idx2)));
                 if s2.pte_points_to_table(pte2, table2.level) {
                     // wf ensures no double reference
-                    assert(pte2.addr() != pte.addr());
+                    assert(pte2.spec_addr() != pte.spec_addr());
                 }
             }
         }
         assert forall|base1: SpecPAddr, idx1: nat, base2: SpecPAddr, idx2: nat|
             pt_mem.accessible(base1, idx1) && pt_mem.accessible(base2, idx2) implies {
-            let pte1 = G::from_u64(pt_mem.read(base1, idx1));
-            let pte2 = G::from_u64(pt_mem.read(base2, idx2));
+            let pte1 = E::spec_from_u64(pt_mem.read(base1, idx1));
+            let pte2 = E::spec_from_u64(pt_mem.read(base2, idx2));
             ({
                 &&& s2.pte_points_to_table(pte1, pt_mem.table(base1).level)
                 &&& s2.pte_points_to_table(pte2, pt_mem.table(base2).level)
             }) ==> {
                 ||| base1 == base2 && idx1 == idx2
-                ||| (pte1.addr() != pte2.addr())
+                ||| (pte1.spec_addr() != pte2.spec_addr())
             }
         } by {
-            let pte1 = G::from_u64(pt_mem.read(base1, idx1));
-            let pte2 = G::from_u64(pt_mem.read(base2, idx2));
+            let pte1 = E::spec_from_u64(pt_mem.read(base1, idx1));
+            let pte2 = E::spec_from_u64(pt_mem.read(base2, idx2));
             if s2.pte_points_to_table(pte1, pt_mem.table(base1).level) && s2.pte_points_to_table(
                 pte2,
                 pt_mem.table(base2).level,
             ) {
-                assert(base1 != pte.addr() && base2 != pte.addr());
+                assert(base1 != pte.spec_addr() && base2 != pte.spec_addr());
                 assert(self.pt_mem.accessible(base1, idx1));
                 assert(self.pt_mem.accessible(base2, idx2));
             }
@@ -1588,15 +1614,20 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vaddr, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
 
         if self.pte_points_to_table(pte, level) {
-            self.lemma_prune_preserves_wf(vaddr, pte.addr(), level + 1);
-            self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, base);
-            self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, pte.addr());
-            let s2 = self.prune(vaddr, pte.addr(), level + 1);
-            if s2.is_table_empty(pte.addr()) {
+            self.lemma_prune_preserves_wf(vaddr, pte.spec_addr(), level + 1);
+            self.lemma_prune_preserves_lower_tables(vaddr, pte.spec_addr(), level + 1, base);
+            self.lemma_prune_preserves_lower_tables(
+                vaddr,
+                pte.spec_addr(),
+                level + 1,
+                pte.spec_addr(),
+            );
+            let s2 = self.prune(vaddr, pte.spec_addr(), level + 1);
+            if s2.is_table_empty(pte.spec_addr()) {
                 s2.lemma_dealloc_intermediate_table_preserves_wf(base, level, idx);
             }
         }
@@ -1628,15 +1659,20 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vaddr, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
 
         if self.pte_points_to_table(pte, level) {
-            self.lemma_prune_preserves_wf(vaddr, pte.addr(), level + 1);
-            // `base`, `pte.addr()`, `base2` are not affected after `prune`
-            self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, base);
-            self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, pte.addr());
-            self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, base2);
+            self.lemma_prune_preserves_wf(vaddr, pte.spec_addr(), level + 1);
+            // `base`, `pte.spec_addr()`, `base2` are not affected after `prune`
+            self.lemma_prune_preserves_lower_tables(vaddr, pte.spec_addr(), level + 1, base);
+            self.lemma_prune_preserves_lower_tables(
+                vaddr,
+                pte.spec_addr(),
+                level + 1,
+                pte.spec_addr(),
+            );
+            self.lemma_prune_preserves_lower_tables(vaddr, pte.spec_addr(), level + 1, base2);
         }
     }
 
@@ -1652,14 +1688,19 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vaddr, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
 
         if self.pte_points_to_table(pte, level) {
-            self.lemma_prune_preserves_wf(vaddr, pte.addr(), level + 1);
-            self.lemma_prune_preserves_root(vaddr, pte.addr(), level + 1);
-            self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, base);
-            self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, pte.addr());
+            self.lemma_prune_preserves_wf(vaddr, pte.spec_addr(), level + 1);
+            self.lemma_prune_preserves_root(vaddr, pte.spec_addr(), level + 1);
+            self.lemma_prune_preserves_lower_tables(vaddr, pte.spec_addr(), level + 1, base);
+            self.lemma_prune_preserves_lower_tables(
+                vaddr,
+                pte.spec_addr(),
+                level + 1,
+                pte.spec_addr(),
+            );
         }
     }
 
@@ -1690,28 +1731,38 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let tables = self.collect_table_chain(vaddr, base, level);
 
         let idx = self.constants.arch.pte_index(vaddr, level);
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
 
         if self.pte_points_to_table(pte, level) {
             // PTE points to a child table: continue walk into the child table
-            let s2 = self.prune(vaddr, pte.addr(), level + 1);
-            self.lemma_prune_preserves_wf(vaddr, pte.addr(), level + 1);
-            self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, base);
-            self.lemma_prune_preserves_lower_tables(vaddr, pte.addr(), level + 1, pte.addr());
-            let tables2 = self.collect_table_chain(vaddr, pte.addr(), level + 1);
+            let s2 = self.prune(vaddr, pte.spec_addr(), level + 1);
+            self.lemma_prune_preserves_wf(vaddr, pte.spec_addr(), level + 1);
+            self.lemma_prune_preserves_lower_tables(vaddr, pte.spec_addr(), level + 1, base);
+            self.lemma_prune_preserves_lower_tables(
+                vaddr,
+                pte.spec_addr(),
+                level + 1,
+                pte.spec_addr(),
+            );
+            let tables2 = self.collect_table_chain(vaddr, pte.spec_addr(), level + 1);
 
             assert(tables == Seq::new(1, |_i| base).add(tables2));
             lemma_not_in_seq_implies_not_in_subseq(tables, tables2, base, base2);
             assert(!tables2.contains(base2));
-            self.lemma_prune_preserves_tables_outside_chain(vaddr, pte.addr(), level + 1, base2);
+            self.lemma_prune_preserves_tables_outside_chain(
+                vaddr,
+                pte.spec_addr(),
+                level + 1,
+                base2,
+            );
 
             assert(s2.pt_mem.table_view(base2) == self.pt_mem.table_view(base2));
-            if s2.is_table_empty(pte.addr()) {
+            if s2.is_table_empty(pte.spec_addr()) {
                 // Child table became empty after prune: deallocate it and update the parent PTE
                 s2.lemma_dealloc_intermediate_table_preserves_wf(base, level, idx);
-                assert(s2.pt_mem.dealloc_table(pte.addr()).accessible(base, idx));
-                assert(base2 != pte.addr() && base2 != base);
+                assert(s2.pt_mem.dealloc_table(pte.spec_addr()).accessible(base, idx));
+                assert(base2 != pte.spec_addr() && base2 != base);
 
                 assert(self.prune(vaddr, base, level).pt_mem.table_view(base2)
                     == self.pt_mem.table_view(base2));
@@ -1760,15 +1811,15 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             node.entries[i] == node2.entries[i]
         } by {
             let entry = node.entries[i];
-            let pte = G::from_u64(self.pt_mem.read(base2, i as nat));
+            let pte = E::spec_from_u64(self.pt_mem.read(base2, i as nat));
             assert(self.pt_mem.accessible(base2, i as nat));
-            let pte2 = G::from_u64(s2.pt_mem.read(base2, i as nat));
-            G::lemma_eq_by_u64(pte, pte2);
+            let pte2 = E::spec_from_u64(s2.pt_mem.read(base2, i as nat));
+            E::lemma_eq_by_u64(pte, pte2);
 
             match entry {
                 NodeEntry::Node(node) => {
                     assert(self.pte_points_to_table(pte, level2));
-                    assert(self.pt_mem.contains_table(pte.addr()));
+                    assert(self.pt_mem.contains_table(pte.spec_addr()));
                     self.lemma_table_not_in_chain_implies_child_not_in_chain(
                         vaddr,
                         base,
@@ -1780,7 +1831,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                         vaddr,
                         base,
                         level,
-                        pte.addr(),
+                        pte.spec_addr(),
                         level2 + 1,
                     );
                 },
@@ -1788,7 +1839,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                     assert(self.pte_points_to_frame(pte, level2));
                 },
                 NodeEntry::Empty => {
-                    assert(!pte.valid());
+                    assert(!pte.spec_valid());
                 },
             }
         }
@@ -1842,14 +1893,14 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
         let (idx, remain) = path.step();
         let entry = node.entries[idx as int];
         assert(self.pt_mem.accessible(base, idx));
-        let pte = G::from_u64(self.pt_mem.read(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
 
         let right = node.prune(path);
         node.lemma_prune_preserves_wf(path);
 
         if self.pte_points_to_table(pte, level) {
             // `pte` points to a subtable
-            let subtable_base = pte.addr();
+            let subtable_base = pte.spec_addr();
             let subnode: PTTreeNode = entry->Node_0;
 
             let s3 = self.prune(vaddr, subtable_base, level + 1);
@@ -1860,47 +1911,50 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
             PTTreePath::lemma_from_vaddr_step(vaddr, arch, level, end);
             assert(s3.construct_node(subtable_base, level + 1) == new_subnode);
 
-            // `base`, `pte.addr()`, `base2` are not affected after `prune`
+            // `base`, `pte.spec_addr()`, `base2` are not affected after `prune`
             self.lemma_prune_preserves_lower_tables(vaddr, subtable_base, level + 1, base);
             self.lemma_prune_preserves_lower_tables(vaddr, subtable_base, level + 1, subtable_base);
             // The content of table `base` is not affected after `prune`
             assert(s3.pt_mem.table_view(base) == self.pt_mem.table_view(base));
 
-            s3.lemma_empty_table_constructs_empty_node(pte.addr());
+            s3.lemma_empty_table_constructs_empty_node(pte.spec_addr());
             if s3.is_table_empty(subtable_base) {
                 // Lemma shows `new_subnode` is empty
                 assert(right == node.update(idx, NodeEntry::Empty));
                 assert(s2.pt_mem == s3.pt_mem.dealloc_table(subtable_base).write(
                     base,
                     idx,
-                    G::empty().to_u64(),
+                    E::spec_empty().spec_to_u64(),
                 ));
                 assert forall|i| 0 <= i < node2.entries.len() implies node2.entries[i]
                     == right.entries[i] by {
                     if i == idx {
                         // Entry `i` is empty (removed)
-                        G::lemma_eq_by_u64(G::from_u64(s2.pt_mem.read(base, idx)), G::empty());
+                        E::lemma_eq_by_u64(
+                            E::spec_from_u64(s2.pt_mem.read(base, idx)),
+                            E::spec_empty(),
+                        );
                         assert(node2.entries[i] is Empty);
                     } else {
                         // Other entries are unchanged
-                        G::lemma_eq_by_u64(
-                            G::from_u64(s3.pt_mem.read(base, i as nat)),
-                            G::from_u64(self.pt_mem.read(base, i as nat)),
+                        E::lemma_eq_by_u64(
+                            E::spec_from_u64(s3.pt_mem.read(base, i as nat)),
+                            E::spec_from_u64(self.pt_mem.read(base, i as nat)),
                         );
-                        G::lemma_eq_by_u64(
-                            G::from_u64(s2.pt_mem.read(base, i as nat)),
-                            G::from_u64(s3.pt_mem.read(base, i as nat)),
+                        E::lemma_eq_by_u64(
+                            E::spec_from_u64(s2.pt_mem.read(base, i as nat)),
+                            E::spec_from_u64(s3.pt_mem.read(base, i as nat)),
                         );
-                        let pte_i = G::from_u64(self.pt_mem.read(base, i as nat));
+                        let pte_i = E::spec_from_u64(self.pt_mem.read(base, i as nat));
                         assert(self.pt_mem.accessible(base, i as nat));
                         if self.pte_points_to_table(pte_i, level) {
-                            assert(self.pt_mem.contains_table(pte_i.addr()));
+                            assert(self.pt_mem.contains_table(pte_i.spec_addr()));
                             self.lemma_other_index_not_in_chain(vaddr, base, level, i as nat);
                             self.lemma_prune_preserves_unrelated_node(
                                 vaddr,
                                 base,
                                 level,
-                                pte_i.addr(),
+                                pte_i.spec_addr(),
                                 level + 1,
                             );
                         }
@@ -1915,16 +1969,16 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
 
                 assert forall|i| 0 <= i < node2.entries.len() implies node2.entries[i]
                     == right.entries[i] by {
-                    G::lemma_eq_by_u64(
-                        G::from_u64(s2.pt_mem.read(base, i as nat)),
-                        G::from_u64(self.pt_mem.read(base, i as nat)),
+                    E::lemma_eq_by_u64(
+                        E::spec_from_u64(s2.pt_mem.read(base, i as nat)),
+                        E::spec_from_u64(self.pt_mem.read(base, i as nat)),
                     );
                     if i == idx {
                         // Entry `i` is the subtree constructed from `subtable_base`
                         assert(node2.entries[i] == NodeEntry::Node(new_subnode));
                     } else {
                         // Other entries are unchanged
-                        let pte_i = G::from_u64(self.pt_mem.read(base, i as nat));
+                        let pte_i = E::spec_from_u64(self.pt_mem.read(base, i as nat));
                         assert(self.pt_mem.accessible(base, i as nat));
                         if self.pte_points_to_table(pte_i, level) {
                             self.lemma_other_index_not_in_chain(vaddr, base, level, i as nat);
@@ -1932,7 +1986,7 @@ impl<G> SpecPageTable<G> where G: GhostPTE {
                                 vaddr,
                                 base,
                                 level,
-                                pte_i.addr(),
+                                pte_i.spec_addr(),
                                 level + 1,
                             );
                         }

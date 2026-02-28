@@ -1,9 +1,16 @@
 //! Page table trait with formal specification.
+use core::alloc;
+
 use vstd::prelude::*;
 
-use super::pt_mem::PageTableMem;
+// use super::pt_mem::PageTableMem;
 use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 use crate::address::frame::{Frame, MemAttr, SpecFrame};
+use crate::frame_allocator::frame_trait::FrameAllocator;
+use crate::global_allocator::{
+    frame::{Frame4K, GlobalFrameAllocator},
+    GlobalAllocator,
+};
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 
 verus! {
@@ -64,9 +71,7 @@ impl PageTableState {
             frame.size.as_nat(),
         )
         // Base paddr should align to frame size
-        &&& frame.base.aligned(
-            frame.size.as_nat(),
-        )
+        &&& frame.base.aligned(frame.size.as_nat())
     }
 
     /// State transition - map a virtual address to a physical frame.
@@ -205,54 +210,73 @@ impl PageTableState {
 /// Specification of a Page Table viewed by higher-level components.
 ///
 /// Concrete implementation must implement `PageTable` trait to satisfy the specification.
-pub trait PageTable<M> where Self: Sized, M: PageTableMem {
+pub trait PageTable<A> where Self: Sized, A: FrameAllocator {
     /// View as a `SpecVAddr` to `Frame` mapping.
-    spec fn view(self) -> PageTableState;
+    spec fn view(&self, allocator: &GlobalFrameAllocator<A>) -> PageTableState;
 
     /// Invariants that must be implied at initial state and preseved after each operation.
-    spec fn invariants(self) -> bool;
+    spec fn invariants(&self, allocator: &GlobalFrameAllocator<A>) -> bool;
 
     /// Create an empty page table
-    fn new(pt_mem: M, constants: PTConstants) -> (pt: Self)
+    fn new(allocator: &mut GlobalFrameAllocator<A>, cid: usize, constants: PTConstants) -> (pt:
+        Self)
         requires
-            pt_mem.invariants(),
-            pt_mem@.init(),
+            old(allocator).has_client(cid),
+            old(allocator).invariants(),
+            old(allocator).view().clients[cid as nat].is_empty(),
             constants@.valid(),
-            pt_mem@.arch == constants@.arch,
         ensures
-            pt@.constants == constants@,
-            pt@.init(),
-            pt.invariants(),
+            pt.view(allocator).constants == constants@,
+            pt.view(allocator).init(),
+            pt.invariants(allocator),
     ;
 
     /// Map a virtual address to a physical frame with given attributes.
-    fn map(&mut self, vbase: VAddr, frame: Frame) -> (res: Result<(), ()>)
+    fn map(&mut self, allocator: &mut GlobalFrameAllocator<A>, vbase: VAddr, frame: Frame) -> (res:
+        Result<(), ()>)
         requires
-            old(self).invariants(),
-            old(self)@.map_pre(vbase@, frame@),
+            old(self).invariants(old(allocator)),
+            old(self).view(old(allocator)).map_pre(vbase@, frame@),
         ensures
-            self.invariants(),
-            PageTableState::map(old(self)@, self@, vbase@, frame@, res),
+            self.invariants(allocator),
+            PageTableState::map(
+                old(self).view(old(allocator)),
+                self.view(allocator),
+                vbase@,
+                frame@,
+                res,
+            ),
     ;
 
     /// Unmap a virtual address.
-    fn unmap(&mut self, vbase: VAddr) -> (res: Result<(), ()>)
+    fn unmap(&mut self, allocator: &mut GlobalFrameAllocator<A>, vbase: VAddr) -> (res: Result<
+        (),
+        (),
+    >)
         requires
-            old(self).invariants(),
-            old(self)@.unmap_pre(vbase@),
+            old(self).invariants(old(allocator)),
+            old(self).view(old(allocator)).unmap_pre(vbase@),
         ensures
-            self.invariants(),
-            PageTableState::unmap(old(self)@, self@, vbase@, res),
+            self.invariants(allocator),
+            PageTableState::unmap(
+                old(self).view(old(allocator)),
+                self.view(allocator),
+                vbase@,
+                res,
+            ),
     ;
 
     /// Query the physical frame mapped to a virtual address.
-    fn query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+    fn query(&self, allocator: &GlobalFrameAllocator<A>, vaddr: VAddr) -> (res: Result<
+        (VAddr, Frame),
+        (),
+    >)
         requires
-            self.invariants(),
-            self@.query_pre(vaddr@),
+            self.invariants(allocator),
+            self.view(allocator).query_pre(vaddr@),
         ensures
-            self.invariants(),
-            self@.query(
+            self.invariants(allocator),
+            self.view(allocator).query(
                 vaddr@,
                 match res {
                     Ok((vaddr_exec, frame_exec)) => Ok((vaddr_exec@, frame_exec@)),

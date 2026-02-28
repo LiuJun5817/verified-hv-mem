@@ -1932,9 +1932,7 @@ impl PTTreeModel {
     pub open spec fn view(self) -> PageTableState {
         PageTableState {
             mappings: self.mappings(),
-            constants: SpecPTConstants {
-                arch: self.arch(),
-            },
+            constants: SpecPTConstants { arch: self.arch() },
         }
     }
 

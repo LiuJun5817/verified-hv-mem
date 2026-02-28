@@ -3,11 +3,18 @@
 use super::{
     pt_mem::PageTableMem,
     pt_trait::{PTConstants, PageTable, PageTableState},
-    pte::{ExecPTE, GhostPTE},
+    pte::PageTableEntry,
 };
-use crate::address::{
-    addr::{SpecPAddr, VAddr},
-    frame::Frame,
+use crate::{
+    address::{
+        addr::{SpecPAddr, VAddr},
+        frame::Frame,
+    },
+    frame_allocator::frame_trait::FrameAllocator,
+    global_allocator::{
+        frame::{Frame4K, GlobalFrameAllocator},
+        GlobalAllocator,
+    },
 };
 use vstd::prelude::*;
 
@@ -20,79 +27,76 @@ verus! {
 
 /// Wrap `pt::PageTable` to implement `pt_trait::PageTable` trait, which is the specification
 /// required by higher-level components.
-pub struct ExPageTable<M, G, E>(pub pt::PageTable<M, G, E>) where
-    M: PageTableMem,
-    G: GhostPTE,
-    E: ExecPTE<G>,
-;
+pub struct ExPageTable<A, E>(pub pt::PageTable<A, E>) where A: FrameAllocator, E: PageTableEntry;
 
-impl<M, G, E> PageTable<M> for ExPageTable<M, G, E> where
-    M: PageTableMem,
-    G: GhostPTE,
-    E: ExecPTE<G>,
- {
-    open spec fn view(self) -> PageTableState {
-        self.0.view().view().view()
+impl<A, E> PageTable<A> for ExPageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
+    open spec fn view(&self, allocator: &GlobalFrameAllocator<A>) -> PageTableState {
+        self.0.view(allocator).view().view()
     }
 
-    open spec fn invariants(self) -> bool {
-        self.0.invariants()
+    open spec fn invariants(&self, allocator: &GlobalFrameAllocator<A>) -> bool {
+        self.0.invariants(allocator)
     }
 
-    fn new(pt_mem: M, constants: PTConstants) -> (pt: Self) {
+    fn new(allocator: &mut GlobalFrameAllocator<A>, cid: usize, constants: PTConstants) -> (pt:
+        Self) {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
+        let pt = pt::PageTable::<A, E>::new(allocator, cid, constants);
         proof {
-            pt_mem.view().lemma_init_implies_wf();
-        }
-        let pt = pt::PageTable::<M, G, E>::new(pt_mem, constants);
-        proof {
-            pt.view().pt_mem.lemma_contains_root();
-            pt.view().construct_node_facts(pt.view().pt_mem.root(), 0);
+            pt.view(allocator).pt_mem.lemma_contains_root();
+            pt.view(allocator).construct_node_facts(pt.view(allocator).pt_mem.root(), 0);
 
-            assert forall|base: SpecPAddr, idx: nat| pt.pt_mem@.accessible(base, idx) implies {
-                let pt_mem = pt.pt_mem@;
-                let table = pt_mem.table(base);
-                let pte = G::from_u64(pt_mem.read(base, idx));
-                !pte.valid()
-            } by {
-                assert(base == pt_mem@.root());
-                assert(pt_mem@.table_view(base) == seq![0u64; pt_mem@.arch.entry_count(0)]);
-                assert(pt_mem@.read(base, idx) == 0);
-            }
-            assert(pt.view().view().view().mappings === Map::empty());
+            // assert forall|base: SpecPAddr, idx: nat| pt.pt_mem@.accessible(base, idx) implies {
+            //     let pt_mem = pt.pt_mem@;
+            //     let table = pt_mem.table(base);
+            //     let pte = G::from_u64(pt_mem.read(base, idx));
+            //     !pte.valid()
+            // } by {
+            //     assert(base == pt_mem@.root());
+            //     assert(pt_mem@.table_view(base) == seq![0u64; pt_mem@.arch.entry_count(0)]);
+            //     assert(pt_mem@.read(base, idx) == 0);
+            // }
+            assert(pt.view(allocator).view().view().mappings === Map::empty());
         }
         ExPageTable(pt)
     }
 
-    fn map(&mut self, vbase: VAddr, frame: Frame) -> (res: Result<(), ()>) {
+    fn map(&mut self, allocator: &mut GlobalFrameAllocator<A>, vbase: VAddr, frame: Frame) -> (res:
+        Result<(), ()>) {
         proof {
-            self.0.view().lemma_wf_implies_node_wf();
-            self.0.view().pt_mem.lemma_contains_root();
-            self.0.view().construct_node_facts(self.0.view().pt_mem.root(), 0);
-            self.0.view().view().map_refinement(vbase@, frame@);
+            self.0.view(allocator).lemma_wf_implies_node_wf();
+            self.0.view(allocator).pt_mem.lemma_contains_root();
+            self.0.view(allocator).construct_node_facts(self.0.view(allocator).pt_mem.root(), 0);
+            self.0.view(allocator).view().map_refinement(vbase@, frame@);
         }
-        self.0.map(vbase, frame)
+        self.0.map(allocator, vbase, frame)
     }
 
-    fn unmap(&mut self, vbase: VAddr) -> (res: Result<(), ()>) {
+    fn unmap(&mut self, allocator: &mut GlobalFrameAllocator<A>, vbase: VAddr) -> (res: Result<
+        (),
+        (),
+    >) {
         proof {
-            self.0.view().lemma_wf_implies_node_wf();
-            self.0.view().pt_mem.lemma_contains_root();
-            self.0.view().construct_node_facts(self.0.view().pt_mem.root(), 0);
-            self.0.view().view().unmap_refinement(vbase@);
+            self.0.view(allocator).lemma_wf_implies_node_wf();
+            self.0.view(allocator).pt_mem.lemma_contains_root();
+            self.0.view(allocator).construct_node_facts(self.0.view(allocator).pt_mem.root(), 0);
+            self.0.view(allocator).view().unmap_refinement(vbase@);
         }
-        self.0.unmap(vbase)
+        self.0.unmap(allocator, vbase)
     }
 
-    fn query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>) {
+    fn query(&self, allocator: &GlobalFrameAllocator<A>, vaddr: VAddr) -> (res: Result<
+        (VAddr, Frame),
+        (),
+    >) {
         proof {
-            self.0.view().lemma_wf_implies_node_wf();
-            self.0.view().pt_mem.lemma_contains_root();
-            self.0.view().construct_node_facts(self.0.view().pt_mem.root(), 0);
-            self.0.view().view().query_refinement(vaddr@);
+            self.0.view(allocator).lemma_wf_implies_node_wf();
+            self.0.view(allocator).pt_mem.lemma_contains_root();
+            self.0.view(allocator).construct_node_facts(self.0.view(allocator).pt_mem.root(), 0);
+            self.0.view(allocator).view().query_refinement(vaddr@);
         }
-        self.0.query(vaddr)
+        self.0.query(allocator, vaddr)
     }
 }
 

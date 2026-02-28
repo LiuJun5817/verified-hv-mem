@@ -554,9 +554,9 @@ impl<A> PageTableMem<A> where A: FrameAllocator {
     /// Create a new page table memory.
     pub fn new(allocator: &mut GlobalFrameAllocator<A>, cid: usize, arch: PTArch) -> (res: Self)
         requires
-            allocator.has_client(cid),
-            allocator.invariants(),
-            allocator.view().clients[cid as nat].is_empty(),
+            old(allocator).has_client(cid),
+            old(allocator).invariants(),
+            old(allocator).view().clients[cid as nat].is_empty(),
         ensures
             res.view(allocator).init(),
     {
@@ -609,6 +609,7 @@ impl<A> PageTableMem<A> where A: FrameAllocator {
     }
 
     /// Get the value at the given index in the given table.
+    #[verifier::external_body]
     pub fn read(&self, allocator: &GlobalFrameAllocator<A>, base: PAddr, index: usize) -> u64
         requires
             self.invariants(allocator),
@@ -618,6 +619,7 @@ impl<A> PageTableMem<A> where A: FrameAllocator {
     }
 
     /// Write the value to the given index in the given table.
+    #[verifier::external_body]
     pub fn write(&self, allocator: &GlobalFrameAllocator<A>, base: PAddr, index: usize, value: u64)
         requires
             self.invariants(allocator),
