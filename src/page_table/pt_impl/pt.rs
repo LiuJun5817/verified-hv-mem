@@ -66,6 +66,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
             old(allocator).has_client(cid),
             old(allocator).invariants(),
             old(allocator).view().clients[cid as nat].is_empty(),
+            !old(allocator).view().free.is_empty(),
         ensures
             res.invariants(allocator),
             res.constants == constants,
@@ -88,7 +89,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
         requires
             self.invariants(allocator),
             self.view(allocator).pt_mem.contains_table(base@),
-            self.view(allocator).pt_mem.table(base@).level == level,
+            self.view(allocator).pt_mem.level(base@) == level,
         ensures
             self.view(allocator).is_table_empty(base@) == res,
     {
@@ -98,7 +99,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
                 self.invariants(allocator),
                 self.constants.arch@.entry_count(level as nat) == entry_count,
                 self.view(allocator).pt_mem.contains_table(base@),
-                self.view(allocator).pt_mem.table(base@).level == level,
+                self.view(allocator).pt_mem.level(base@) == level,
                 forall|j: nat|
                     #![auto]
                     j < i ==> !E::spec_from_u64(
@@ -126,7 +127,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
         requires
             self.invariants(allocator),
             self.pt_mem.view(allocator).contains_table(base@),
-            self.pt_mem.view(allocator).table(base@).level == level,
+            self.pt_mem.view(allocator).level(base@) == level,
         ensures
             (res.0, res.1 as nat) == self.view(allocator).walk(vaddr@, base@, level as nat),
         decreases self.constants.arch@.level_count() - level as nat,
@@ -158,8 +159,9 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
             old(self).invariants(old(allocator)),
             level <= target_level < old(self).arch().level_count(),
             old(self).pt_mem.view(old(allocator)).contains_table(base@),
-            old(self).pt_mem.view(old(allocator)).table(base@).level == level,
+            old(self).pt_mem.view(old(allocator)).level(base@) == level,
             old(self).view(old(allocator)).pte_valid_frame(new_pte, target_level as nat),
+            !old(allocator).view().free.is_empty(),
         ensures
             (self.view(allocator), res) == old(self).view(old(allocator)).insert(
                 vbase@,
@@ -208,7 +210,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
                     );
                 }
                 // Allocate intermediate table
-                let (table_base, _) = self.pt_mem.alloc_table(allocator, level + 1);
+                let table_base = self.pt_mem.alloc_table(allocator, level + 1);
                 proof {
                     // TODO: prove alignment
                     assume(table_base@.aligned(FrameSize::Size4K.as_nat()));
@@ -235,7 +237,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
             old(self).invariants(allocator),
             level < old(self).arch().level_count(),
             old(self).pt_mem.view(allocator).contains_table(base@),
-            old(self).pt_mem.view(allocator).table(base@).level == level,
+            old(self).pt_mem.view(allocator).level(base@) == level,
         ensures
             (self.view(allocator), res) == old(self).view(allocator).remove(
                 vbase@,
@@ -288,7 +290,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
             old(self).invariants(old(allocator)),
             level < old(self).arch().level_count(),
             old(self).pt_mem.view(old(allocator)).contains_table(base@),
-            old(self).pt_mem.view(old(allocator)).table(base@).level == level,
+            old(self).pt_mem.view(old(allocator)).level(base@) == level,
         ensures
             self.view(allocator) == old(self).view(old(allocator)).prune(
                 vaddr@,
@@ -353,11 +355,10 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
     {
         let (pte, level) = self.walk(allocator, vaddr, self.pt_mem.root, 0);
         proof {
-            let root = self.pt_mem.view(allocator).root();
+            let root = self.pt_mem.view(allocator).root;
             self.view(allocator).construct_node_facts(root, 0);
 
             // spec `get_pte` == node `visit`
-            self.pt_mem.view(allocator).lemma_contains_root();
             self.view(allocator).lemma_construct_node_implies_node_wf(root, 0);
             let node = self.view(allocator).construct_node(root, 0);
             self.view(allocator).lemma_walk_consistent_with_model(vaddr@, root, 0);
@@ -415,6 +416,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
             old(self).constants@.arch.is_valid_frame_size(frame.size),
             vbase@.aligned(frame.size.as_nat()),
             frame.base@.aligned(frame.size.as_nat()),
+            !old(allocator).view().free.is_empty(),
         ensures
             self.invariants(allocator),
             ({
@@ -432,7 +434,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
         let new_pte = E::new(frame.base, frame.attr, huge);
 
         proof {
-            let root = self.pt_mem.view(allocator).root();
+            let root = self.pt_mem.view(allocator).root;
             self.view(allocator).construct_node_facts(root, 0);
             // Ensures #1
             self.view(allocator).lemma_insert_preserves_wf(
@@ -474,7 +476,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
                 r is Ok == res is Ok && s2 == self.view(allocator)@
             }),
     {
-        let ghost root = self.pt_mem.view(allocator).root();
+        let ghost root = self.pt_mem.view(allocator).root;
         proof {
             self.view(allocator).construct_node_facts(root, 0);
             // Ensures #1

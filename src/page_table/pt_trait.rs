@@ -224,6 +224,7 @@ pub trait PageTable<A> where Self: Sized, A: FrameAllocator {
             old(allocator).has_client(cid),
             old(allocator).invariants(),
             old(allocator).view().clients[cid as nat].is_empty(),
+            !old(allocator).view().free.is_empty(),
             constants@.valid(),
         ensures
             pt.view(allocator).constants == constants@,
@@ -237,6 +238,7 @@ pub trait PageTable<A> where Self: Sized, A: FrameAllocator {
         requires
             old(self).invariants(old(allocator)),
             old(self).view(old(allocator)).map_pre(vbase@, frame@),
+            !old(allocator).view().free.is_empty(),
         ensures
             self.invariants(allocator),
             PageTableState::map(

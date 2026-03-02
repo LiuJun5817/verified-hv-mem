@@ -76,7 +76,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             self.wf(),
             self.pt_mem.contains_table(base),
     {
-        let level = self.pt_mem.table(base).level;
+        let level = self.pt_mem.level(base);
         forall|idx: nat|
             #![auto]
             idx < self.constants.arch.entry_count(level) ==> !E::spec_from_u64(
@@ -95,25 +95,25 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         &&& forall|base: SpecPAddr, idx: nat|
             self.pt_mem.accessible(base, idx) ==> {
                 let pt_mem = self.pt_mem;
-                let table = pt_mem.table(base);
+                let level = pt_mem.level(base);
                 let pte = E::spec_from_u64(pt_mem.read(base, idx));
                 let addr = pte.spec_addr();
                 // If `table` is a leaf table, `pte` is either invalid or points to a frame
-                &&& (table.level == self.constants.arch.level_count() - 1 && pte.spec_valid())
+                &&& (level == self.constants.arch.level_count() - 1 && pte.spec_valid())
                     ==> !pte.spec_huge()
                 // If `pte` is valid and points to a subtable
-                &&& self.pte_points_to_table(pte, table.level) ==> {
+                &&& self.pte_points_to_table(pte, level) ==> {
                     // The subtable is not root
                     &&& addr
-                        != self.pt_mem.root()
+                        != self.pt_mem.root
                     // `pt_mem` contains the subtable, and the table level is one level higher than `base`
                     &&& pt_mem.contains_table(addr)
-                    &&& pt_mem.table(addr).level == table.level + 1
+                    &&& pt_mem.level(addr) == level + 1
                 }
                 // If `pte` is valid and points to a frame
-                &&& self.pte_points_to_frame(pte, table.level) ==> {
+                &&& self.pte_points_to_frame(pte, level) ==> {
                     // The frame is valid
-                    addr.aligned(self.constants.arch.frame_size(table.level).as_nat())
+                    addr.aligned(self.constants.arch.frame_size(level).as_nat())
                 }
             }
             // For each 2 page table entries that can be accessed
@@ -123,8 +123,8 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let pte2 = E::spec_from_u64(self.pt_mem.read(base2, idx2));
                 // If two pte points to the same table, they must be equal
                 ({
-                    &&& self.pte_points_to_table(pte1, self.pt_mem.table(base1).level)
-                    &&& self.pte_points_to_table(pte2, self.pt_mem.table(base2).level)
+                    &&& self.pte_points_to_table(pte1, self.pt_mem.level(base1))
+                    &&& self.pte_points_to_table(pte2, self.pt_mem.level(base2))
                 }) ==> {
                     ||| base1 == base2 && idx1 == idx2
                     ||| (pte1.spec_addr() != pte2.spec_addr())
@@ -136,8 +136,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     pub uninterp spec fn construct_node(self, base: SpecPAddr, level: nat) -> PTTreeNode
         recommends
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
     ;
 
@@ -146,8 +145,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     pub proof fn construct_node_facts(self, base: SpecPAddr, level: nat)
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
             ({
@@ -182,7 +180,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         recommends
             self.wf(),
     {
-        PTTreeModel { root: self.construct_node(self.pt_mem.root(), 0) }
+        PTTreeModel { root: self.construct_node(self.pt_mem.root, 0) }
     }
 
     /// Perform a recursive specification-level page table walk starting from a given base.
@@ -191,8 +189,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     pub open spec fn walk(self, vaddr: SpecVAddr, base: SpecPAddr, level: nat) -> (E, nat)
         recommends
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         decreases self.constants.arch.level_count() - level,
     {
@@ -217,8 +214,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     ) -> (Self, PagingResult)
         recommends
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
         decreases target_level - level,
@@ -246,16 +242,16 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             } else {
                 // Insert intermediate table
                 // Allocate a new table
-                let (pt_mem, table) = self.pt_mem.alloc_table(level + 1);
+                let (pt_mem, new_base) = self.pt_mem.alloc_table(level + 1);
                 // Write entry
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 Self::new(pt_mem, self.constants).insert(
                     vbase,
-                    table.base,
+                    new_base,
                     level + 1,
                     target_level,
                     new_pte,
@@ -271,8 +267,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         recommends
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         decreases self.constants.arch.level_count() - level,
     {
@@ -319,8 +314,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     pub open spec fn prune(self, vaddr: SpecVAddr, base: SpecPAddr, level: nat) -> Self
         recommends
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         decreases self.constants.arch.level_count() - level,
     {
@@ -362,8 +356,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     ) -> Seq<SpecPAddr>
         recommends
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         decreases self.constants.arch.level_count() - level,
     {
@@ -384,8 +377,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     pub proof fn lemma_construct_node_implies_node_wf(self, base: SpecPAddr, level: nat)
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
             self.construct_node(base, level).wf(),
@@ -408,7 +400,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     assert(self.pt_mem.accessible(base, i as nat));
                     // wf ensures this
                     assert(self.pt_mem.contains_table(pte.spec_addr()));
-                    assert(self.pt_mem.table(pte.spec_addr()).level == level + 1);
+                    assert(self.pt_mem.level(pte.spec_addr()) == level + 1);
                     self.construct_node_facts(pte.spec_addr(), level + 1);
                     self.lemma_construct_node_implies_node_wf(pte.spec_addr(), level + 1);
                 },
@@ -424,8 +416,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         ensures
             self@.wf(),
     {
-        self.pt_mem.lemma_contains_root();
-        self.lemma_construct_node_implies_node_wf(self.pt_mem.root(), 0);
+        self.lemma_construct_node_implies_node_wf(self.pt_mem.root, 0);
         // TODO: fully_populated not checked
         assume(false);
     }
@@ -438,10 +429,10 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         ensures
             self.is_table_empty(base) <==> self.construct_node(
                 base,
-                self.pt_mem.table(base).level,
+                self.pt_mem.level(base),
             ).empty(),
     {
-        let level = self.pt_mem.table(base).level;
+        let level = self.pt_mem.level(base);
         let node = self.construct_node(base, level);
         self.construct_node_facts(base, level);
         if node.empty() {
@@ -466,16 +457,17 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
             ({
                 let tables = self.collect_table_chain(vaddr, base, level);
                 &&& forall|i|
                     #![auto]
-                    0 <= i < tables.len() ==> self.pt_mem.contains_table(tables[i])
-                        && self.pt_mem.table(tables[i]).level == level + i
+                    0 <= i < tables.len() ==> self.pt_mem.contains_table_with_level(
+                        tables[i],
+                        level + i as nat,
+                    )
                 &&& forall|i|
                     0 <= i < tables.len() - 1 ==> {
                         let idx = self.constants.arch.pte_index(vaddr, level + i as nat);
@@ -486,10 +478,14 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             }),
         decreases self.constants.arch.level_count() - level,
     {
+        let tables = self.collect_table_chain(vaddr, base, level);
         let idx = self.constants.arch.pte_index(vaddr, level);
-        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+
         if self.pte_points_to_table(pte, level) {
+            let sub_tables = self.collect_table_chain(vaddr, pte.spec_addr(), level + 1);
+            assert(sub_tables == tables.skip(1));
             // PTE points to a child table: continue walk into the child table
             self.lemma_table_chain_entries_valid(vaddr, pte.spec_addr(), level + 1);
         }
@@ -506,8 +502,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
             self.pt_mem.accessible(base, idx2),
             idx2 != self.constants.arch.pte_index(vaddr, level),
@@ -552,14 +547,13 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
             self.pt_mem.accessible(base2, idx2),
-            self.pt_mem.table(base2).level >= level,
+            self.pt_mem.level(base2) >= level,
             self.pte_points_to_table(
                 E::spec_from_u64(self.pt_mem.read(base2, idx2)),
-                self.pt_mem.table(base2).level,
+                self.pt_mem.level(base2),
             ),
             !self.collect_table_chain(vaddr, base, level).contains(base2),
         ensures
@@ -578,7 +572,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             let i = choose|i| 0 <= i < tables.len() && tables[i] == pte2.spec_addr();
             let base3 = tables[i - 1];
             assert(tables.contains(base3));
-            let level3 = self.pt_mem.table(base3).level;
+            let level3 = self.pt_mem.level(base3);
             let idx3 = self.constants.arch.pte_index(vaddr, level3);
             assert(self.pt_mem.accessible(base3, idx3));
 
@@ -600,8 +594,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
             ({
@@ -662,68 +655,67 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level + 1 < self.constants.arch.level_count(),
             self.pt_mem.accessible(base, idx),
             !E::spec_from_u64(self.pt_mem.read(base, idx)).spec_valid(),
         ensures
             ({
-                let (pt_mem, table) = self.pt_mem.alloc_table(level + 1);
+                let (pt_mem, new_base) = self.pt_mem.alloc_table(level + 1);
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 Self::new(pt_mem, self.constants).wf()
             }),
     {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
-        let (pt_mem, table) = self.pt_mem.alloc_table(level + 1);
+        let (pt_mem, new_base) = self.pt_mem.alloc_table(level + 1);
         let pt_mem = pt_mem.write(
             base,
             idx,
-            E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
+            E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
         );
         let s2 = Self::new(pt_mem, self.constants);
 
         assert forall|base2: SpecPAddr, idx2: nat| pt_mem.accessible(base2, idx2) implies {
-            let table2 = pt_mem.table(base2);
+            let level2 = pt_mem.level(base2);
             let pte = E::spec_from_u64(pt_mem.read(base2, idx2));
             let addr = pte.spec_addr();
-            &&& (table2.level == s2.constants.arch.level_count() - 1 && pte.spec_valid())
+            &&& (level2 == s2.constants.arch.level_count() - 1 && pte.spec_valid())
                 ==> !pte.spec_huge()
-            &&& s2.pte_points_to_table(pte, table2.level) ==> {
-                &&& addr != pt_mem.root()
+            &&& s2.pte_points_to_table(pte, level2) ==> {
+                &&& addr != pt_mem.root
                 &&& pt_mem.contains_table(addr)
-                &&& pt_mem.table(addr).level == table2.level + 1
+                &&& pt_mem.level(addr) == level2 + 1
             }
-            &&& s2.pte_points_to_frame(pte, table2.level) ==> {
-                addr.aligned(s2.constants.arch.frame_size(table2.level).as_nat())
+            &&& s2.pte_points_to_frame(pte, level2) ==> {
+                addr.aligned(s2.constants.arch.frame_size(level2).as_nat())
             }
         } by {
-            let table2 = pt_mem.table(base2);
+            let level2 = pt_mem.level(base2);
             let val = pt_mem.read(base2, idx2);
             let pte = E::spec_from_u64(val);
 
             if base2 == base && idx2 == idx {
                 // `(base2, idx2)` is the entry just inserted
-                E::lemma_eq_by_u64(pte, E::spec_new(table.base, MemAttr::spec_default(), false));
+                E::lemma_eq_by_u64(pte, E::spec_new(new_base, MemAttr::spec_default(), false));
             } else {
-                if base2 == table.base {
+                if base2 == new_base {
                     // `base2` is the newly allocated table
                     assert(pte == E::spec_from_u64(0));
                 } else {
                     // Entry at `(base2, idx2)` is not updated
                     assert(self.pt_mem.accessible(base2, idx2));
                     assert(val == self.pt_mem.read(base2, idx2));
-                    if self.pte_points_to_table(pte, table2.level) {
-                        assert(pte.spec_addr() != pt_mem.root());
+                    if self.pte_points_to_table(pte, level2) {
+                        assert(pte.spec_addr() != pt_mem.root);
                         assert(pt_mem.contains_table(pte.spec_addr()));
-                        assert(pt_mem.table(pte.spec_addr()).level == table2.level + 1);
+                        assert(pt_mem.level(pte.spec_addr()) == level2 + 1);
                     }
-                    if table2.level == self.constants.arch.level_count() - 1 && pte.spec_valid() {
+                    if level2 == self.constants.arch.level_count() - 1 && pte.spec_valid() {
                         assert(!pte.spec_huge());
                     }
                 }
@@ -734,8 +726,8 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             let pte1 = E::spec_from_u64(pt_mem.read(base1, idx1));
             let pte2 = E::spec_from_u64(pt_mem.read(base2, idx2));
             ({
-                &&& s2.pte_points_to_table(pte1, pt_mem.table(base1).level)
-                &&& s2.pte_points_to_table(pte2, pt_mem.table(base2).level)
+                &&& s2.pte_points_to_table(pte1, pt_mem.level(base1))
+                &&& s2.pte_points_to_table(pte2, pt_mem.level(base2))
             }) ==> {
                 ||| base1 == base2 && idx1 == idx2
                 ||| (pte1.spec_addr() != pte2.spec_addr())
@@ -743,11 +735,11 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         } by {
             let pte1 = E::spec_from_u64(pt_mem.read(base1, idx1));
             let pte2 = E::spec_from_u64(pt_mem.read(base2, idx2));
-            if s2.pte_points_to_table(pte1, pt_mem.table(base1).level) && s2.pte_points_to_table(
+            if s2.pte_points_to_table(pte1, pt_mem.level(base1)) && s2.pte_points_to_table(
                 pte2,
-                pt_mem.table(base2).level,
+                pt_mem.level(base2),
             ) {
-                assert(base1 != table.base && base2 != table.base);
+                assert(base1 != new_base && base2 != new_base);
                 assert(self.pt_mem.accessible(base1, idx1));
                 assert(self.pt_mem.accessible(base2, idx2));
             }
@@ -766,15 +758,14 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
             self.pt_mem.contains_table(base2),
         ensures
             self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.contains_table(base2),
-            self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.table(base2)
-                == self.pt_mem.table(base2),
+            self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.level(base2)
+                == self.pt_mem.level(base2),
         decreases target_level - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
@@ -801,17 +792,17 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     )
                 }
             } else {
-                let (pt_mem, table) = self.pt_mem.alloc_table(level + 1);
+                let (pt_mem, new_base) = self.pt_mem.alloc_table(level + 1);
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
                 // Ensures `pt_mem` after `alloc_table` satisfies the wf
                 Self::new(pt_mem, self.constants).lemma_insert_preserves_old_tables(
                     vbase,
-                    table.base,
+                    new_base,
                     level + 1,
                     target_level,
                     new_pte,
@@ -832,13 +823,12 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
         ensures
-            self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.root()
-                == self.pt_mem.root(),
+            self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.root
+                == self.pt_mem.root,
         decreases target_level - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
@@ -859,18 +849,18 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 }
             } else {
                 // Allocate intermediate table
-                let (pt_mem, table) = self.pt_mem.alloc_table(level + 1);
+                let (pt_mem, new_base) = self.pt_mem.alloc_table(level + 1);
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
 
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
                 assert(s2.wf());
-                s2.lemma_insert_preserves_root(vbase, table.base, level + 1, target_level, new_pte)
+                s2.lemma_insert_preserves_root(vbase, new_base, level + 1, target_level, new_pte)
             }
         }
     }
@@ -886,8 +876,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
         ensures
@@ -913,18 +902,18 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 }
             } else {
                 // Allocate intermediate table
-                let (pt_mem, table) = self.pt_mem.alloc_table(level + 1);
+                let (pt_mem, new_base) = self.pt_mem.alloc_table(level + 1);
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
 
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
                 assert(s2.wf());
-                s2.lemma_insert_preserves_wf(vbase, table.base, level + 1, target_level, new_pte);
+                s2.lemma_insert_preserves_wf(vbase, new_base, level + 1, target_level, new_pte);
             }
         }
     }
@@ -940,8 +929,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
         ensures
@@ -958,32 +946,34 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             }),
         decreases target_level - level,
     {
+        broadcast use crate::page_table::pte::group_pte_lemmas;
+
         let idx = self.constants.arch.pte_index(vbase, level);
         let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         if level < target_level && !pte.spec_valid() {
             // Allocate intermediate table
-            let (pt_mem, table) = self.pt_mem.alloc_table(level + 1);
+            let (pt_mem, new_base) = self.pt_mem.alloc_table(level + 1);
             let pt_mem = pt_mem.write(
                 base,
                 idx,
-                E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
+                E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
             );
             // `s2` is the state after allocating an intermediate table
             let s2 = Self::new(pt_mem, self.constants);
             self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
             assert(s2.wf());
 
-            let (_, insert_res) = s2.insert(vbase, table.base, level + 1, target_level, new_pte);
+            let (_, insert_res) = s2.insert(vbase, new_base, level + 1, target_level, new_pte);
             let idx = s2.constants.arch.pte_index(vbase, level + 1);
-            let pte = E::spec_from_u64(s2.pt_mem.read(table.base, idx));
+            let pte = E::spec_from_u64(s2.pt_mem.read(new_base, idx));
             // New table is empty
-            assert(s2.pt_mem.read(table.base, idx) == 0);
+            assert(s2.pt_mem.read(new_base, idx) == 0);
             assert(!pte.spec_valid());
 
             // Recursive proof for the next level
             s2.lemma_insert_intermediate_node_results_ok(
                 vbase,
-                table.base,
+                new_base,
                 level + 1,
                 target_level,
                 new_pte,
@@ -1004,16 +994,15 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
             self.pt_mem.contains_table(base2),
             !self.collect_table_chain(vbase, base, level).contains(base2),
         ensures
             self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.contains_table(base2),
-            self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.table(base2)
-                == self.pt_mem.table(base2),
+            self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.level(base2)
+                == self.pt_mem.level(base2),
             self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.table_view(base2)
                 == self.pt_mem.table_view(base2),
         decreases target_level - level,
@@ -1047,18 +1036,18 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 }
             } else {
                 // Allocate intermediate table — create a new table and link it from `base` via the PTE
-                let (pt_mem, table) = self.pt_mem.alloc_table(level + 1);
+                let (pt_mem, new_base) = self.pt_mem.alloc_table(level + 1);
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
                 assert(s2.wf());
 
-                let pte = E::spec_new(table.base, MemAttr::spec_default(), false);
+                let pte = E::spec_new(new_base, MemAttr::spec_default(), false);
                 let tables = s2.collect_table_chain(vbase, base, level);
                 let tables2 = s2.collect_table_chain(vbase, pte.spec_addr(), level + 1);
                 assert(s2.pt_mem.read(base, idx) == pte.spec_to_u64());
@@ -1070,7 +1059,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 assert(!tables2.contains(base2));
                 s2.lemma_insert_preserves_tables_outside_chain(
                     vbase,
-                    table.base,
+                    new_base,
                     level + 1,
                     target_level,
                     new_pte,
@@ -1095,10 +1084,9 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             self.pt_mem.contains_table(base2),
-            self.pt_mem.table(base2).level == level2,
+            self.pt_mem.level(base2) == level2,
             level <= target_level < self.constants.arch.level_count(),
             level <= level2 < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
@@ -1184,8 +1172,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
         ensures
@@ -1302,13 +1289,13 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     assert(node2.entries == right.entries);
                 }
             } else {
-                let (allocated, table) = self.pt_mem.alloc_table(level + 1);
+                let (allocated, new_base) = self.pt_mem.alloc_table(level + 1);
                 let written = allocated.write(
                     base,
                     idx,
-                    E::spec_new(table.base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
                 );
-                let subtable_base = table.base;
+                let subtable_base = new_base;
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
 
                 // s3 is the state after allocating a new intermediate table
@@ -1316,14 +1303,14 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let subnode = PTTreeNode::new(self.constants, level + 1);
                 E::lemma_eq_by_u64(
                     E::spec_from_u64(s3.pt_mem.read(base, idx)),
-                    E::spec_new(table.base, MemAttr::spec_default(), false),
+                    E::spec_new(new_base, MemAttr::spec_default(), false),
                 );
                 assert(s3.construct_node(base, level).entries[idx as int] == NodeEntry::Node(
                     subnode,
                 ));
 
                 let new_subnode = subnode.insert(remain, new_frame).0;
-                assert(s2 == s3.insert(vbase, table.base, level + 1, target_level, new_pte).0);
+                assert(s2 == s3.insert(vbase, new_base, level + 1, target_level, new_pte).0);
                 // Recursive call shows subnode is updated according to model
                 s3.lemma_insert_consistent_with_model(
                     vbase,
@@ -1357,8 +1344,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     pub proof fn lemma_remove_preserves_wf(self, vbase: SpecVAddr, base: SpecPAddr, level: nat)
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
             self.remove(vbase, base, level).0.wf(),
@@ -1382,13 +1368,12 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
             self.pt_mem.contains_table(base2),
         ensures
             self.remove(vbase, base, level).0.pt_mem.contains_table(base2),
-            self.remove(vbase, base, level).0.pt_mem.table(base2) == self.pt_mem.table(base2),
+            self.remove(vbase, base, level).0.pt_mem.level(base2) == self.pt_mem.level(base2),
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
@@ -1403,11 +1388,10 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     pub proof fn lemma_remove_preserves_root(self, vbase: SpecVAddr, base: SpecPAddr, level: nat)
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
-            self.remove(vbase, base, level).0.pt_mem.root() == self.pt_mem.root(),
+            self.remove(vbase, base, level).0.pt_mem.root == self.pt_mem.root,
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vbase, level);
@@ -1427,8 +1411,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
             ({
@@ -1519,8 +1502,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count() - 1,
             self.pt_mem.accessible(base, idx),
             ({
@@ -1546,21 +1528,21 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         let s2 = Self::new(pt_mem, self.constants);
 
         assert forall|base2: SpecPAddr, idx2: nat| pt_mem.accessible(base2, idx2) implies {
-            let table2 = pt_mem.table(base2);
+            let level2 = pt_mem.level(base2);
             let pte2 = E::spec_from_u64(pt_mem.read(base2, idx2));
             let addr = pte2.spec_addr();
-            &&& (table2.level == s2.constants.arch.level_count() - 1 && pte2.spec_valid())
+            &&& (level2 == s2.constants.arch.level_count() - 1 && pte2.spec_valid())
                 ==> !pte2.spec_huge()
-            &&& s2.pte_points_to_table(pte2, table2.level) ==> {
-                &&& addr != pt_mem.root()
+            &&& s2.pte_points_to_table(pte2, level2) ==> {
+                &&& addr != pt_mem.root
                 &&& pt_mem.contains_table(addr)
-                &&& pt_mem.table(addr).level == table2.level + 1
+                &&& pt_mem.level(addr) == level2 + 1
             }
-            &&& s2.pte_points_to_frame(pte2, table2.level) ==> {
-                addr.aligned(s2.constants.arch.frame_size(table2.level).as_nat())
+            &&& s2.pte_points_to_frame(pte2, level2) ==> {
+                addr.aligned(s2.constants.arch.frame_size(level2).as_nat())
             }
         } by {
-            let table2 = pt_mem.table(base2);
+            let level2 = pt_mem.level(base2);
             let val = pt_mem.read(base2, idx2);
             let pte2 = E::spec_from_u64(val);
 
@@ -1570,7 +1552,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             } else {
                 assert(self.pt_mem.accessible(base2, idx2));
                 E::lemma_eq_by_u64(pte2, E::spec_from_u64(self.pt_mem.read(base2, idx2)));
-                if s2.pte_points_to_table(pte2, table2.level) {
+                if s2.pte_points_to_table(pte2, level2) {
                     // wf ensures no double reference
                     assert(pte2.spec_addr() != pte.spec_addr());
                 }
@@ -1581,8 +1563,8 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             let pte1 = E::spec_from_u64(pt_mem.read(base1, idx1));
             let pte2 = E::spec_from_u64(pt_mem.read(base2, idx2));
             ({
-                &&& s2.pte_points_to_table(pte1, pt_mem.table(base1).level)
-                &&& s2.pte_points_to_table(pte2, pt_mem.table(base2).level)
+                &&& s2.pte_points_to_table(pte1, pt_mem.level(base1))
+                &&& s2.pte_points_to_table(pte2, pt_mem.level(base2))
             }) ==> {
                 ||| base1 == base2 && idx1 == idx2
                 ||| (pte1.spec_addr() != pte2.spec_addr())
@@ -1590,9 +1572,9 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         } by {
             let pte1 = E::spec_from_u64(pt_mem.read(base1, idx1));
             let pte2 = E::spec_from_u64(pt_mem.read(base2, idx2));
-            if s2.pte_points_to_table(pte1, pt_mem.table(base1).level) && s2.pte_points_to_table(
+            if s2.pte_points_to_table(pte1, pt_mem.level(base1)) && s2.pte_points_to_table(
                 pte2,
-                pt_mem.table(base2).level,
+                pt_mem.level(base2),
             ) {
                 assert(base1 != pte.spec_addr() && base2 != pte.spec_addr());
                 assert(self.pt_mem.accessible(base1, idx1));
@@ -1605,8 +1587,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     pub proof fn lemma_prune_preserves_wf(self, vaddr: SpecVAddr, base: SpecPAddr, level: nat)
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
             self.prune(vaddr, base, level).wf(),
@@ -1643,19 +1624,16 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
             self.pt_mem.contains_table(base2),
-            self.pt_mem.table(base2).level <= level,
+            self.pt_mem.level(base2) <= level,
         ensures
             self.prune(vaddr, base, level).pt_mem.contains_table(base2),
-            self.prune(vaddr, base, level).pt_mem.table(base2) == self.pt_mem.table(base2),
-            self.pt_mem.table(base2).level < level ==> self.prune(
-                vaddr,
-                base,
-                level,
-            ).pt_mem.table_view(base2) == self.pt_mem.table_view(base2),
+            self.prune(vaddr, base, level).pt_mem.level(base2) == self.pt_mem.level(base2),
+            self.pt_mem.level(base2) < level ==> self.prune(vaddr, base, level).pt_mem.table_view(
+                base2,
+            ) == self.pt_mem.table_view(base2),
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vaddr, level);
@@ -1680,11 +1658,10 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     pub proof fn lemma_prune_preserves_root(self, vaddr: SpecVAddr, base: SpecPAddr, level: nat)
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
-            self.prune(vaddr, base, level).pt_mem.root() == self.pt_mem.root(),
+            self.prune(vaddr, base, level).pt_mem.root == self.pt_mem.root,
         decreases self.constants.arch.level_count() - level,
     {
         let idx = self.constants.arch.pte_index(vaddr, level);
@@ -1715,14 +1692,13 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
             self.pt_mem.contains_table(base2),
             !self.collect_table_chain(vaddr, base, level).contains(base2),
         ensures
             self.prune(vaddr, base, level).pt_mem.contains_table(base2),
-            self.prune(vaddr, base, level).pt_mem.table(base2) == self.pt_mem.table(base2),
+            self.prune(vaddr, base, level).pt_mem.level(base2) == self.pt_mem.level(base2),
             self.prune(vaddr, base, level).pt_mem.table_view(base2) == self.pt_mem.table_view(
                 base2,
             ),
@@ -1783,10 +1759,9 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            self.pt_mem.table(base).level == level,
+            self.pt_mem.contains_table_with_level(base, level),
             self.pt_mem.contains_table(base2),
-            self.pt_mem.table(base2).level == level2,
+            self.pt_mem.level(base2) == level2,
             level <= level2 < self.constants.arch.level_count(),
             !self.collect_table_chain(vaddr, base, level).contains(base2),
         ensures
@@ -1855,8 +1830,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.pt_mem.contains_table(base),
-            level == self.pt_mem.table(base).level,
+            self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
             ({

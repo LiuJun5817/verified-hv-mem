@@ -5,57 +5,52 @@
 use std::marker::PhantomData;
 use vstd::prelude::*;
 
-use crate::global_allocator::frame::{self, GlobalFrameAllocator};
-use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 use crate::{
     address::{
         addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
         frame::FrameSize,
     },
     frame_allocator::frame_trait::FrameAllocator,
-    global_allocator::{frame::Frame4K, GlobalAllocator, Resource},
+    global_allocator::{
+        frame::{Frame4K, GlobalFrameAllocator},
+        GlobalAllocator, Resource,
+    },
+    page_table::pt_arch::{PTArch, SpecPTArch},
 };
 
 verus! {
-
-/// Describe a page table stored in physical memory.
-pub struct SpecTable {
-    /// Base address of the table.
-    pub base: SpecPAddr,
-    /// Size of the table.
-    pub size: FrameSize,
-    /// Level of the table.
-    pub level: nat,
-}
 
 /// Abstract model of page table memory, a memory region that stores page tables.
 ///
 /// Hardware reads page table memory to perform page table walk, but cannot write to it.
 /// Page table memory is modified by page table functions.
 pub struct SpecPageTableMem {
-    /// All tables in the hierarchical page table, the first table is the root.
-    pub tables: Seq<SpecTable>,
+    /// All tables in the hierarchical page table, the key is the base address of the table,
+    /// and the value is the level of the table.
+    pub tables: Map<SpecPAddr, nat>,
     /// Page table architecture.
     pub arch: SpecPTArch,
+    /// Root table address.
+    pub root: SpecPAddr,
 }
 
 impl SpecPageTableMem {
-    /// Root page table address.
-    pub open spec fn root(self) -> SpecPAddr {
-        self.tables[0].base
+    /// Get the table with the given base address.
+    pub open spec fn level(self, base: SpecPAddr) -> nat
+        recommends
+            self.contains_table(base),
+    {
+        self.tables[base]
     }
 
     /// If the table with the given base address exists.
     pub open spec fn contains_table(self, base: SpecPAddr) -> bool {
-        exists|table: SpecTable| #[trigger] self.tables.contains(table) && table.base == base
+        self.tables.contains_key(base)
     }
 
-    /// Get the table with the given base address.
-    pub open spec fn table(self, base: SpecPAddr) -> SpecTable
-        recommends
-            self.contains_table(base),
-    {
-        choose|table: SpecTable| #[trigger] self.tables.contains(table) && table.base == base
+    /// If the table with the given base address and level exists.
+    pub open spec fn contains_table_with_level(self, base: SpecPAddr, level: nat) -> bool {
+        self.tables.contains_key(base) && self.tables[base] == level
     }
 
     /// View a table as a sequence of entries.
@@ -64,14 +59,56 @@ impl SpecPageTableMem {
             self.contains_table(base),
     ;
 
-    /// Facts about table view.
-    #[verifier::external_body]
+    /// Facts about table view. It should not be called directly.
     pub broadcast proof fn table_view_facts(self, base: SpecPAddr)
         requires
             self.wf(),
         ensures
-            #[trigger] self.table_view(base).len() == self.arch.entry_count(self.table(base).level),
+            #[trigger] self.table_view(base).len() == self.arch.entry_count(self.tables[base]),
     {
+        admit();
+    }
+
+    /// Well-formedness.
+    pub open spec fn wf(self) -> bool {
+        &&& self.arch.valid()
+        // Root table is always present.
+        &&& self.contains_table_with_level(
+            self.root,
+            0,
+        )
+        // Table level is valid.
+        &&& forall|base: SpecPAddr| #[trigger]
+            self.tables.contains_key(base) ==> self.tables[base]
+                < self.arch.level_count()
+        // All tables are properly aligned.
+        &&& forall|base: SpecPAddr| #[trigger]
+            self.tables.contains_key(base) ==> base.aligned(
+                self.arch.table_size(self.tables[base]),
+            )
+        // All tables should not overlap.
+        &&& forall|base1: SpecPAddr, base2: SpecPAddr|
+            self.tables.contains_key(base1) && self.tables.contains_key(base2) && base1 != base2
+                ==> !SpecPAddr::overlap(
+                base1,
+                self.arch.table_size(self.tables[base1]),
+                base2,
+                self.arch.table_size(self.tables[base2]),
+            )
+    }
+
+    /// Init State.
+    pub open spec fn init(self) -> bool {
+        &&& self.arch.valid()
+        // Contains only the root table
+        &&& self.tables
+            == map![self.root => 0nat]
+        // Root table is aligned
+        &&& self.root.aligned(
+            self.arch.table_size(0),
+        )
+        // Root table is empty
+        &&& self.table_view(self.root) == Seq::new(self.arch.entry_count(0), |_i| 0u64)
     }
 
     /// If a table is empty.
@@ -84,7 +121,7 @@ impl SpecPageTableMem {
 
     /// If accessing the given table at the given index is allowed.
     pub open spec fn accessible(self, base: SpecPAddr, index: nat) -> bool {
-        self.contains_table(base) && index < self.arch.entry_count(self.table(base).level)
+        self.contains_table(base) && index < self.arch.entry_count(self.tables[base])
     }
 
     /// Read the entry at the given index in the given table.
@@ -95,45 +132,8 @@ impl SpecPageTableMem {
         self.table_view(base)[index as int]
     }
 
-    /// Well-formedness.
-    pub open spec fn wf(self) -> bool {
-        &&& self.arch.valid()
-        // Root table is always present.
-        &&& self.tables.len() > 0
-        // Root table level is 0
-        &&& self.tables[0].level == 0
-        // Table level is valid.
-        &&& forall|i|
-            0 <= i < self.tables.len() ==> #[trigger] self.tables[i].level
-                < self.arch.level_count()
-        // Table size is valid.
-        &&& forall|i|
-            0 <= i < self.tables.len() ==> #[trigger] self.tables[i].size.as_nat()
-                == self.arch.table_size(
-                self.tables[i].level,
-            )
-        // All tables should not overlap.
-        &&& forall|i, j|
-            0 <= i < self.tables.len() && 0 <= j < self.tables.len() ==> i == j
-                || !SpecPAddr::overlap(
-                self.tables[i].base,
-                self.tables[i].size.as_nat(),
-                self.tables[j].base,
-                self.tables[j].size.as_nat(),
-            )
-    }
-
-    /// Init State.
-    pub open spec fn init(self) -> bool {
-        &&& self.arch.valid()
-        &&& self.tables.len() == 1
-        &&& self.tables[0].level == 0
-        &&& self.tables[0].size.as_nat() == self.arch.table_size(0)
-        &&& self.table_view(self.root()) == Seq::new(self.arch.entry_count(0), |_i| 0u64)
-    }
-
     /// Allocate a new table.
-    pub uninterp spec fn alloc_table(self, level: nat) -> (Self, SpecTable)
+    pub uninterp spec fn alloc_table(self, level: nat) -> (Self, SpecPAddr)
         recommends
             self.alloc_table_pre(level),
     ;
@@ -144,52 +144,51 @@ impl SpecPageTableMem {
     }
 
     /// Specification of `alloc_table`.
-    pub open spec fn alloc_table_spec(s1: Self, s2: Self, level: nat, table: SpecTable) -> bool {
+    pub open spec fn alloc_table_spec(s1: Self, s2: Self, level: nat, new_base: SpecPAddr) -> bool {
         &&& s1.alloc_table_pre(level)
-        &&& (s2, table) == s1.alloc_table(level)
+        &&& (s2, new_base) == s1.alloc_table(level)
         // `arch` is unchanged
         &&& s2.arch == s1.arch
-        // `self` doesn't have the table
-        &&& !s1.contains_table(table.base)
-        // new table has valid level
-        &&& table.level == level
-        // new table has valid size
-        &&& table.size.as_nat() == s1.arch.table_size(
-            level,
-        )
+        // `root` is unchanged
+        &&& s2.root == s1.root
+        // `s1` doesn't have the table
+        &&& !s1.contains_table(new_base)
         // new table is aligned
-        &&& table.base.aligned(table.size.as_nat())
-        // new table is empty
-        &&& s2.table_view(table.base) == Seq::new(
+        &&& new_base.aligned(
+            s1.arch.table_size(level),
+        )
+        // new table doesn't overlap with existing tables
+        &&& forall|base: SpecPAddr| #[trigger]
+            s1.tables.contains_key(base) ==> !SpecPAddr::overlap(
+                new_base,
+                s1.arch.table_size(level),
+                base,
+                s1.arch.table_size(s1.level(base)),
+            )
+            // new table is empty
+        &&& s2.table_view(new_base) == Seq::new(
             s2.arch.entry_count(level),
             |_i| 0u64,
         )
-        // old tables are the same
+        // new table is added
+        &&& s2.tables == s1.tables.insert(
+            new_base,
+            level,
+        )
+        // old tables' contents are preserved
         &&& forall|base: SpecPAddr| #[trigger]
-            s1.contains_table(base) ==> s2.table_view(base) == s1.table_view(
-                base,
-            )
-        // new table doesn't overlap with existing tables
-        &&& forall|i|
-            #![auto]
-            0 <= i < s1.tables.len() ==> !SpecPAddr::overlap(
-                s1.tables[i].base,
-                s1.tables[i].size.as_nat(),
-                table.base,
-                table.size.as_nat(),
-            )
-            // `tables` is updated
-        &&& s2.tables == s1.tables.push(table)
+            s1.tables.contains_key(base) ==> s2.table_view(base) == s1.table_view(base)
     }
 
-    /// Restrict `alloc_table` using proof fn.
+    /// Restrict `alloc_table` using proof fn. It should not be called when we want to reason about
+    /// the executable implementation of the `alloc_table` function.
     pub broadcast proof fn alloc_table_facts(self, level: nat)
         requires
             self.alloc_table_pre(level),
         ensures
             ({
-                let (s2, table) = #[trigger] self.alloc_table(level);
-                Self::alloc_table_spec(self, s2, level, table)
+                let (s2, new_base) = #[trigger] self.alloc_table(level);
+                Self::alloc_table_spec(self, s2, level, new_base)
             }),
     {
         admit();
@@ -204,7 +203,7 @@ impl SpecPageTableMem {
     /// Precondition for `dealloc_table`.
     pub open spec fn dealloc_table_pre(self, base: SpecPAddr) -> bool {
         &&& self.contains_table(base)
-        &&& base != self.root()
+        &&& base != self.root
     }
 
     /// Specification of `dealloc_table`.
@@ -213,31 +212,19 @@ impl SpecPageTableMem {
         &&& s2 == s1.dealloc_table(base)
         // `arch` is unchanged
         &&& s2.arch == s1.arch
-        // Root is preserved
-        &&& s2.tables[0] == s1.tables[0]
+        // `root` is unchanged
+        &&& s2.root == s1.root
         // `base` is removed
-        &&& !s2.contains_table(base)
-        // Subset
-        &&& forall|table|
-            s2.tables.contains(table) ==> s1.tables.contains(
-                table,
-            )
-        // Other tables are the same
-        &&& forall|table| #[trigger]
-            s1.tables.contains(table) && table.base != base ==> s2.tables.contains(
-                table,
-            )
-        // Table base unique
-        &&& forall|i, j|
-            #![auto]
-            0 <= i < s2.tables.len() && 0 <= j < s2.tables.len() ==> i == j || s2.tables[i].base
-                != s2.tables[j].base
-        // Table contents are the same
-        &&& forall|base: SpecPAddr| #[trigger]
-            s1.contains_table(base) ==> s2.table_view(base) == s1.table_view(base)
+        &&& s2.tables == s1.tables.remove(
+            base,
+        )
+        // other tables' contents are preserved
+        &&& forall|base2: SpecPAddr| #[trigger]
+            s2.tables.contains_key(base2) ==> s1.table_view(base2) == s2.table_view(base2)
     }
 
-    /// Restrict `dealloc_table` using proof fn.
+    /// Restrict `dealloc_table` using proof fn. It should not be called when we want to reason about
+    /// the executable implementation of the `dealloc_table` function.
     pub broadcast proof fn dealloc_table_facts(self, base: SpecPAddr)
         requires
             self.dealloc_table_pre(base),
@@ -270,6 +257,8 @@ impl SpecPageTableMem {
         &&& s2 == s1.write(base, index, entry)
         // `arch` is unchanged
         &&& s2.arch == s1.arch
+        // `root` is unchanged
+        &&& s2.root == s1.root
         // Tables are the same
         &&& s2.tables == s1.tables
         // The entry is updated
@@ -277,15 +266,14 @@ impl SpecPageTableMem {
             index as int,
             entry,
         )
-        // Other tables contents are the same
-        &&& forall|i|
-            #![auto]
-            0 <= i < s1.tables.len() && s1.tables[i].base != base ==> s2.table_view(
-                s1.tables[i].base,
-            ) == s1.table_view(s1.tables[i].base)
+        // Other tables' contents are the same
+        &&& forall|base2: SpecPAddr|
+            base2 != base && #[trigger] s2.tables.contains_key(base2) ==> s1.table_view(base2)
+                == s2.table_view(base2)
     }
 
-    /// Restrict `write` using proof fn.
+    /// Restrict `write` using proof fn. It should not be called when we want to reason about
+    /// the executable implementation of the `write` function.
     pub broadcast proof fn write_facts(self, base: SpecPAddr, index: nat, entry: u64)
         requires
             self.write_pre(base, index),
@@ -295,43 +283,6 @@ impl SpecPageTableMem {
         admit();
     }
 
-    /// Lemma. Different tables have different base addresses.
-    pub broadcast proof fn lemma_table_base_unique(self)
-        requires
-            #[trigger] self.wf(),
-        ensures
-            forall|i, j|
-                #![auto]
-                0 <= i < self.tables.len() && 0 <= j < self.tables.len() ==> i == j
-                    || self.tables[i].base != self.tables[j].base,
-    {
-        assert forall|i, j|
-            #![auto]
-            0 <= i < self.tables.len() && 0 <= j < self.tables.len() implies i == j
-            || self.tables[i].base != self.tables[j].base by {
-            if i != j && self.tables[i].base == self.tables[j].base {
-                assert(SpecPAddr::overlap(
-                    self.tables[i].base,
-                    self.tables[i].size.as_nat(),
-                    self.tables[j].base,
-                    self.tables[j].size.as_nat(),
-                ));
-            }
-        }
-    }
-
-    /// Lemma. Always contains a root table.
-    pub broadcast proof fn lemma_contains_root(self)
-        requires
-            #[trigger] self.wf(),
-        ensures
-            self.contains_table(self.root()),
-            self.table(self.root()) == self.tables[0],
-    {
-        assert(self.tables.contains(self.tables[0]));
-        self.lemma_table_base_unique();
-    }
-
     /// Lemma. `init` implies well-formedness.
     pub broadcast proof fn lemma_init_implies_wf(self)
         requires
@@ -339,6 +290,7 @@ impl SpecPageTableMem {
         ensures
             self.wf(),
     {
+        assert(!self.tables.is_empty());
     }
 
     /// Lemma. `alloc_table` preserves wf.
@@ -346,20 +298,14 @@ impl SpecPageTableMem {
         s1: Self,
         s2: Self,
         level: nat,
-        table: SpecTable,
+        new_base: SpecPAddr,
     )
         requires
             s1.wf(),
-            #[trigger] Self::alloc_table_spec(s1, s2, level, table),
+            #[trigger] Self::alloc_table_spec(s1, s2, level, new_base),
         ensures
             s2.wf(),
     {
-        assert forall|table2: SpecTable| #[trigger] s2.tables.contains(table2) implies table2.level
-            < s2.arch.level_count() by {
-            if table2 != table {
-                assert(s2.tables.contains(table2));
-            }
-        }
     }
 
     /// Lemma. `alloc_table` preserves accessibility.
@@ -367,90 +313,18 @@ impl SpecPageTableMem {
         s1: Self,
         s2: Self,
         level: nat,
-        table: SpecTable,
+        new_base: SpecPAddr,
         base: SpecPAddr,
         index: nat,
     )
         requires
             s1.wf(),
-            #[trigger] Self::alloc_table_spec(s1, s2, level, table),
+            #[trigger] Self::alloc_table_spec(s1, s2, level, new_base),
             #[trigger] s1.accessible(base, index),
         ensures
             s2.accessible(base, index),
     {
-        // s2 contains table with base address `base`
-        assert(s1.contains_table(base));
-        assert forall|table2: SpecTable| s1.tables.contains(table2) implies s2.tables.contains(
-            table2,
-        ) by {
-            let idx = choose|i| 0 <= i < s1.tables.len() && s1.tables[i] == table2;
-            assert(s2.tables[idx] == table2);
-        }
-        assert(s2.contains_table(base));
-
-        // The table with base address `base` is the same as the table in `s1`
-        Self::lemma_alloc_table_preserves_wf(s1, s2, level, table);
-        s2.lemma_table_base_unique();
-        assert(s1.table(base) == s2.table(base));
-    }
-
-    /// Lemma. pt_mem after `alloc_table` contains the new table.
-    pub broadcast proof fn lemma_allocated_contains_new_table(
-        s1: Self,
-        s2: Self,
-        level: nat,
-        table: SpecTable,
-    )
-        requires
-            s1.wf(),
-            #[trigger] Self::alloc_table_spec(s1, s2, level, table),
-        ensures
-            s2.contains_table(table.base),
-    {
-        assert(s2.tables == s1.tables.push(table));
-        assert(s2.tables.last() == table);
-        assert(s2.tables.contains(table));
-    }
-
-    /// Lemma. pt_mem after `alloc_table` contains all pre-existing tables.
-    pub broadcast proof fn lemma_allocated_contains_old_tables(
-        s1: Self,
-        s2: Self,
-        level: nat,
-        table: SpecTable,
-    )
-        requires
-            s1.wf(),
-            #[trigger] Self::alloc_table_spec(s1, s2, level, table),
-        ensures
-            forall|base: SpecPAddr|
-                s2.contains_table(base) && base != table.base ==> s1.contains_table(base),
-    {
-        assert forall|base: SpecPAddr|
-            s2.contains_table(base) && base != table.base implies s1.contains_table(base) by {
-            let table = choose|table: SpecTable| #[trigger]
-                s2.tables.contains(table) && table.base == base;
-            assert(s1.tables.contains(table));
-        }
-    }
-
-    /// Lemma. `self.tables` after `alloc_table` is a superset of before.
-    pub broadcast proof fn lemma_allocated_is_superset(
-        s1: Self,
-        s2: Self,
-        level: nat,
-        table: SpecTable,
-    )
-        requires
-            s1.wf(),
-            #[trigger] Self::alloc_table_spec(s1, s2, level, table),
-        ensures
-            forall|base: SpecPAddr| s1.contains_table(base) ==> s2.contains_table(base),
-    {
-        assert forall|base: SpecPAddr| s1.contains_table(base) implies s2.contains_table(base) by {
-            let i = choose|i| 0 <= i < s1.tables.len() && #[trigger] s1.tables[i].base == base;
-            assert(s2.tables.contains(s2.tables[i]));
-        }
+        Self::lemma_alloc_table_preserves_wf(s1, s2, level, new_base);
     }
 
     /// Lemma. `dealloc_table` preserves wf.
@@ -461,25 +335,6 @@ impl SpecPageTableMem {
         ensures
             s2.wf(),
     {
-        s1.lemma_contains_root();
-        assert forall|i| 0 <= i < s2.tables.len() implies #[trigger] s2.tables[i].level
-            < s2.arch.level_count() by {
-            assert(s2.tables.contains(s2.tables[i]));
-        }
-        assert forall|i| 0 <= i < s2.tables.len() implies #[trigger] s2.tables[i].size.as_nat()
-            == s2.arch.table_size(s2.tables[i].level) by {
-            assert(s2.tables.contains(s2.tables[i]));
-        }
-        assert forall|i, j| 0 <= i < s2.tables.len() && 0 <= j < s2.tables.len() implies i == j
-            || !SpecPAddr::overlap(
-            s2.tables[i].base,
-            s2.tables[i].size.as_nat(),
-            s2.tables[j].base,
-            s2.tables[j].size.as_nat(),
-        ) by {
-            assert(s2.tables.contains(s2.tables[i]));
-            assert(s2.tables.contains(s2.tables[j]));
-        }
     }
 
     /// Lemma. `write` preserves wf.
@@ -505,13 +360,8 @@ pub broadcast group group_pt_mem_lemmas {
     SpecPageTableMem::alloc_table_facts,
     SpecPageTableMem::dealloc_table_facts,
     SpecPageTableMem::write_facts,
-    SpecPageTableMem::lemma_table_base_unique,
-    SpecPageTableMem::lemma_contains_root,
     SpecPageTableMem::lemma_init_implies_wf,
     SpecPageTableMem::lemma_alloc_table_preserves_wf,
-    SpecPageTableMem::lemma_allocated_contains_new_table,
-    SpecPageTableMem::lemma_allocated_contains_old_tables,
-    SpecPageTableMem::lemma_allocated_is_superset,
     SpecPageTableMem::lemma_alloc_table_preserves_accessibility,
     SpecPageTableMem::lemma_dealloc_table_preserves_wf,
     SpecPageTableMem::lemma_write_preserves_wf,
@@ -534,7 +384,7 @@ impl<A> PageTableMem<A> where A: FrameAllocator {
     /// Get the abstract view of the page table memory, based on the global frame allocator state.
     pub open spec fn view(&self, allocator: &GlobalFrameAllocator<A>) -> SpecPageTableMem {
         // TODO
-        SpecPageTableMem { tables: Seq::empty(), arch: self.arch.view() }
+        SpecPageTableMem { tables: Map::empty(), arch: self.arch.view(), root: self.root@ }
     }
 
     /// Invariants that must be implied at initial state and preseved after each operation.
@@ -547,7 +397,7 @@ impl<A> PageTableMem<A> where A: FrameAllocator {
         &&& allocator.view().clients.contains_key(
             self.cid as nat,
         )
-        // The root table is allocated and has level 0.
+        // The root table is allocated to the client.
         &&& allocator.view().clients[self.cid as nat].contains(Frame4K(self.root).to_nat())
     }
 
@@ -557,10 +407,13 @@ impl<A> PageTableMem<A> where A: FrameAllocator {
             old(allocator).has_client(cid),
             old(allocator).invariants(),
             old(allocator).view().clients[cid as nat].is_empty(),
+            !old(allocator).view().free.is_empty(),
         ensures
             res.view(allocator).init(),
     {
         let root_frame = allocator.alloc(cid);
+        // TODO
+        assume(false);
         Self { arch, cid, root: root_frame.0, _phantom: PhantomData }
     }
 
@@ -574,26 +427,34 @@ impl<A> PageTableMem<A> where A: FrameAllocator {
         ensures
             res == self.view(allocator).is_table_empty(base@),
     {
+        // TODO
+        assume(false);
         false
     }
 
     /// Allocate a new table and returns the table base address and size.
-    pub fn alloc_table(&self, allocator: &mut GlobalFrameAllocator<A>, level: usize) -> (res: (
-        PAddr,
-        FrameSize,
-    ))
+    pub fn alloc_table(&self, allocator: &mut GlobalFrameAllocator<A>, level: usize) -> (res: PAddr)
         requires
             self.invariants(old(allocator)),
             old(allocator).view().clients.contains_key(self.cid as nat),
             old(allocator).invariants(),
             !old(allocator).view().free.is_empty(),
+        ensures
+            SpecPageTableMem::alloc_table_spec(
+                self.view(old(allocator)),
+                self.view(allocator),
+                level as nat,
+                res@,
+            ),
     {
         let frame = allocator.alloc(self.cid);
         // The client should get a new frame.
         proof {
             assert(allocator.view().clients[self.cid as nat].contains(frame.to_nat()));
+            // TODO
+            assume(false);
         }
-        (frame.0, FrameSize::Size4K)
+        frame.0
     }
 
     /// Deallocate a table.
@@ -603,17 +464,28 @@ impl<A> PageTableMem<A> where A: FrameAllocator {
             old(allocator).view().clients.contains_key(self.cid as nat),
             old(allocator).invariants(),
             old(allocator).view().clients[self.cid as nat].contains(Frame4K(base).to_nat()),
+            base != self.root,
+        ensures
+            SpecPageTableMem::dealloc_table_spec(
+                self.view(old(allocator)),
+                self.view(allocator),
+                base@,
+            ),
     {
+        // TODO
+        assume(false);
         // For simplicity we assume the deallocated table is always empty, so we don't need to zero it.
         allocator.dealloc(self.cid, Frame4K(base));
     }
 
     /// Get the value at the given index in the given table.
     #[verifier::external_body]
-    pub fn read(&self, allocator: &GlobalFrameAllocator<A>, base: PAddr, index: usize) -> u64
+    pub fn read(&self, allocator: &GlobalFrameAllocator<A>, base: PAddr, index: usize) -> (res: u64)
         requires
             self.invariants(allocator),
             self.view(allocator).accessible(base@, index as nat),
+        ensures
+            #[trigger] self.view(allocator).read(base@, index as nat) == res,
     {
         unsafe { (base.0 as *const u64).offset(index as isize).read_volatile() }
     }
@@ -624,6 +496,14 @@ impl<A> PageTableMem<A> where A: FrameAllocator {
         requires
             self.invariants(allocator),
             self.view(allocator).accessible(base@, index as nat),
+        ensures
+            SpecPageTableMem::write_spec(
+                self.view(allocator),
+                self.view(allocator),
+                base@,
+                index as nat,
+                value,
+            ),
     {
         unsafe { (base.0 as *mut u64).offset(index as isize).write_volatile(value) }
     }
@@ -635,6 +515,8 @@ impl<A> PageTableMem<A> where A: FrameAllocator {
         ensures
             self.view(allocator).wf(),
     {
+        // TODO
+        assume(false);
     }
 }
 
