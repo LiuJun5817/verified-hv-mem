@@ -72,6 +72,7 @@ pub trait FrameAllocator {
             match res {
                 Some(addr) => {
                     let i = paddr_to_idx(old(self).base(), addr.view(), Self::spec_page_size());
+                    &&& addr@.aligned(Self::spec_page_size() as nat)
                     &&& i < Self::cap_pages()
                     &&& old(self)@[i as int] == true
                     &&& forall|j: int| 0 <= j < i ==> old(self)@[j] == false
