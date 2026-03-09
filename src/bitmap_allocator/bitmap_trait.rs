@@ -1,5 +1,6 @@
 use core::ops::Range;
 use vstd::{prelude::*, seq_lib::*};
+use super::bitmap_impl::{BitAlloc, BitAlloc16, BitAllocView};
 
 verus! {
 
@@ -16,8 +17,10 @@ pub trait BitmapAllocator {
             res == Self::spec_cap(),
     ;
 
+    /// Spec function to return the capacity of the bitmap.
     spec fn spec_cap() -> (res: usize);
 
+    /// Spec function to check that cascading the bitmap does not overflow.
     spec fn cascade_not_overflow() -> bool;
 
     // cap_not_overflow
@@ -57,7 +60,6 @@ pub trait BitmapAllocator {
             old(self).wf(),
             0 < size <= Self::spec_cap(),
             align_log2 < 64,  // Prevent displacement overflow
-
         ensures
             self.wf(),
             match res {
@@ -95,16 +97,19 @@ pub trait BitmapAllocator {
             self@ == old(self)@.update(key as int, true),
             self.wf(),
     ;
+    
+    proof fn lemma_view_len_is_cap(self)
+        requires
+            self.wf(),
+        ensures
+            self.view().len() == Self::spec_cap(),
+    ;
 }
 
 /// Specification function to check if a contiguous block starting at `i` of `size` contains any allocated bits (false).
 /// or `i` is not a multiple of `align`
 pub open spec fn has_obstruction(ba: Seq<bool>, i: int, size: int, align: int) -> bool {
     (i % align != 0) || exists|k: int| i <= k < i + size && #[trigger] ba[k] == false
-}
-
-#[verifier::external]
-fn main() {
 }
 
 } // verus!
