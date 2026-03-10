@@ -10,7 +10,7 @@ use crate::{
         frame::{Frame, FrameSize, MemAttr, SpecFrame},
     },
     frame_allocator::frame_trait::FrameAllocator,
-    global_allocator::{frame::GlobalFrameAllocator, GlobalAllocator},
+    global_allocator::GlobalAllocator,
     page_table::{
         pt_arch::SpecPTArch,
         pt_mem::PageTableMem,
@@ -29,7 +29,7 @@ broadcast use crate::page_table::pt_mem::group_pt_mem_lemmas;
 /// `PageTable` wraps a `PageTableMem` and a `PTConstants` to provide a convenient interface for
 /// manipulating the page table. Refinement proof is provided by implementing trait `PageTableInterface`
 /// to ensure `PageTableMem` is manipulated correctly.
-pub struct PageTable<A: FrameAllocator, E: PageTableEntry> {
+pub struct PageTable<A: GlobalAllocator, E: PageTableEntry> {
     /// Page table memory.
     pub pt_mem: PageTableMem<A>,
     /// Page table config constants.
@@ -38,9 +38,9 @@ pub struct PageTable<A: FrameAllocator, E: PageTableEntry> {
     pub _phantom: PhantomData<E>,
 }
 
-impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
+impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
     /// View as a specification-level page table.
-    pub open spec fn view(&self, allocator: &GlobalFrameAllocator<A>) -> SpecPageTable<E> {
+    pub open spec fn view(&self, allocator: &A) -> SpecPageTable<E> {
         SpecPageTable {
             pt_mem: self.pt_mem.view(allocator),
             constants: self.constants@,
@@ -54,38 +54,38 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
     }
 
     /// Invariants that must implied at initial state and preseved after each operation.
-    pub open spec fn invariants(&self, allocator: &GlobalFrameAllocator<A>) -> bool {
+    pub open spec fn invariants(&self, allocator: &A) -> bool {
         &&& self.pt_mem.invariants(allocator)
         &&& self.view(allocator).wf()
     }
 
     /// Construct a new page table.
-    pub fn new(allocator: &mut GlobalFrameAllocator<A>, cid: usize, constants: PTConstants) -> (res:
-        Self)
+    pub fn new(allocator: &mut A, cid: usize, constants: PTConstants) -> (res: Self)
         requires
-            old(allocator).has_client(cid),
+            old(allocator).view().clients.contains_key(cid as nat),
             old(allocator).invariants(),
             old(allocator).view().clients[cid as nat].is_empty(),
             !old(allocator).view().free.is_empty(),
+            constants@.valid(),
         ensures
             res.invariants(allocator),
+            res.view(allocator).pt_mem.init(),
             res.constants == constants,
     {
         // TODO
-        Self {
+        let res = Self {
             pt_mem: PageTableMem::new(allocator, cid, constants.arch.clone()),
             constants,
             _phantom: PhantomData,
+        };
+        proof {
+            assume(res.view(allocator).wf());
         }
+        res
     }
 
     /// If all pte in a table are invalid.
-    pub fn is_table_empty(
-        &self,
-        allocator: &GlobalFrameAllocator<A>,
-        base: PAddr,
-        level: usize,
-    ) -> (res: bool)
+    pub fn is_table_empty(&self, allocator: &A, base: PAddr, level: usize) -> (res: bool)
         requires
             self.invariants(allocator),
             self.view(allocator).pt_mem.contains_table(base@),
@@ -117,13 +117,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
 
     /// Traverse the page table for the given virtual address and return the matching
     /// entry and level. Proven consistent with the specification-level walk.
-    pub fn walk(
-        &self,
-        allocator: &GlobalFrameAllocator<A>,
-        vaddr: VAddr,
-        base: PAddr,
-        level: usize,
-    ) -> (res: (E, usize))
+    pub fn walk(&self, allocator: &A, vaddr: VAddr, base: PAddr, level: usize) -> (res: (E, usize))
         requires
             self.invariants(allocator),
             self.pt_mem.view(allocator).contains_table(base@),
@@ -148,7 +142,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
     /// `new_pte` is the entry to be inserted.
     pub fn insert(
         &mut self,
-        allocator: &mut GlobalFrameAllocator<A>,
+        allocator: &mut A,
         vbase: VAddr,
         base: PAddr,
         level: usize,
@@ -226,13 +220,8 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
     }
 
     /// Recursively remove a page table entry.
-    pub fn remove(
-        &mut self,
-        allocator: &GlobalFrameAllocator<A>,
-        vbase: VAddr,
-        base: PAddr,
-        level: usize,
-    ) -> (res: PagingResult)
+    pub fn remove(&mut self, allocator: &A, vbase: VAddr, base: PAddr, level: usize) -> (res:
+        PagingResult)
         requires
             old(self).invariants(allocator),
             level < old(self).arch().level_count(),
@@ -279,13 +268,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
     }
 
     /// Recursively deallocate empty tables along `vaddr` from `base`.
-    pub fn prune(
-        &mut self,
-        allocator: &mut GlobalFrameAllocator<A>,
-        vaddr: VAddr,
-        base: PAddr,
-        level: usize,
-    )
+    pub fn prune(&mut self, allocator: &mut A, vaddr: VAddr, base: PAddr, level: usize)
         requires
             old(self).invariants(old(allocator)),
             level < old(self).arch().level_count(),
@@ -342,9 +325,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
     }
 
     /// Resolve a virtual address to its mapped physical frame.
-    pub fn query(&self, allocator: &GlobalFrameAllocator<A>, vaddr: VAddr) -> (res: PagingResult<
-        (VAddr, Frame),
-    >)
+    pub fn query(&self, allocator: &A, vaddr: VAddr) -> (res: PagingResult<(VAddr, Frame)>)
         requires
             self.invariants(allocator),
         ensures
@@ -405,12 +386,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
     }
 
     /// Insert a mapping from a virtual base address to a physical frame.
-    pub fn map(
-        &mut self,
-        allocator: &mut GlobalFrameAllocator<A>,
-        vbase: VAddr,
-        frame: Frame,
-    ) -> (res: PagingResult)
+    pub fn map(&mut self, allocator: &mut A, vbase: VAddr, frame: Frame) -> (res: PagingResult)
         requires
             old(self).invariants(old(allocator)),
             old(self).constants@.arch.is_valid_frame_size(frame.size),
@@ -465,8 +441,7 @@ impl<A, E> PageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
     }
 
     /// Remove the mapping for a given virtual base address.
-    pub fn unmap(&mut self, allocator: &mut GlobalFrameAllocator<A>, vbase: VAddr) -> (res:
-        PagingResult)
+    pub fn unmap(&mut self, allocator: &mut A, vbase: VAddr) -> (res: PagingResult)
         requires
             old(self).invariants(old(allocator)),
         ensures

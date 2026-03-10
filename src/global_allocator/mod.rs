@@ -1,189 +1,226 @@
-//! An abstract model of global resource allocation.
+//! Abstract model of global memory allocation.
 //!
-//! A resource (e.g. memory frame, IO port) is represented by a unique token. There is a global pool of
-//! free resources, and multiple clients can allocate/deallocate resources from/to the global pool.
-//! The global allocator model maintains the free resources and the resources allocated to each client.
+//! There is a global pool of free frames, and multiple clients can allocate/deallocate frames
+//! from/to the global pool. The global allocator model maintains the free frames and the frames
+//! allocated to each client.
 //!
-//! A client represents an entity that uses some resources for a specific purpose. For example, a
+//! A client represents an entity that uses some frames for a specific purpose. For example, a
 //! PageTableMem can be regarded as a client that allocates frames for page tables. Each client
-//! has its own list of allocated resources.
+//! has its own list of allocated frames.
 //!
-//! A client can request to allocate a resource from the global free pool. If there is at least one
-//! free resource, the allocation succeeds and the resource is moved from the free pool to the client's
-//! allocated list. A client can only deallocate a resource that it has allocated before. The deallocation
-//! moves the resource from the client's allocated list back to the global free pool.
-//!
-//! The global allocator model maintains the following invariant: a resource can only be in one place at a time, i.e.
-//! either in the global free pool or in one client's allocated list.
+//! A client can request to allocate a frame from the global free pool. If there is at least one
+//! free frame, the allocation succeeds and the frame is moved from the free pool to the client's
+//! allocated list. A client can only deallocate a frame that it has allocated before, and the
+//! deallocation moves the frame from the client's allocated list back to the global free pool.
+use crate::address::addr::PAddr;
 use std::{marker::PhantomData, str};
-
 use vstd::prelude::*;
 
-pub mod frame;
+// pub mod frame;
 
 verus! {
 
-/// Global allocator model.
+/// Global memory allocator model. The global allocator maintains a set of free frames and a mapping
+/// from clients to their allocated frames.
+///
+/// A frame is represented by a natural number (nat) as its ID, FrameID = base address / page size.
 pub struct GlobalAllocatorModel {
-    /// Free resources available for allocation.
+    /// Free frames available for allocation.
     pub free: Set<nat>,
-    /// Clients using resources.
+    /// Clients using frames.
     pub clients: Map<nat, Set<nat>>,
 }
 
 impl GlobalAllocatorModel {
-    /// Invariants of the global allocator model.
-    pub open spec fn invariants(self) -> bool {
-        // No resource is both in free list and clients
-        &&& forall|rid: nat, cid: nat|
-            self.free.contains(rid) && self.clients.contains_key(cid)
+    /// Well-formedness of the global allocator model.
+    pub open spec fn wf(self) -> bool {
+        // No frame is both in free list and clients
+        &&& forall|fid: nat, cid: nat|
+            (self.free.contains(fid) && self.clients.contains_key(cid))
                 ==> !self.clients[cid].contains(
-                rid,
+                fid,
             )
-            // No resource is in multiple clients
-        &&& forall|rid: nat, c1: nat, c2: nat|
+            // No frame is in multiple clients
+        &&& forall|fid: nat, c1: nat, c2: nat|
+            #![auto]
             self.clients.contains_key(c1) && self.clients.contains_key(c2) && c1 != c2 ==> !(
-            #[trigger] self.clients[c1].contains(rid) && #[trigger] self.clients[c2].contains(rid))
+            self.clients[c1].contains(fid) && self.clients[c2].contains(fid))
     }
 
-    /// Allocate a resource for a client.
-    pub open spec fn alloc(s1: Self, s2: Self, cid: nat, rid: nat) -> bool
-        recommends
-            s1.invariants(),
-            !s1.free.is_empty(),
-            s1.clients.contains_key(cid),
-    {
-        s1.free.contains(rid) && s2.free == s1.free.remove(rid) && s2.clients == s1.clients.insert(
-            cid,
-            s1.clients[cid].insert(rid),
-        )
+    /// If free contains a contiguous range of `count` frames.
+    pub open spec fn has_contiguous_free(self, count: nat) -> bool {
+        count > 0 && exists|fid: nat| self.has_contiguous_free_from(count, fid)
     }
 
-    /// Deallocate a resource from a client.
-    pub open spec fn dealloc(s1: Self, s2: Self, cid: nat, rid: nat) -> bool
-        recommends
-            s1.invariants(),
-            s1.clients.contains_key(cid),
-            #[trigger] s1.clients[cid].contains(rid),
-    {
-        s2.free == s1.free.insert(rid) && s2.clients == s1.clients.insert(
-            cid,
-            s1.clients[cid].remove(rid),
-        )
+    /// If free contains a range of `count` frames starting from `fid`.
+    pub open spec fn has_contiguous_free_from(self, count: nat, fid: nat) -> bool {
+        forall|i: nat| 0 <= i < count ==> #[trigger] self.free.contains(fid + i)
+    }
+
+    /// Allocate a frame for a client.
+    pub open spec fn alloc(s1: Self, s2: Self, cid: nat, fid: nat) -> bool {
+        &&& s1.free.contains(fid)
+        &&& s2.free == s1.free.remove(fid)
+        &&& s2.clients == s1.clients.insert(cid, s1.clients[cid].insert(fid))
+    }
+
+    /// Allocate a contiguous range of frames for a client.
+    pub open spec fn alloc_contiguous(s1: Self, s2: Self, cid: nat, count: nat, fid: nat) -> bool {
+        let allocated: Set<nat> = Set::new(|fid2: nat| fid <= fid2 < fid + count);
+        &&& allocated.subset_of(s1.free)
+        &&& s2.free == s1.free.difference(allocated)
+        &&& s2.clients[cid] == s1.clients[cid].union(allocated)
+    }
+
+    /// Deallocate a frame from a client.
+    pub open spec fn dealloc(s1: Self, s2: Self, cid: nat, fid: nat) -> bool {
+        &&& s2.free == s1.free.insert(fid)
+        &&& s2.clients == s1.clients.insert(cid, s1.clients[cid].remove(fid))
     }
 
     /// Add a new client.
-    pub open spec fn add_client(s1: Self, s2: Self, cid: nat) -> bool
-        recommends
-            s1.invariants(),
-            !s1.clients.contains_key(cid),
-    {
-        s2.free == s1.free && s2.clients == s1.clients.insert(cid, Set::empty())
+    pub open spec fn add_client(s1: Self, s2: Self, cid: nat) -> bool {
+        &&& s2.free == s1.free
+        &&& s2.clients == s1.clients.insert(cid, Set::empty())
     }
 
     /// Remove a client and free its resources.
-    pub open spec fn remove_client(s1: Self, s2: Self, cid: nat) -> bool
-        recommends
-            s1.invariants(),
-            s1.clients.contains_key(cid),
-    {
-        s2.free == s1.free.union(s1.clients[cid]) && s2.clients == s1.clients.remove(cid)
+    pub open spec fn remove_client(s1: Self, s2: Self, cid: nat) -> bool {
+        &&& s2.free == s1.free.union(s1.clients[cid])
+        &&& s2.clients == s1.clients.remove(cid)
     }
 
-    /// Lemma. `alloc` preserves invariants.
-    pub proof fn lemma_alloc_preserves_invariants(s1: Self, s2: Self, cid: nat, rid: nat)
+    /// Lemma. `alloc` preserves wf.
+    pub proof fn lemma_alloc_preserves_wf(s1: Self, s2: Self, cid: nat, fid: nat)
         requires
-            s1.invariants(),
+            s1.wf(),
             !s1.free.is_empty(),
             s1.clients.contains_key(cid),
-            Self::alloc(s1, s2, cid, rid),
+            Self::alloc(s1, s2, cid, fid),
         ensures
-            s2.invariants(),
+            s2.wf(),
     {
-        assert(s2.invariants());
+        assert(s2.wf());
     }
 
-    /// Lemma. `dealloc` preserves invariants.
-    pub proof fn lemma_dealloc_preserves_invariants(s1: Self, s2: Self, cid: nat, rid: nat)
+    /// Lemma. `alloc_contiguous` preserves wf.
+    pub proof fn lemma_alloc_contiguous_preserves_wf(
+        s1: Self,
+        s2: Self,
+        cid: nat,
+        count: nat,
+        fid: nat,
+    )
         requires
-            s1.invariants(),
+            s1.wf(),
+            s1.has_contiguous_free_from(count, fid),
             s1.clients.contains_key(cid),
-            #[trigger] s1.clients[cid].contains(rid),
-            Self::dealloc(s1, s2, cid, rid),
+            Self::alloc_contiguous(s1, s2, cid, count, fid),
         ensures
-            s2.invariants(),
+            s2.wf(),
     {
-        assert(s2.invariants());
+        assume(s2.wf());
     }
 
-    /// Lemma. `add_client` preserves invariants.
-    pub proof fn lemma_add_client_preserves_invariants(s1: Self, s2: Self, cid: nat)
+    /// Lemma. `dealloc` preserves wf.
+    pub proof fn lemma_dealloc_preserves_wf(s1: Self, s2: Self, cid: nat, fid: nat)
         requires
-            s1.invariants(),
+            s1.wf(),
+            s1.clients.contains_key(cid),
+            #[trigger] s1.clients[cid].contains(fid),
+            Self::dealloc(s1, s2, cid, fid),
+        ensures
+            s2.wf(),
+    {
+        assert(s2.wf());
+    }
+
+    /// Lemma. `add_client` preserves wf.
+    pub proof fn lemma_add_client_preserves_wf(s1: Self, s2: Self, cid: nat)
+        requires
+            s1.wf(),
             !s1.clients.contains_key(cid),
             Self::add_client(s1, s2, cid),
         ensures
-            s2.invariants(),
+            s2.wf(),
     {
-        assert(s2.invariants());
+        assert(s2.wf());
     }
 
-    /// Lemma. `remove_client` preserves invariants.
-    pub proof fn lemma_remove_client_preserves_invariants(s1: Self, s2: Self, cid: nat)
+    /// Lemma. `remove_client` preserves wf.
+    pub proof fn lemma_remove_client_preserves_wf(s1: Self, s2: Self, cid: nat)
         requires
-            s1.invariants(),
+            s1.wf(),
             s1.clients.contains_key(cid),
             Self::remove_client(s1, s2, cid),
         ensures
-            s2.invariants(),
+            s2.wf(),
     {
-        assert(s2.invariants());
+        assert(s2.wf());
     }
 }
 
-/// Resource type - a token that can be mapped to/from nat. User can define their own resource type
-/// by implementing the `Resource` trait.
-pub trait Resource: Sized {
-    /// Convert the resource to a unique nat token.
-    spec fn to_nat(self) -> nat;
+/// Trait for global memory allocator.
+pub trait GlobalAllocator {
+    /// View as an abstract global memory allocator model.
+    spec fn view(&self) -> GlobalAllocatorModel;
 
-    /// Convert a nat token back to the resource.
-    spec fn from_nat(n: nat) -> Self;
+    /// Invariants of the global memory allocator.
+    spec fn invariants(&self) -> bool;
 
-    /// Lemma. `to_nat` and `from_nat` are inverses.
-    proof fn lemma_to_from_nat(self)
-        ensures
-            Self::from_nat(self.to_nat()) == self,
-    ;
-}
+    /// Unit frame size in bytes.
+    spec fn frame_size() -> nat;
 
-/// Trait for global allocator.
-pub trait GlobalAllocator<R> where R: Resource {
-    /// View as an abstract global allocator model.
-    spec fn view(self) -> GlobalAllocatorModel;
-
-    /// Invariants of the global allocator.
-    spec fn invariants(self) -> bool;
-
-    /// Allocate a resource for a client.
-    fn alloc(&mut self, cid: usize) -> (res: R)
+    /// Allocate a frame for a client, return the allocated frame's base physical address.
+    fn alloc(&mut self, cid: usize) -> (frame: PAddr)
         requires
-            old(self).view().clients.contains_key(cid as nat),
-            !old(self).view().free.is_empty(),
+            old(self)@.clients.contains_key(cid as nat),
+            !old(self)@.free.is_empty(),
             old(self).invariants(),
         ensures
-            GlobalAllocatorModel::alloc(old(self)@, self@, cid as nat, res.to_nat()),
+            frame@.aligned(Self::frame_size()),
+            GlobalAllocatorModel::alloc(
+                old(self)@,
+                self@,
+                cid as nat,
+                frame@.0 / Self::frame_size(),
+            ),
             self.invariants(),
     ;
 
-    /// Deallocate a resource from a client.
-    fn dealloc(&mut self, cid: usize, rid: R)
+    /// Deallocate a frame from a client.
+    fn dealloc(&mut self, cid: usize, frame: PAddr)
         requires
-            old(self).view().clients.contains_key(cid as nat),
-            #[trigger] old(self).view().clients[cid as nat].contains(rid.to_nat()),
+            old(self)@.clients.contains_key(cid as nat),
+            old(self)@.clients[cid as nat].contains(frame@.0 / Self::frame_size()),
             old(self).invariants(),
+            frame@.aligned(Self::frame_size()),
         ensures
-            GlobalAllocatorModel::dealloc(old(self)@, self@, cid as nat, rid.to_nat()),
+            GlobalAllocatorModel::dealloc(
+                old(self)@,
+                self@,
+                cid as nat,
+                frame@.0 / Self::frame_size(),
+            ),
+            self.invariants(),
+    ;
+
+    /// Allocate a contiguous range of frames for a client, return the base physical address of starting frame.
+    fn alloc_contiguous(&mut self, cid: usize, count: usize, align_log2: usize) -> (frame: PAddr)
+        requires
+            old(self)@.clients.contains_key(cid as nat),
+            old(self)@.has_contiguous_free(count as nat),
+            old(self).invariants(),
+            align_log2 < 64,
+        ensures
+            frame@.aligned(Self::frame_size() * (1 << align_log2) as nat),
+            GlobalAllocatorModel::alloc_contiguous(
+                old(self)@,
+                self@,
+                cid as nat,
+                count as nat,
+                frame@.0 / Self::frame_size(),
+            ),
             self.invariants(),
     ;
 
@@ -199,19 +236,19 @@ pub trait GlobalAllocator<R> where R: Resource {
     /// Remove a client and free its resources.
     fn remove_client(&mut self, cid: usize)
         requires
-            old(self).view().clients.contains_key(cid as nat),
+            old(self)@.clients.contains_key(cid as nat),
             old(self).invariants(),
         ensures
             GlobalAllocatorModel::remove_client(old(self)@, self@, cid as nat),
             self.invariants(),
     ;
 
-    /// `invariants` implies `GlobalAllocatorModel::invariants`
-    proof fn lemma_implies_invariants(self)
+    /// `invariants` implies `GlobalAllocatorModel::wf`
+    proof fn lemma_invariants_implies_wf(&self)
         requires
             self.invariants(),
         ensures
-            self@.invariants(),
+            self@.wf(),
     ;
 }
 

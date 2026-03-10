@@ -11,10 +11,7 @@ use crate::{
         frame::Frame,
     },
     frame_allocator::frame_trait::FrameAllocator,
-    global_allocator::{
-        frame::{Frame4K, GlobalFrameAllocator},
-        GlobalAllocator,
-    },
+    global_allocator::GlobalAllocator,
 };
 use vstd::prelude::*;
 
@@ -27,19 +24,18 @@ verus! {
 
 /// Wrap `pt::PageTable` to implement `pt_trait::PageTable` trait, which is the specification
 /// required by higher-level components.
-pub struct ExPageTable<A, E>(pub pt::PageTable<A, E>) where A: FrameAllocator, E: PageTableEntry;
+pub struct ExPageTable<A, E>(pub pt::PageTable<A, E>) where A: GlobalAllocator, E: PageTableEntry;
 
-impl<A, E> PageTable<A> for ExPageTable<A, E> where A: FrameAllocator, E: PageTableEntry {
-    open spec fn view(&self, allocator: &GlobalFrameAllocator<A>) -> PageTableState {
+impl<A, E> PageTable<A> for ExPageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
+    open spec fn view(&self, allocator: &A) -> PageTableState {
         self.0.view(allocator).view().view()
     }
 
-    open spec fn invariants(&self, allocator: &GlobalFrameAllocator<A>) -> bool {
+    open spec fn invariants(&self, allocator: &A) -> bool {
         self.0.invariants(allocator)
     }
 
-    fn new(allocator: &mut GlobalFrameAllocator<A>, cid: usize, constants: PTConstants) -> (pt:
-        Self) {
+    fn new(allocator: &mut A, cid: usize, constants: PTConstants) -> (pt: Self) {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
         let pt = pt::PageTable::<A, E>::new(allocator, cid, constants);
@@ -50,8 +46,7 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: FrameAllocator, E: PageTa
         ExPageTable(pt)
     }
 
-    fn map(&mut self, allocator: &mut GlobalFrameAllocator<A>, vbase: VAddr, frame: Frame) -> (res:
-        Result<(), ()>) {
+    fn map(&mut self, allocator: &mut A, vbase: VAddr, frame: Frame) -> (res: Result<(), ()>) {
         proof {
             self.0.view(allocator).lemma_wf_implies_node_wf();
             self.0.view(allocator).construct_node_facts(self.0.view(allocator).pt_mem.root, 0);
@@ -60,10 +55,7 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: FrameAllocator, E: PageTa
         self.0.map(allocator, vbase, frame)
     }
 
-    fn unmap(&mut self, allocator: &mut GlobalFrameAllocator<A>, vbase: VAddr) -> (res: Result<
-        (),
-        (),
-    >) {
+    fn unmap(&mut self, allocator: &mut A, vbase: VAddr) -> (res: Result<(), ()>) {
         proof {
             self.0.view(allocator).lemma_wf_implies_node_wf();
             self.0.view(allocator).construct_node_facts(self.0.view(allocator).pt_mem.root, 0);
@@ -72,10 +64,7 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: FrameAllocator, E: PageTa
         self.0.unmap(allocator, vbase)
     }
 
-    fn query(&self, allocator: &GlobalFrameAllocator<A>, vaddr: VAddr) -> (res: Result<
-        (VAddr, Frame),
-        (),
-    >) {
+    fn query(&self, allocator: &A, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>) {
         proof {
             self.0.view(allocator).lemma_wf_implies_node_wf();
             self.0.view(allocator).construct_node_facts(self.0.view(allocator).pt_mem.root, 0);

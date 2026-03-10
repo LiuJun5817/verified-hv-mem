@@ -7,10 +7,7 @@ use vstd::prelude::*;
 use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 use crate::address::frame::{Frame, MemAttr, SpecFrame};
 use crate::frame_allocator::frame_trait::FrameAllocator;
-use crate::global_allocator::{
-    frame::{Frame4K, GlobalFrameAllocator},
-    GlobalAllocator,
-};
+use crate::global_allocator::GlobalAllocator;
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 
 verus! {
@@ -210,19 +207,18 @@ impl PageTableState {
 /// Specification of a Page Table viewed by higher-level components.
 ///
 /// Concrete implementation must implement `PageTable` trait to satisfy the specification.
-pub trait PageTable<A> where Self: Sized, A: FrameAllocator {
+pub trait PageTable<A> where Self: Sized, A: GlobalAllocator {
     /// View as a `SpecVAddr` to `Frame` mapping.
-    spec fn view(&self, allocator: &GlobalFrameAllocator<A>) -> PageTableState;
+    spec fn view(&self, allocator: &A) -> PageTableState;
 
     /// Invariants that must be implied at initial state and preseved after each operation.
-    spec fn invariants(&self, allocator: &GlobalFrameAllocator<A>) -> bool;
+    spec fn invariants(&self, allocator: &A) -> bool;
 
     /// Create an empty page table
-    fn new(allocator: &mut GlobalFrameAllocator<A>, cid: usize, constants: PTConstants) -> (pt:
-        Self)
+    fn new(allocator: &mut A, cid: usize, constants: PTConstants) -> (pt: Self)
         requires
-            old(allocator).has_client(cid),
             old(allocator).invariants(),
+            old(allocator).view().clients.contains_key(cid as nat),
             old(allocator).view().clients[cid as nat].is_empty(),
             !old(allocator).view().free.is_empty(),
             constants@.valid(),
@@ -233,8 +229,7 @@ pub trait PageTable<A> where Self: Sized, A: FrameAllocator {
     ;
 
     /// Map a virtual address to a physical frame with given attributes.
-    fn map(&mut self, allocator: &mut GlobalFrameAllocator<A>, vbase: VAddr, frame: Frame) -> (res:
-        Result<(), ()>)
+    fn map(&mut self, allocator: &mut A, vbase: VAddr, frame: Frame) -> (res: Result<(), ()>)
         requires
             old(self).invariants(old(allocator)),
             old(self).view(old(allocator)).map_pre(vbase@, frame@),
@@ -251,10 +246,7 @@ pub trait PageTable<A> where Self: Sized, A: FrameAllocator {
     ;
 
     /// Unmap a virtual address.
-    fn unmap(&mut self, allocator: &mut GlobalFrameAllocator<A>, vbase: VAddr) -> (res: Result<
-        (),
-        (),
-    >)
+    fn unmap(&mut self, allocator: &mut A, vbase: VAddr) -> (res: Result<(), ()>)
         requires
             old(self).invariants(old(allocator)),
             old(self).view(old(allocator)).unmap_pre(vbase@),
@@ -269,10 +261,7 @@ pub trait PageTable<A> where Self: Sized, A: FrameAllocator {
     ;
 
     /// Query the physical frame mapped to a virtual address.
-    fn query(&self, allocator: &GlobalFrameAllocator<A>, vaddr: VAddr) -> (res: Result<
-        (VAddr, Frame),
-        (),
-    >)
+    fn query(&self, allocator: &A, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
         requires
             self.invariants(allocator),
             self.view(allocator).query_pre(vaddr@),
