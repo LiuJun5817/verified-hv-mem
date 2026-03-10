@@ -27,6 +27,12 @@ impl SpecVAddr {
         SpecVAddr(self.0 + offset)
     }
 
+    /// If the region is in range `[base, base + size)`.
+    pub open spec fn interval_subset(base: Self, size: nat, region_base: Self, region_size: nat) -> bool {
+        &&& region_base.0 <= base.0
+        &&& region_base.0 + region_size >= base.0 + size
+    }
+
     /// Convert to word index.
     pub open spec fn idx(self) -> VIdx {
         VIdx(self.0 / 8)
