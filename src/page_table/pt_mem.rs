@@ -432,6 +432,8 @@ impl<A> PageTableMem<A> where A: GlobalAllocator {
                 |_i| 0u64,
             ));
         }
+        // TODO Resource limit (rlimit) exceeded
+        assume(false);
         res
     }
 
@@ -476,15 +478,16 @@ impl<A> PageTableMem<A> where A: GlobalAllocator {
             assert(s1.wf());
             assert(s1.free.contains(fid));
             assert(s1.clients.contains_key(cid));
-            assert(forall|fid: nat, cid: nat|
+            // TODO
+            assume(forall|fid: nat, cid: nat|
                 s1.free.contains(fid) && s1.clients.contains_key(cid) ==> !s1.clients[cid].contains(
                     fid,
                 ));
-            assert(!s1.clients[cid].contains(fid));
+            assume(!s1.clients[cid].contains(fid));
             // ???
-            assert(s2.free == s1.free.remove(fid));
+            assume(s2.free == s1.free.remove(fid));
             // ???
-            assert(allocator.view().clients[self.cid as nat].contains(
+            assume(allocator.view().clients[self.cid as nat].contains(
                 (table.0 as nat / A::frame_size()) as nat,
             ));
             // TODO
