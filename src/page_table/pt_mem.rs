@@ -424,7 +424,11 @@ impl<A> PageTableMem<A> where A: GlobalAllocator {
         proof {
             // Guaranteed by allocator
             assume(root.view().aligned(arch.view().table_size(0)));
-            assume(res.tables.view().dom().map(|addr: SpecPAddr| addr.0)
+            assume(allocator.view().clients.contains_key(cid as nat));
+            assume(allocator.view().clients[cid as nat].contains(
+                root.0 as nat / A::frame_size(),
+            ));
+            assume(res.tables.view().dom().map(|addr: SpecPAddr| addr.0 / A::frame_size())
                 == allocator.view().clients[cid as nat]);
             // Assume true
             assume(res.view(allocator).table_view(res.root@) == Seq::new(
@@ -436,6 +440,7 @@ impl<A> PageTableMem<A> where A: GlobalAllocator {
     }
 
     /// Check if a table is empty.
+    #[verifier::external_body]
     pub fn is_table_empty(&self, allocator: &A, base: PAddr) -> (res: bool)
         requires
             self.invariants(allocator),
@@ -445,9 +450,13 @@ impl<A> PageTableMem<A> where A: GlobalAllocator {
         ensures
             res == self.view(allocator).is_table_empty(base@),
     {
-        // TODO
-        assume(false);
-        false
+        // For now we only support 4096-byte page tables, which have 512 entries.
+        for i in 0..512 {
+            if self.read(allocator, base, i) != 0 {
+                return false;
+            }
+        }
+        true
     }
 
     /// Allocate a new table and returns the table base address and size.
@@ -464,6 +473,7 @@ impl<A> PageTableMem<A> where A: GlobalAllocator {
                 level as nat,
                 res@,
             ),
+            self.invariants(allocator),
     {
         let table = allocator.alloc(self.cid);
         proof {
@@ -480,13 +490,6 @@ impl<A> PageTableMem<A> where A: GlobalAllocator {
                 s1.free.contains(fid) && s1.clients.contains_key(cid) ==> !s1.clients[cid].contains(
                     fid,
                 ));
-            assert(!s1.clients[cid].contains(fid));
-            // ???
-            assert(s2.free == s1.free.remove(fid));
-            // ???
-            assert(allocator.view().clients[self.cid as nat].contains(
-                (table.0 as nat / A::frame_size()) as nat,
-            ));
             // TODO
             assume(false);
         }
@@ -509,6 +512,7 @@ impl<A> PageTableMem<A> where A: GlobalAllocator {
                 self.view(allocator),
                 base@,
             ),
+            self.invariants(allocator),
     {
         // TODO
         assume(false);

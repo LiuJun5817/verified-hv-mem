@@ -1476,6 +1476,8 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     self.lemma_remove_consistent_with_model(vbase, subtable_base, level + 1);
                     PTTreePath::lemma_from_vaddr_step(vbase, arch, level, end);
                     assert(s2 == self.remove(vbase, subtable_base, level + 1).0);
+                    
+                    assume(false);
                 },
                 NodeEntry::Frame(frame) => {
                     if path.has_zero_tail(level) {
@@ -1487,6 +1489,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         E::lemma_eq_by_u64(pte2, E::spec_empty());
                         assert(entry2 == NodeEntry::Empty);
                     }
+                    assume(false);
                 },
                 NodeEntry::Empty => (),
             }

@@ -18,7 +18,7 @@ pub trait BitmapAllocator {
     ;
 
     /// Spec function to return the capacity of the bitmap.
-    spec fn spec_cap() -> (res: usize);
+    spec fn spec_cap() -> (res: nat);
 
     /// Spec function to check that cascading the bitmap does not overflow.
     spec fn cascade_not_overflow() -> bool;
@@ -67,6 +67,8 @@ pub trait BitmapAllocator {
                     // If successful, a contiguous block from `base` to `base + size` is allocated (set to false).
                     // Other indices remain unchanged.
                     &&& base % (1usize << align_log2) == 0
+                    &&& base + size <= Self::spec_cap()
+                    &&& forall|loc1: int| (base <= loc1 < (base + size)) ==> old(self)@[loc1] == true
                     &&& forall|loc1: int| (base <= loc1 < (base + size)) ==> self@[loc1] == false
                     &&& forall|loc2: int|
                         (0 <= loc2 < base || (base + size) <= loc2 < Self::spec_cap())
@@ -76,7 +78,8 @@ pub trait BitmapAllocator {
                 None => {
                     // If failed, no suitable space was found, and the state is unchanged.
                     // This implies either no free bits, or all free contiguous blocks are too small or misaligned.
-                    Self::spec_cap() < (1usize << align_log2) || forall|i: int|
+                    &&& self@ == old(self)@
+                    &&& Self::spec_cap() < (1usize << align_log2) || forall|i: int|
                         (0 <= i <= (Self::spec_cap() - size) as int) ==> has_obstruction(
                             self@,
                             i,
@@ -98,11 +101,11 @@ pub trait BitmapAllocator {
             self.wf(),
     ;
     
-    proof fn lemma_view_len_is_cap(self)
+    broadcast proof fn lemma_view_len_is_cap(self)
         requires
             self.wf(),
         ensures
-            self.view().len() == Self::spec_cap(),
+            #[trigger] self.view().len() == Self::spec_cap(),
     ;
 }
 
