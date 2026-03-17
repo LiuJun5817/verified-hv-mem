@@ -6,7 +6,7 @@ use vstd::prelude::*;
 use super::{path::PTTreePath, spec_pt::SpecPageTable};
 use crate::{
     address::{
-        addr::{PAddr, SpecVAddr, VAddr},
+        addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
         frame::{Frame, FrameSize, MemAttr, SpecFrame},
     },
     global_allocator::GlobalAllocator,
@@ -83,8 +83,14 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
             _phantom: PhantomData,
         };
         proof {
-            // TODO
-            assume(res.view(allocator).wf());
+            broadcast use crate::page_table::pte::group_pte_lemmas;
+
+            let pt_mem = res.pt_mem.view(allocator);
+            assert(forall|base: SpecPAddr, idx: nat| #[trigger]
+                pt_mem.accessible(base, idx) ==> !E::spec_from_u64(
+                    pt_mem.read(base, idx),
+                ).spec_valid());
+            assert(res.view(allocator).wf());
         }
         res
     }
@@ -218,7 +224,7 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
 
                 // TODO: assume allocator always contains enough free frames for intermediate table allocation
                 assume(!allocator.view().free.is_empty());
-                
+
                 // Insert at next level
                 self.insert(allocator, vbase, table_base, level + 1, target_level, new_pte)
             }
@@ -411,7 +417,17 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
         let target_level = self.constants.arch.level_of_frame_size(frame.size);
         let huge = target_level < self.constants.arch.level_count() - 1;
         proof {
-            assume(frame.base@.aligned(FrameSize::Size4K.as_nat()));
+            // TODO: supporting more frame sizes
+            assert(forall|level: nat|
+                level < self.constants.arch@.level_count() ==> self.constants.arch@.entry_count(
+                    level,
+                ) == 512);
+            assert(frame.size.as_nat() % 4096 == 0);
+            assert(frame.base@.aligned(4096)) by (nonlinear_arith)
+                requires
+                    frame.size.as_nat() % 4096 == 0,
+                    frame.base@.aligned(frame.size.as_nat()),
+            ;
         }
         let new_pte = E::new(frame.base, frame.attr, huge);
 

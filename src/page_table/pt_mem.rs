@@ -442,6 +442,7 @@ impl<A> PageTableMem<A> where A: GlobalAllocator {
             forall|level: nat| level < arch@.level_count() ==> arch@.entry_count(level) == 512,
             A::frame_size() == 4096,
         ensures
+            res.arch == arch,
             res.view(allocator).init(),
             res.invariants(allocator),
     {
