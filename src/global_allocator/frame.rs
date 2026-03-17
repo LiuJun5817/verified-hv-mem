@@ -570,6 +570,7 @@ impl<A> GlobalAllocator for GlobalBitmapAllocator<A> where A: BitmapAllocator {
                 self.allocator.wf(),
                 client.frames.len() == len,
                 // Must maintain here for proof after while loop
+                self.base() == old(self).base(),
                 self.clients == old(self).clients,
                 self.base.view().aligned(Self::FRAME_SIZE as nat),
                 self.base.0 + (A::spec_cap() * Self::FRAME_SIZE) <= usize::MAX,

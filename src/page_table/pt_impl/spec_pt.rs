@@ -1476,7 +1476,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     self.lemma_remove_consistent_with_model(vbase, subtable_base, level + 1);
                     PTTreePath::lemma_from_vaddr_step(vbase, arch, level, end);
                     assert(s2 == self.remove(vbase, subtable_base, level + 1).0);
-                    
+
                     assume(false);
                 },
                 NodeEntry::Frame(frame) => {

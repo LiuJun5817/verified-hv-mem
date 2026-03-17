@@ -60,25 +60,31 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
     }
 
     /// Construct a new page table.
+    ///
+    /// TODO: we assume all tables in the hierarchical page table contain 512 8-byte entries, which is true
+    /// for hvisor's aarch64 implementation. We can make it more general in the future.
     pub fn new(allocator: &mut A, cid: usize, constants: PTConstants) -> (res: Self)
         requires
-            old(allocator).view().clients.contains_key(cid as nat),
             old(allocator).invariants(),
+            old(allocator).view().clients.contains_key(cid as nat),
             old(allocator).view().clients[cid as nat].is_empty(),
             !old(allocator).view().free.is_empty(),
             constants@.valid(),
+            forall|level: nat|
+                level < constants.arch@.level_count() ==> constants.arch@.entry_count(level) == 512,
+            A::frame_size() == 4096,
         ensures
             res.invariants(allocator),
             res.view(allocator).pt_mem.init(),
             res.constants == constants,
     {
-        // TODO
         let res = Self {
             pt_mem: PageTableMem::new(allocator, cid, constants.arch.clone()),
             constants,
             _phantom: PhantomData,
         };
         proof {
+            // TODO
             assume(res.view(allocator).wf());
         }
         res
@@ -205,10 +211,8 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
                 }
                 // Allocate intermediate table
                 let table_base = self.pt_mem.alloc_table(allocator, level + 1);
-                proof {
-                    // TODO: prove alignment
-                    assume(table_base@.aligned(FrameSize::Size4K.as_nat()));
-                }
+                assert(table_base@.aligned(FrameSize::Size4K.as_nat()));
+
                 // Write entry
                 let pte = E::new(table_base, MemAttr::default(), false);
                 self.pt_mem.write(allocator, base, idx, pte.to_u64());

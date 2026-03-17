@@ -184,13 +184,14 @@ pub trait GlobalAllocator {
             old(self).invariants(),
         ensures
             frame@.aligned(Self::frame_size()),
+            frame.0 >= old(self).base().0,
             GlobalAllocatorModel::alloc(
                 old(self)@,
                 self@,
                 cid as nat,
-                paddr_to_fid(self.base(), frame, Self::frame_size()),
+                paddr_to_fid(self.base().0, frame.0 as nat, Self::frame_size()),
             ),
-            old(self).base() == self.base(),
+            self.base() == old(self).base(),
             self.invariants(),
     ;
 
@@ -201,7 +202,7 @@ pub trait GlobalAllocator {
             frame@.aligned(Self::frame_size()),
             frame.0 >= old(self).base().0,
             old(self)@.clients[cid as nat].contains(
-                paddr_to_fid(old(self).base(), frame, Self::frame_size()),
+                paddr_to_fid(old(self).base().0, frame.0 as nat, Self::frame_size()),
             ),
             old(self).invariants(),
         ensures
@@ -209,9 +210,9 @@ pub trait GlobalAllocator {
                 old(self)@,
                 self@,
                 cid as nat,
-                paddr_to_fid(self.base(), frame, Self::frame_size()),
+                paddr_to_fid(self.base().0, frame.0 as nat, Self::frame_size()),
             ),
-            old(self).base() == self.base(),
+            self.base() == old(self).base(),
             self.invariants(),
     ;
 
@@ -234,9 +235,9 @@ pub trait GlobalAllocator {
                 self@,
                 cid as nat,
                 count as nat,
-                paddr_to_fid(self.base(), frame, Self::frame_size()),
+                paddr_to_fid(self.base().0, frame.0 as nat, Self::frame_size()),
             ),
-            old(self).base() == self.base(),
+            self.base() == old(self).base(),
             self.invariants(),
     ;
 
@@ -247,6 +248,7 @@ pub trait GlobalAllocator {
             !old(self)@.clients.contains_key(cid as nat),
         ensures
             GlobalAllocatorModel::add_client(old(self)@, self@, cid as nat),
+            self.base() == old(self).base(),
             self.invariants(),
     ;
 
@@ -257,6 +259,7 @@ pub trait GlobalAllocator {
             old(self).invariants(),
         ensures
             GlobalAllocatorModel::remove_client(old(self)@, self@, cid as nat),
+            self.base() == old(self).base(),
             self.invariants(),
     ;
 
@@ -270,8 +273,8 @@ pub trait GlobalAllocator {
 }
 
 /// Calculate frame ID from physical address.
-pub open spec fn paddr_to_fid(base: SpecPAddr, addr: PAddr, frame_size: nat) -> nat {
-    (addr.0 - base.0) as nat / frame_size
+pub open spec fn paddr_to_fid(base: nat, addr: nat, frame_size: nat) -> nat {
+    (addr - base) as nat / frame_size
 }
 
 } // verus!
