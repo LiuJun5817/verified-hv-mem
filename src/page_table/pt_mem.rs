@@ -192,6 +192,17 @@ impl SpecPageTableMem {
         admit();
     }
 
+    /// Restrict `alloc_table` in the reverse direction.
+    pub broadcast proof fn alloc_table_facts_rev(s1: Self, s2: Self, level: nat, new_base: SpecPAddr)
+        requires
+            s1.alloc_table_pre(level),
+            #[trigger] Self::alloc_table_spec(s1, s2, level, new_base),
+        ensures
+            (s2, new_base) == s1.alloc_table(level),
+    {
+        admit();
+    }
+
     /// Deallocate a table.
     pub uninterp spec fn dealloc_table(self, base: SpecPAddr) -> Self
         recommends
@@ -354,6 +365,7 @@ impl SpecPageTableMem {
 pub broadcast group group_pt_mem_lemmas {
     SpecPageTableMem::table_view_facts,
     SpecPageTableMem::alloc_table_facts,
+    SpecPageTableMem::alloc_table_facts_rev,
     SpecPageTableMem::dealloc_table_facts,
     SpecPageTableMem::write_facts,
     SpecPageTableMem::lemma_init_implies_wf,

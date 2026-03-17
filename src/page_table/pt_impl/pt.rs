@@ -217,6 +217,9 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
                 let pte = E::new(table_base, MemAttr::default(), false);
                 self.pt_mem.write(allocator, base, idx, pte.to_u64());
 
+                // TODO: assume allocator always contains enough free frames for intermediate table allocation
+                assume(!allocator.view().free.is_empty());
+                
                 // Insert at next level
                 self.insert(allocator, vbase, table_base, level + 1, target_level, new_pte)
             }
