@@ -10,7 +10,6 @@ use crate::{
         addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
         frame::FrameSize,
     },
-    frame_allocator::frame_trait::FrameAllocator,
     global_allocator::{paddr_to_fid, GlobalAllocator, GlobalAllocatorModel},
     page_table::pt_arch::{PTArch, SpecPTArch},
 };

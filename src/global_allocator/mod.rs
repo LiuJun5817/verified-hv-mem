@@ -13,7 +13,7 @@
 //! allocated list. A client can only deallocate a frame that it has allocated before, and the
 //! deallocation moves the frame from the client's allocated list back to the global free pool.
 use crate::address::addr::{PAddr, SpecPAddr};
-use std::{marker::PhantomData, str};
+use std::marker::PhantomData;
 use vstd::prelude::*;
 
 pub mod frame;

@@ -4,7 +4,7 @@ use crate::{
     address::addr::{PAddr, SpecPAddr},
     bitmap_allocator::bitmap_trait::BitmapAllocator,
 };
-use vstd::{invariant, prelude::*, set::fold::lemma_finite_set_induct, set_lib::lemma_len_subset};
+use vstd::{prelude::*, set_lib::lemma_len_subset};
 
 verus! {
 

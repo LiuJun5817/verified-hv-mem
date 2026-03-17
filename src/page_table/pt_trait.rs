@@ -6,7 +6,6 @@ use vstd::prelude::*;
 // use super::pt_mem::PageTableMem;
 use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 use crate::address::frame::{Frame, MemAttr, SpecFrame};
-use crate::frame_allocator::frame_trait::FrameAllocator;
 use crate::global_allocator::GlobalAllocator;
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 

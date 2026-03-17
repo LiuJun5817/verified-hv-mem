@@ -10,7 +10,6 @@ use crate::{
         addr::{SpecPAddr, VAddr},
         frame::Frame,
     },
-    frame_allocator::frame_trait::FrameAllocator,
     global_allocator::GlobalAllocator,
 };
 use vstd::prelude::*;
