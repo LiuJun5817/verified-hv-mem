@@ -316,7 +316,7 @@ impl<A> GlobalAllocator for GlobalBitmapAllocator<A> where A: BitmapAllocator {
             // The client's frames is updated correctly
             let frames = self.clients[idx as int].frames@;
             let old_frames = old(self).clients[idx as int].frames@;
-            assert(!frames.contains(fid)) by { assume(false) }
+            assert(!frames.contains(fid));
             assert(forall|fid2| frames.contains(fid2) ==> old_frames.contains(fid2));
             assert forall|fid2| old_frames.contains(fid2) && fid2 != fid implies frames.contains(
                 fid2,
