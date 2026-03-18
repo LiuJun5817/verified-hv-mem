@@ -6,7 +6,6 @@ use vstd::prelude::*;
 // use super::pt_mem::PageTableMem;
 use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 use crate::address::frame::{Frame, MemAttr, SpecFrame};
-use crate::frame_allocator::frame_trait::FrameAllocator;
 use crate::global_allocator::GlobalAllocator;
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 
@@ -215,6 +214,9 @@ pub trait PageTable<A> where Self: Sized, A: GlobalAllocator {
     spec fn invariants(&self, allocator: &A) -> bool;
 
     /// Create an empty page table
+    ///
+    /// TODO: we assume all tables in the hierarchical page table contain 512 8-byte entries, which is true
+    /// for hvisor's aarch64 implementation. We can make it more general in the future.
     fn new(allocator: &mut A, cid: usize, constants: PTConstants) -> (pt: Self)
         requires
             old(allocator).invariants(),
@@ -222,6 +224,9 @@ pub trait PageTable<A> where Self: Sized, A: GlobalAllocator {
             old(allocator).view().clients[cid as nat].is_empty(),
             !old(allocator).view().free.is_empty(),
             constants@.valid(),
+            forall|level: nat|
+                level < constants.arch@.level_count() ==> constants.arch@.entry_count(level) == 512,
+            A::frame_size() == 4096,
         ensures
             pt.view(allocator).constants == constants@,
             pt.view(allocator).init(),

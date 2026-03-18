@@ -1453,9 +1453,10 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         let pte2 = E::spec_from_u64(s2.pt_mem.read(base, idx));
 
-        if path.len() <= 1 {
-            match entry {
-                NodeEntry::Frame(_) => {
+        if pte.spec_valid() {
+            if level >= self.constants.arch.level_count() - 1 {
+                // Leaf node
+                if vbase.aligned(self.constants.arch.frame_size(level).as_nat()) {
                     // Update frame entry to empty
                     assert(s2.pt_mem == self.pt_mem.write(
                         base,
@@ -1464,21 +1465,12 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     ));
                     E::lemma_eq_by_u64(pte2, E::spec_empty());
                     assert(entry2 == NodeEntry::Empty);
-                },
-                _ => (),
-            }
-        } else {
-            match entry {
-                NodeEntry::Node(subnode) => {
-                    // `pte` points to a subtable
-                    let subtable_base = pte.spec_addr();
-                    // Recursive remove from the subtable
-                    self.lemma_remove_consistent_with_model(vbase, subtable_base, level + 1);
-                    PTTreePath::lemma_from_vaddr_step(vbase, arch, level, end);
-                    assert(s2 == self.remove(vbase, subtable_base, level + 1).0);
-                },
-                NodeEntry::Frame(frame) => {
-                    if path.has_zero_tail(level) {
+                }
+            } else {
+                // Intermediate node
+                if pte.spec_huge() {
+                    if vbase.aligned(self.constants.arch.frame_size(level).as_nat()) {
+                        // Update frame entry to empty
                         assert(s2.pt_mem == self.pt_mem.write(
                             base,
                             idx,
@@ -1487,8 +1479,15 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         E::lemma_eq_by_u64(pte2, E::spec_empty());
                         assert(entry2 == NodeEntry::Empty);
                     }
-                },
-                NodeEntry::Empty => (),
+                } else {
+                    // `pte` points to a subtable
+                    let subtable_base = pte.spec_addr();
+                    // Recursive remove from the subtable
+                    self.lemma_remove_consistent_with_model(vbase, subtable_base, level + 1);
+
+                    PTTreePath::lemma_from_vaddr_step(vbase, arch, level, end);
+                    assert(s2 == self.remove(vbase, subtable_base, level + 1).0);
+                }
             }
         }
     }

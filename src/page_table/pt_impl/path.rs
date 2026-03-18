@@ -1,4 +1,5 @@
 //! Visit path of the page table tree model.
+use vstd::arithmetic::mul::lemma_mul_strictly_positive;
 use vstd::prelude::*;
 
 use crate::address::addr::SpecVAddr;
@@ -508,8 +509,71 @@ impl PTTreePath {
         ensures
             #[trigger] a.has_real_prefix(b) || b.has_real_prefix(a),
     {
-        // TODO
-        assume(false);
+        if a.has_prefix(b) {
+            if !a.has_zero_tail(b.len()) {
+                Self::lemma_vaddr_eq_implies_real_prefix_contradiction(arch, a, b);
+            }
+        } else if b.has_prefix(a) {
+            if !b.has_zero_tail(a.len()) {
+                Self::lemma_vaddr_eq_implies_real_prefix_contradiction(arch, b, a);
+            }
+        } else {
+            Self::lemma_nonprefix_implies_vaddr_inequality(arch, a, b);
+        }
+    }
+
+    /// Helper lemma to prove `lemma_vaddr_eq_implies_real_prefix` by contradiction.
+    proof fn lemma_vaddr_eq_implies_real_prefix_contradiction(arch: SpecPTArch, a: Self, b: Self)
+        requires
+            arch.valid(),
+            a.valid(arch, 0),
+            b.valid(arch, 0),
+            a.has_prefix(b),
+            !a.has_zero_tail(b.len()),
+        ensures
+            b.to_vaddr(arch).0 < a.to_vaddr(arch).0,
+    {
+        let idx = choose|i: int| b.len() <= i < a.len() && a.0[i] != 0;
+        // `pref` is the prefix stopping before the first non-zero tail index
+        let pref = a.trim(idx as nat);
+        // `pref2` = `pref` + the first non-zero tail index
+        let pref2 = a.trim((idx + 1) as nat);
+        assert(pref.has_prefix(b));
+        assert(pref2.has_prefix(pref));
+        assert(a.has_prefix(pref2));
+
+        // 1. `pref` and `b`
+        Self::lemma_to_vaddr_lower_bound(arch, pref, b);
+        assert(b.to_vaddr(arch).0 <= pref.to_vaddr(arch).0);
+
+        // 2. `pref2` and `pref`
+        let pref_parts = Seq::new(
+            pref.len(),
+            |i: int| pref.0[i] * arch.frame_size(i as nat).as_nat(),
+        );
+        let pref2_parts = Seq::new(
+            pref2.len(),
+            |i: int| pref2.0[i] * arch.frame_size(i as nat).as_nat(),
+        );
+        assert(pref2_parts.take(pref.len() as int) == pref_parts);
+        let remain: nat = pref2.0[pref2.len() - 1] * arch.frame_size(
+            (pref2.len() - 1) as nat,
+        ).as_nat();
+        assert(pref2_parts.fold_left(0, |sum: nat, part| sum + part) == pref_parts.fold_left(
+            0,
+            |sum: nat, part| sum + part,
+        ) + remain);
+        lemma_mul_strictly_positive(
+            pref2.0[pref2.len() - 1] as int,
+            arch.frame_size((pref2.len() - 1) as nat).as_nat() as int,
+        );
+        assert(remain > 0);
+        assert(pref2.to_vaddr(arch).0 == pref.to_vaddr(arch).0 + remain);
+        assert(pref.to_vaddr(arch).0 < pref2.to_vaddr(arch).0);
+
+        // 3. `a` and `pref2`
+        Self::lemma_to_vaddr_lower_bound(arch, a, pref2);
+        assert(pref2.to_vaddr(arch).0 <= a.to_vaddr(arch).0);
     }
 
     /// Lemma. If `a` is a real prefix of `b`, then `a.to_vaddr() == b.to_vaddr()`.

@@ -12,11 +12,11 @@
 //! free frame, the allocation succeeds and the frame is moved from the free pool to the client's
 //! allocated list. A client can only deallocate a frame that it has allocated before, and the
 //! deallocation moves the frame from the client's allocated list back to the global free pool.
-use crate::address::addr::PAddr;
-use std::{marker::PhantomData, str};
+use crate::address::addr::{PAddr, SpecPAddr};
+use std::marker::PhantomData;
 use vstd::prelude::*;
 
-// pub mod frame;
+pub mod frame;
 
 verus! {
 
@@ -48,8 +48,10 @@ impl GlobalAllocatorModel {
     }
 
     /// If free contains a contiguous range of `count` frames.
-    pub open spec fn has_contiguous_free(self, count: nat) -> bool {
-        count > 0 && exists|fid: nat| self.has_contiguous_free_from(count, fid)
+    pub open spec fn has_contiguous_free(self, count: nat, align_log2: nat) -> bool {
+        count > 0 && exists|fid: nat|
+            fid + count <= self.free.len() && fid % (1 << align_log2) as nat == 0
+                && self.has_contiguous_free_from(count, fid)
     }
 
     /// If free contains a range of `count` frames starting from `fid`.
@@ -69,7 +71,7 @@ impl GlobalAllocatorModel {
         let allocated: Set<nat> = Set::new(|fid2: nat| fid <= fid2 < fid + count);
         &&& allocated.subset_of(s1.free)
         &&& s2.free == s1.free.difference(allocated)
-        &&& s2.clients[cid] == s1.clients[cid].union(allocated)
+        &&& s2.clients == s1.clients.insert(cid, s1.clients[cid].union(allocated))
     }
 
     /// Deallocate a frame from a client.
@@ -171,6 +173,9 @@ pub trait GlobalAllocator {
     /// Unit frame size in bytes.
     spec fn frame_size() -> nat;
 
+    /// Base address of the physical memory managed by the global allocator.
+    spec fn base(&self) -> SpecPAddr;
+
     /// Allocate a frame for a client, return the allocated frame's base physical address.
     fn alloc(&mut self, cid: usize) -> (frame: PAddr)
         requires
@@ -179,12 +184,14 @@ pub trait GlobalAllocator {
             old(self).invariants(),
         ensures
             frame@.aligned(Self::frame_size()),
+            frame.0 >= old(self).base().0,
             GlobalAllocatorModel::alloc(
                 old(self)@,
                 self@,
                 cid as nat,
-                frame@.0 / Self::frame_size(),
+                paddr_to_fid(self.base().0, frame.0 as nat, Self::frame_size()),
             ),
+            self.base() == old(self).base(),
             self.invariants(),
     ;
 
@@ -192,35 +199,45 @@ pub trait GlobalAllocator {
     fn dealloc(&mut self, cid: usize, frame: PAddr)
         requires
             old(self)@.clients.contains_key(cid as nat),
-            old(self)@.clients[cid as nat].contains(frame@.0 / Self::frame_size()),
-            old(self).invariants(),
             frame@.aligned(Self::frame_size()),
+            frame.0 >= old(self).base().0,
+            old(self)@.clients[cid as nat].contains(
+                paddr_to_fid(old(self).base().0, frame.0 as nat, Self::frame_size()),
+            ),
+            old(self).invariants(),
         ensures
             GlobalAllocatorModel::dealloc(
                 old(self)@,
                 self@,
                 cid as nat,
-                frame@.0 / Self::frame_size(),
+                paddr_to_fid(self.base().0, frame.0 as nat, Self::frame_size()),
             ),
+            self.base() == old(self).base(),
             self.invariants(),
     ;
 
     /// Allocate a contiguous range of frames for a client, return the base physical address of starting frame.
+    ///
+    /// TODO: frame@.aligned(Self::frame_size() * (1 << align_log2) as nat), which requires stronger alignment
+    /// for the base address.
     fn alloc_contiguous(&mut self, cid: usize, count: usize, align_log2: usize) -> (frame: PAddr)
         requires
             old(self)@.clients.contains_key(cid as nat),
-            old(self)@.has_contiguous_free(count as nat),
+            old(self)@.has_contiguous_free(count as nat, align_log2 as nat),
             old(self).invariants(),
+            count < old(self)@.free.len(),
+            (1usize << align_log2) < old(self)@.free.len(),
             align_log2 < 64,
         ensures
-            frame@.aligned(Self::frame_size() * (1 << align_log2) as nat),
+            frame@.aligned(Self::frame_size()),
             GlobalAllocatorModel::alloc_contiguous(
                 old(self)@,
                 self@,
                 cid as nat,
                 count as nat,
-                frame@.0 / Self::frame_size(),
+                paddr_to_fid(self.base().0, frame.0 as nat, Self::frame_size()),
             ),
+            self.base() == old(self).base(),
             self.invariants(),
     ;
 
@@ -228,8 +245,10 @@ pub trait GlobalAllocator {
     fn add_client(&mut self, cid: usize)
         requires
             old(self).invariants(),
+            !old(self)@.clients.contains_key(cid as nat),
         ensures
             GlobalAllocatorModel::add_client(old(self)@, self@, cid as nat),
+            self.base() == old(self).base(),
             self.invariants(),
     ;
 
@@ -240,16 +259,22 @@ pub trait GlobalAllocator {
             old(self).invariants(),
         ensures
             GlobalAllocatorModel::remove_client(old(self)@, self@, cid as nat),
+            self.base() == old(self).base(),
             self.invariants(),
     ;
 
     /// `invariants` implies `GlobalAllocatorModel::wf`
-    proof fn lemma_invariants_implies_wf(&self)
+    broadcast proof fn lemma_invariants_implies_wf(&self)
         requires
-            self.invariants(),
+            #[trigger] self.invariants(),
         ensures
             self@.wf(),
     ;
+}
+
+/// Calculate frame ID from physical address.
+pub open spec fn paddr_to_fid(base: nat, addr: nat, frame_size: nat) -> nat {
+    (addr - base) as nat / frame_size
 }
 
 } // verus!
