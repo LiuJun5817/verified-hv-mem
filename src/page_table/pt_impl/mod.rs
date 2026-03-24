@@ -47,27 +47,45 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: GlobalAllocator, E: PageT
 
     fn map(&mut self, allocator: &mut A, vbase: VAddr, frame: Frame) -> (res: Result<(), ()>) {
         proof {
-            self.0.view(allocator).lemma_wf_implies_node_wf();
-            self.0.view(allocator).construct_node_facts(self.0.view(allocator).pt_mem.root, 0);
-            self.0.view(allocator).view().map_refinement(vbase@, frame@);
+            let view = self.0.view(allocator);
+            view.lemma_wf_implies_node_wf();
+            view.construct_node_facts(view.pt_mem.root, 0);
+            if view.is_table_empty(view.pt_mem.root) {
+                view.lemma_empty_implies_node_empty();
+            } else {
+                view.lemma_fully_populated_implies_node_fully_populated();
+            }
+            view.view().map_refinement(vbase@, frame@);
         }
         self.0.map(allocator, vbase, frame)
     }
 
     fn unmap(&mut self, allocator: &mut A, vbase: VAddr) -> (res: Result<(), ()>) {
         proof {
-            self.0.view(allocator).lemma_wf_implies_node_wf();
-            self.0.view(allocator).construct_node_facts(self.0.view(allocator).pt_mem.root, 0);
-            self.0.view(allocator).view().unmap_refinement(vbase@);
+            let view = self.0.view(allocator);
+            view.lemma_wf_implies_node_wf();
+            view.construct_node_facts(view.pt_mem.root, 0);
+            if view.is_table_empty(view.pt_mem.root) {
+                view.lemma_empty_implies_node_empty();
+            } else {
+                view.lemma_fully_populated_implies_node_fully_populated();
+            }
+            view.view().unmap_refinement(vbase@);
         }
         self.0.unmap(allocator, vbase)
     }
 
     fn query(&self, allocator: &A, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>) {
         proof {
-            self.0.view(allocator).lemma_wf_implies_node_wf();
-            self.0.view(allocator).construct_node_facts(self.0.view(allocator).pt_mem.root, 0);
-            self.0.view(allocator).view().query_refinement(vaddr@);
+            let view = self.0.view(allocator);
+            view.lemma_wf_implies_node_wf();
+            view.construct_node_facts(view.pt_mem.root, 0);
+            if view.is_table_empty(view.pt_mem.root) {
+                view.lemma_empty_implies_node_empty();
+            } else {
+                view.lemma_fully_populated_implies_node_fully_populated();
+            }
+            view.view().query_refinement(vaddr@);
         }
         self.0.query(allocator, vaddr)
     }

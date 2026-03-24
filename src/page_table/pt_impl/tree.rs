@@ -85,7 +85,7 @@ impl PTTreeNode {
             }
     }
 
-    /// Additional wf. If there are no empty nodes in a subtree.
+    /// There are no empty nodes in a subtree.
     pub open spec fn fully_populated(self) -> bool
         recommends
             self.wf(),
@@ -100,7 +100,7 @@ impl PTTreeNode {
             exists|entry: NodeEntry| #[trigger]
                 self.entries.contains(entry) && (entry is Node || entry is Frame)
         }
-        // Nonempty property satisfied recursively
+        // Satisfied recursively
         &&& forall|entry: NodeEntry| #[trigger]
             self.entries.contains(entry) && Self::is_entry_valid(entry, self.level, self.constants)
                 && entry is Node ==> entry->Node_0.fully_populated()
