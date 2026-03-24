@@ -1,5 +1,5 @@
 //! Visit path of the page table tree model.
-use vstd::arithmetic::mul::lemma_mul_strictly_positive;
+use vstd::arithmetic::mul::{lemma_mul_is_distributive_add_other_way, lemma_mul_strictly_positive};
 use vstd::prelude::*;
 
 use crate::address::addr::SpecVAddr;
@@ -175,7 +175,6 @@ impl PTTreePath {
             self.trim(pref.len()) == pref,
     {
         let trimmed = self.trim(pref.len());
-        // assert(trimmed.len() == pref.len());
         assert forall|i| 0 <= i < trimmed.len() implies trimmed.0[i] == pref.0[i] by {
             assert(self.0[i] == pref.0[i]);
         }
@@ -280,14 +279,31 @@ impl PTTreePath {
         assert(remain.0 == path2.0);
     }
 
+    /// Lemma. If `path.len() == 1`, then `path.to_vaddr()` is simply `path.0[0] * arch.frame_size(0)`.
+    proof fn lemma_to_vaddr_len_1(self, arch: SpecPTArch)
+        requires
+            arch.valid(),
+            self.valid(arch, 0),
+            self.len() == 1,
+        ensures
+            self.to_vaddr(arch).0 == self.0[0] * arch.frame_size(0).as_nat(),
+    {
+        let parts = Seq::new(1, |i: int| self.0[i] * arch.frame_size(i as nat).as_nat());
+        let sum = parts.fold_left(0, |sum: nat, part| sum + part);
+        assert(parts.drop_last() == Seq::<nat>::empty());
+        assert(sum == Seq::<nat>::empty().fold_left(0, |sum: nat, part| sum + part) + parts[0]);
+    }
+
     /// Lemma. The address computed by `to_vaddr` is aligned to the frame size of the last level.
     pub broadcast proof fn lemma_to_vaddr_frame_alignment(self, arch: SpecPTArch)
         by (nonlinear_arith)
         requires
             arch.valid(),
-            #[trigger] self.valid(arch, 0),
+            self.valid(arch, 0),
         ensures
-            self.to_vaddr(arch).aligned(arch.frame_size((self.len() - 1) as nat).as_nat()),
+            #[trigger] self.to_vaddr(arch).aligned(
+                arch.frame_size((self.len() - 1) as nat).as_nat(),
+            ),
     {
         let parts: Seq<nat> = Seq::new(
             self.len(),
@@ -307,10 +323,10 @@ impl PTTreePath {
     pub broadcast proof fn lemma_to_vaddr_lower_bound(arch: SpecPTArch, path: Self, pref: Self)
         requires
             arch.valid(),
-            #[trigger] path.valid(arch, 0),
+            path.valid(arch, 0),
             #[trigger] path.has_prefix(pref),
         ensures
-            pref.to_vaddr(arch).0 <= path.to_vaddr(arch).0,
+            #[trigger] pref.to_vaddr(arch).0 <= path.to_vaddr(arch).0,
         decreases path.len(),
     {
         if path.len() <= pref.len() {
@@ -348,10 +364,10 @@ impl PTTreePath {
         by (nonlinear_arith)
         requires
             arch.valid(),
-            #[trigger] path.valid(arch, 0),
+            path.valid(arch, 0),
             #[trigger] path.has_prefix(pref),
         ensures
-            path.to_vaddr(arch).0 <= pref.to_vaddr(arch).0 + arch.frame_size(
+            #[trigger] path.to_vaddr(arch).0 <= pref.to_vaddr(arch).0 + arch.frame_size(
                 (pref.len() - 1) as nat,
             ).as_nat() - arch.frame_size((path.len() - 1) as nat).as_nat(),
         decreases path.len(),
@@ -405,15 +421,14 @@ impl PTTreePath {
         by (nonlinear_arith)
         requires
             arch.valid(),
-            #[trigger] a.valid(arch, 0),
+            a.valid(arch, 0),
             b.valid(arch, 0),
             !#[trigger] a.has_prefix(b),
             !b.has_prefix(a),
             a.0[Self::first_diff_idx(a, b)] < b.0[Self::first_diff_idx(a, b)],
         ensures
-            a.to_vaddr(arch).0 + arch.frame_size((a.len() - 1) as nat).as_nat() <= b.to_vaddr(
-                arch,
-            ).0,
+            #[trigger] a.to_vaddr(arch).0 + arch.frame_size((a.len() - 1) as nat).as_nat()
+                <= b.to_vaddr(arch).0,
     {
         // Trim the paths at the first differing index
         Self::lemma_first_diff_idx_exists(a, b);
@@ -482,12 +497,12 @@ impl PTTreePath {
     )
         requires
             arch.valid(),
-            #[trigger] a.valid(arch, 0),
+            a.valid(arch, 0),
             b.valid(arch, 0),
             !#[trigger] a.has_prefix(b),
             !b.has_prefix(a),
         ensures
-            a.to_vaddr(arch) != b.to_vaddr(arch),
+            #[trigger] a.to_vaddr(arch) != b.to_vaddr(arch),
     {
         Self::lemma_first_diff_idx_exists(a, b);
         let diff_idx = Self::first_diff_idx(a, b);
@@ -502,10 +517,10 @@ impl PTTreePath {
     /// `b` is a padded prefix of `a`.
     pub broadcast proof fn lemma_vaddr_eq_implies_padded_prefix(arch: SpecPTArch, a: Self, b: Self)
         requires
-            #[trigger] arch.valid(),
+            arch.valid(),
             a.valid(arch, 0),
             b.valid(arch, 0),
-            a.to_vaddr(arch) == b.to_vaddr(arch),
+            #[trigger] a.to_vaddr(arch) == b.to_vaddr(arch),
         ensures
             #[trigger] a.has_padded_prefix(b) || b.has_padded_prefix(a),
     {
@@ -579,12 +594,12 @@ impl PTTreePath {
     /// Lemma. If `a` is a padded prefix of `b`, then `a.to_vaddr() == b.to_vaddr()`.
     pub broadcast proof fn lemma_padded_prefix_implies_vaddr_eq(arch: SpecPTArch, a: Self, b: Self)
         requires
-            #[trigger] arch.valid(),
+            arch.valid(),
             a.valid(arch, 0),
             b.valid(arch, 0),
             #[trigger] a.has_padded_prefix(b),
         ensures
-            a.to_vaddr(arch) == b.to_vaddr(arch),
+            #[trigger] a.to_vaddr(arch) == b.to_vaddr(arch),
     {
         let a_parts: Seq<nat> = Seq::new(
             a.len(),
@@ -619,35 +634,65 @@ impl PTTreePath {
         assert(b.to_vaddr(arch).0 == b_sum);
     }
 
-    /// Lemma. The computed base virtual address of a path and the frame size guarantee that
-    /// any derived `to_vaddr` falls within the address window.
-    pub broadcast proof fn lemma_vaddr_range_from_path(
-        arch: SpecPTArch,
-        vaddr: SpecVAddr,
-        path: Self,
-    )
+    /// Auxiliary lemma for `lemma_to_vaddr_inverts_from_vaddr`.
+    proof fn lemma_to_vaddr_inverts_from_vaddr_aux(arch: SpecPTArch, vaddr: SpecVAddr, path: Self)
+        by (nonlinear_arith)
         requires
             arch.valid(),
             path.valid(arch, 0),
+            vaddr.0 < arch.vspace_size(),
             path == #[trigger] Self::from_vaddr_root(vaddr, arch, (path.len() - 1) as nat),
         ensures
-            path.to_vaddr(arch).0 <= vaddr.0 < path.to_vaddr(arch).0 + arch.frame_size(
-                (path.len() - 1) as nat,
-            ).as_nat(),
+            path.to_vaddr(arch).0 + vaddr.0 % arch.frame_size((path.len() - 1) as nat).as_nat()
+                == vaddr.0,
+        decreases path.len(),
     {
         let parts: Seq<nat> = Seq::new(
             path.len(),
             |i: int| path.0[i] * arch.frame_size(i as nat).as_nat(),
         );
-        assert(forall|i|
-            0 <= i < path.len() ==> parts[i] == arch.pte_index(vaddr, i as nat) * arch.frame_size(
-                i as nat,
-            ).as_nat());
-        // TODO: consider adding a lemma to `PTArch`
-        assume(false);
+        let offset = vaddr.0 % arch.frame_size((path.len() - 1) as nat).as_nat();
+        let sum = parts.fold_left(0, |sum: nat, part| sum + part);
+
+        if path.len() == 1 {
+            // Base case
+            path.lemma_to_vaddr_len_1(arch);
+            assert(sum == vaddr.0 / arch.frame_size(0).as_nat() % arch.entry_count(0)
+                * arch.frame_size(0).as_nat());
+
+            // Merge `sum` and `offset` by lemma
+            lemma_mod_div_mod_mul_eq(vaddr.0, arch.frame_size(0).as_nat(), arch.entry_count(0));
+            assert(sum + offset == vaddr.0 % (arch.frame_size(0).as_nat() * arch.entry_count(0)));
+            assert(sum + offset == vaddr.0);
+        } else {
+            // Inductive case: `pref` is the longest prefix of `path` and not equal to `path`
+            let pref = path.trim((path.len() - 1) as nat);
+            assert(pref.0 == Self::from_vaddr_root(vaddr, arch, (pref.len() - 1) as nat).0);
+
+            let pref_parts = Seq::new(
+                pref.len(),
+                |i: int| pref.0[i] * arch.frame_size(i as nat).as_nat(),
+            );
+            assert(pref_parts == parts.drop_last());
+            let pref_sum = pref_parts.fold_left(0, |sum: nat, part| sum + part);
+            let remain = path.0[path.len() - 1] * arch.frame_size((path.len() - 1) as nat).as_nat();
+            assert(sum == pref_sum + remain);
+
+            let offset2 = vaddr.0 % arch.frame_size((pref.len() - 1) as nat).as_nat();
+            // Merge the `remain` and `offset` by lemma
+            lemma_mod_div_mod_mul_eq(
+                vaddr.0,
+                arch.frame_size((path.len() - 1) as nat).as_nat(),
+                arch.entry_count((path.len() - 1) as nat),
+            );
+            assert(remain + offset == offset2);
+            assert(sum + offset == pref_sum + offset2);
+
+            Self::lemma_to_vaddr_inverts_from_vaddr_aux(arch, vaddr, pref);
+        }
     }
 
-    /// Lemma. Converting a vaddr into a path and then back exactly inverts the operation.
+    /// Lemma. Converting an aligned vaddr into a path and then back exactly inverts the operation.
     pub broadcast proof fn lemma_to_vaddr_inverts_from_vaddr(
         arch: SpecPTArch,
         vaddr: SpecVAddr,
@@ -656,23 +701,60 @@ impl PTTreePath {
         requires
             arch.valid(),
             path.valid(arch, 0),
+            vaddr.0 < arch.vspace_size(),
             vaddr.aligned(arch.frame_size((path.len() - 1) as nat).as_nat()),
             path == #[trigger] Self::from_vaddr_root(vaddr, arch, (path.len() - 1) as nat),
         ensures
             path.to_vaddr(arch) == vaddr,
     {
-        let fsize = arch.frame_size((path.len() - 1) as nat).as_nat();
-        Self::lemma_vaddr_range_from_path(arch, vaddr, path);
+        assert(vaddr.0 % arch.frame_size((path.len() - 1) as nat).as_nat() == 0);
+        Self::lemma_to_vaddr_inverts_from_vaddr_aux(arch, vaddr, path)
+    }
 
-        assert(vaddr.0 - fsize < path.to_vaddr(arch).0 <= vaddr.0);
-        path.lemma_to_vaddr_frame_alignment(arch);
+    /// Lemma. The virtual address computed by `to_vaddr` is within some range of the virtual address used
+    /// to compute the path.
+    pub broadcast proof fn lemma_vaddr_within_path_range(
+        arch: SpecPTArch,
+        vaddr: SpecVAddr,
+        path: Self,
+    )
+        requires
+            arch.valid(),
+            path.valid(arch, 0),
+            vaddr.0 < arch.vspace_size(),
+            path == #[trigger] Self::from_vaddr_root(vaddr, arch, (path.len() - 1) as nat),
+        ensures
+            path.to_vaddr(arch).0 <= vaddr.0 < path.to_vaddr(arch).0 + arch.frame_size(
+                (path.len() - 1) as nat,
+            ).as_nat(),
+    {
+        Self::lemma_to_vaddr_inverts_from_vaddr_aux(arch, vaddr, path);
+        assert(vaddr.0 % arch.frame_size((path.len() - 1) as nat).as_nat() < arch.frame_size(
+            (path.len() - 1) as nat,
+        ).as_nat());
+    }
 
-        assert(vaddr.0 % fsize == 0);
-        assert((vaddr.0 - fsize) / fsize as int == vaddr.0 / fsize - 1);
-        assert(vaddr.0 / fsize - 1 < path.to_vaddr(arch).0 / fsize <= vaddr.0 / fsize);
+    /// Lemma. The virtual address computed by `to_vaddr` is within the vspace size
+    pub broadcast proof fn lemma_to_vaddr_within_vspace_size(arch: SpecPTArch, path: Self)
+        by (nonlinear_arith)
+        requires
+            arch.valid(),
+            path.valid(arch, 0),
+        ensures
+            #[trigger] path.to_vaddr(arch).0 < arch.vspace_size(),
+    {
+        let pref = path.trim(1);
+        assert(path.has_prefix(pref));
+        Self::lemma_to_vaddr_upper_bound(arch, path, pref);
+        // Bound `path.to_vaddr` to `pref.to_vaddr`
+        let fsize = arch.frame_size(0).as_nat();
+        assert(path.to_vaddr(arch).0 < pref.to_vaddr(arch).0 + fsize);
+        pref.lemma_to_vaddr_len_1(arch);
 
-        assert(path.to_vaddr(arch).0 / fsize == vaddr.0 / fsize);
-        assert(path.to_vaddr(arch).0 == vaddr.0);
+        lemma_mul_is_distributive_add_other_way(fsize as int, 1, pref.0[0] as int);
+        assert(pref.to_vaddr(arch).0 + fsize == (1 + pref.0[0]) * fsize);
+        assert(pref.0[0] < arch.entry_count(0));
+        assert(pref.to_vaddr(arch).0 + fsize <= arch.vspace_size());
     }
 }
 
@@ -783,6 +865,42 @@ pub proof fn lemma_parts_align_implies_sum_align(s: Seq<nat>, align: nat)
     }
 }
 
+/// Lemma. `v % f + v / f % e * f == v % (e * f)` for any natural `v`, positive `f`, and positive `e`.
+proof fn lemma_mod_div_mod_mul_eq(v: nat, f: nat, e: nat)
+    by (nonlinear_arith)
+    requires
+        f > 0,
+        e > 0,
+    ensures
+        v % f + (v / f) % e * f == v % (e * f),
+{
+    let k = v / f;
+    let b = v % f;
+    assert(v == k * f + b && b < f);
+    let p = k / e;
+    let q = k % e;
+    assert(k == p * e + q && q < e);
+    // Left side
+    assert(v % f + (v / f) % e * f == b + q * f);
+    // Right side
+    assert(v % (e * f) == (p * (e * f) + (q * f + b)) % (e * f));
+    assert((p * e * f + q * f + b) % (e * f) == (b + q * f) % (e * f));
+    // Left side == Right side
+    assert(b + q * f < e * f);
+    lemma_mod_eq_self(b + q * f, e * f);
+    assert((b + q * f) % (e * f) == b + q * f);
+}
+
+proof fn lemma_mod_eq_self(v: nat, m: nat)
+    by (nonlinear_arith)
+    requires
+        m > 0,
+        v < m,
+    ensures
+        v % m == v,
+{
+}
+
 pub broadcast group group_pt_tree_path_lemmas {
     // prefix related lemmas
     PTTreePath::lemma_eq_step,
@@ -801,8 +919,9 @@ pub broadcast group group_pt_tree_path_lemmas {
     PTTreePath::lemma_nonprefix_implies_vaddr_inequality,
     PTTreePath::lemma_vaddr_eq_implies_padded_prefix,
     PTTreePath::lemma_padded_prefix_implies_vaddr_eq,
-    PTTreePath::lemma_vaddr_range_from_path,
+    PTTreePath::lemma_vaddr_within_path_range,
     PTTreePath::lemma_to_vaddr_inverts_from_vaddr,
+    PTTreePath::lemma_to_vaddr_within_vspace_size,
 }
 
 } // verus!

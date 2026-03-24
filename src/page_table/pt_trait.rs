@@ -62,6 +62,8 @@ impl PageTableState {
         &&& self.constants.arch.is_valid_frame_size(
             frame.size,
         )
+        // Base vaddr should be within vspace size
+        &&& vbase.0 < self.constants.arch.vspace_size()
         // Base vaddr should align to frame size
         &&& vbase.aligned(
             frame.size.as_nat(),
@@ -97,8 +99,10 @@ impl PageTableState {
 
     /// Unmap precondition.
     pub open spec fn unmap_pre(self, vbase: SpecVAddr) -> bool {
+        // Base vaddr should be within vspace size
+        &&& vbase.0 < self.constants.arch.vspace_size()
         // Base vaddr should align to leaf frame size
-        vbase.aligned(self.constants.arch.leaf_frame_size().as_nat())
+        &&& vbase.aligned(self.constants.arch.leaf_frame_size().as_nat())
     }
 
     /// State transition - unmap a virtual address.
@@ -122,8 +126,10 @@ impl PageTableState {
 
     /// Query precondition.
     pub open spec fn query_pre(self, vaddr: SpecVAddr) -> bool {
-        // Base vaddr should align to 8 bytes
-        vaddr.aligned(8)
+        // Vaddr should be within vspace size
+        &&& vaddr.0 < self.constants.arch.vspace_size()
+        // Vaddr should align to 8 bytes
+        &&& vaddr.aligned(8)
     }
 
     /// Query the physical frame mapped to a virtual address.

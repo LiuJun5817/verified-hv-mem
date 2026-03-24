@@ -2032,12 +2032,14 @@ impl PTTreeModel {
             forall|vbase, frame| #[trigger]
                 self.mappings().contains_pair(vbase, frame) ==> {
                     &&& self.arch().is_valid_frame_size(frame.size)
+                    &&& vbase.0 < self.arch().vspace_size()
                     &&& vbase.aligned(frame.size.as_nat())
                     &&& frame.base.aligned(frame.size.as_nat())
                 },
     {
         assert forall|vbase, frame| #[trigger] self.mappings().contains_pair(vbase, frame) implies {
             &&& self.arch().is_valid_frame_size(frame.size)
+            &&& vbase.0 < self.arch().vspace_size()
             &&& vbase.aligned(frame.size.as_nat())
             &&& frame.base.aligned(frame.size.as_nat())
         } by {
@@ -2124,6 +2126,7 @@ impl PTTreeModel {
         requires
             self.wf(),
             self.arch().is_valid_frame_size(frame.size),
+            vbase.0 < self.arch().vspace_size(),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
             !self.overlaps_vmem(vbase, frame),
@@ -2186,6 +2189,7 @@ impl PTTreeModel {
             self.wf(),
             self.arch().is_valid_frame_size(frame.size),
             vbase.aligned(frame.size.as_nat()),
+            vbase.0 < self.arch().vspace_size(),
             frame.base.aligned(frame.size.as_nat()),
             self.map(vbase, frame).1 is Ok,
         ensures
@@ -2220,6 +2224,7 @@ impl PTTreeModel {
         requires
             self.wf(),
             self.arch().is_valid_frame_size(frame.size),
+            vbase.0 < self.arch().vspace_size(),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
             self.map(vbase, frame).1 is Ok,
@@ -2301,6 +2306,7 @@ impl PTTreeModel {
         requires
             self.wf(),
             self.arch().is_valid_frame_size(frame.size),
+            vbase.0 < self.arch().vspace_size(),
             vbase.aligned(frame.size.as_nat()),
             frame.base.aligned(frame.size.as_nat()),
             self.map(vbase, frame).1 is Ok,
@@ -2493,6 +2499,7 @@ impl PTTreeModel {
     pub proof fn lemma_mapping_exist_implies_query_ok(self, vaddr: SpecVAddr)
         requires
             self.wf(),
+            vaddr.0 < self.arch().vspace_size(),
             self.has_mapping_for(vaddr),
         ensures
             self.query(vaddr) is Ok,
@@ -2546,8 +2553,7 @@ impl PTTreeModel {
         assert(level == path.len() - 1);
         assert(visited.last() == NodeEntry::Frame(frame));
 
-        // TODO: add lemma to `PTTreePath`
-        PTTreePath::lemma_vaddr_range_from_path(self.arch(), vaddr, path2);
+        PTTreePath::lemma_vaddr_within_path_range(self.arch(), vaddr, path2);
         assert(path2.to_vaddr(self.arch()).0 <= vaddr.0 < path2.to_vaddr(self.arch()).0
             + self.arch().frame_size((path2.len() - 1) as nat).as_nat());
         PTTreePath::lemma_to_vaddr_lower_bound(self.arch(), path2, path);

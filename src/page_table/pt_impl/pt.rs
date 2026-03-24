@@ -503,6 +503,7 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
                 );
             }
             // Ensures #2
+
             self.view(allocator).lemma_remove_consistent_with_model(vbase@, root, 0);
             self.view(allocator).lemma_remove_preserves_root(vbase@, root, 0);
         }
