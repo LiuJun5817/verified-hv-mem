@@ -57,7 +57,7 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
         let view = self.view(allocator);
         &&& self.pt_mem.invariants(allocator)
         &&& view.wf()
-        &&& (view.pt_mem.init() || view.fully_populated())
+        &&& (view.pt_mem.init() || view.all_nonempty())
     }
 
     /// Construct a new page table.
@@ -452,7 +452,7 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
                 target_level as nat,
                 new_pte,
             );
-            self.view(allocator).lemma_insert_preserves_fully_populated(
+            self.view(allocator).lemma_insert_preserves_all_nonempty(
                 vbase@,
                 root,
                 0,
@@ -496,7 +496,7 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
             // Ensures #1
             self.view(allocator).lemma_remove_preserves_wf(vbase@, root, 0);
             if !self.view(allocator).is_table_empty(root) {
-                self.view(allocator).lemma_prune_after_remove_preserves_fully_populated(
+                self.view(allocator).lemma_prune_after_remove_preserves_all_nonempty(
                     vbase@,
                     root,
                     0,

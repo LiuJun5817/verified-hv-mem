@@ -53,7 +53,7 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: GlobalAllocator, E: PageT
             if view.is_table_empty(view.pt_mem.root) {
                 view.lemma_empty_implies_node_empty();
             } else {
-                view.lemma_fully_populated_implies_node_fully_populated();
+                view.lemma_all_nonempty_implies_node_all_nonempty();
             }
             view.view().map_refinement(vbase@, frame@);
         }
@@ -68,7 +68,7 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: GlobalAllocator, E: PageT
             if view.is_table_empty(view.pt_mem.root) {
                 view.lemma_empty_implies_node_empty();
             } else {
-                view.lemma_fully_populated_implies_node_fully_populated();
+                view.lemma_all_nonempty_implies_node_all_nonempty();
             }
             view.view().unmap_refinement(vbase@);
         }
@@ -83,7 +83,7 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: GlobalAllocator, E: PageT
             if view.is_table_empty(view.pt_mem.root) {
                 view.lemma_empty_implies_node_empty();
             } else {
-                view.lemma_fully_populated_implies_node_fully_populated();
+                view.lemma_all_nonempty_implies_node_all_nonempty();
             }
             view.view().query_refinement(vaddr@);
         }

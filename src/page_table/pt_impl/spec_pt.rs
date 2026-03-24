@@ -134,13 +134,13 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     }
 
     /// For each table except `base`, it contains at least one valid pte.
-    pub open spec fn fully_populated_except(self, base: SpecPAddr) -> bool {
+    pub open spec fn all_nonempty_except(self, base: SpecPAddr) -> bool {
         forall|base2: SpecPAddr|
             self.pt_mem.contains_table(base2) && base2 != base ==> !self.is_table_empty(base2)
     }
 
     /// All tables contain at least one valid pte.
-    pub open spec fn fully_populated(self) -> bool {
+    pub open spec fn all_nonempty(self) -> bool {
         forall|base: SpecPAddr| self.pt_mem.contains_table(base) ==> !self.is_table_empty(base)
     }
 
@@ -420,16 +420,16 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         }
     }
 
-    /// Lemma. If a subtree is well-formed and fully populated, then the node constructed from it
-    /// is also fully populated.
-    pub proof fn lemma_construct_node_fully_populated(self, base: SpecPAddr, level: nat)
+    /// Lemma. If a subtree is well-formed and all_nonempty, then the node constructed from it
+    /// is also all_nonempty.
+    pub proof fn lemma_construct_node_all_nonempty(self, base: SpecPAddr, level: nat)
         requires
             self.wf(),
-            self.fully_populated(),
+            self.all_nonempty(),
             self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
-            self.construct_node(base, level).fully_populated(),
+            self.construct_node(base, level).all_nonempty(),
         decreases self.constants.arch.level_count() - level,
     {
         let node = self.construct_node(base, level);
@@ -450,13 +450,13 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 entry,
                 node.level,
                 node.constants,
-            ) && entry is Node implies entry->Node_0.fully_populated() by {
+            ) && entry is Node implies entry->Node_0.all_nonempty() by {
             let i = choose|i| 0 <= i < node.entries.len() && node.entries[i] == entry;
             assert(self.pt_mem.accessible(base, i as nat));
             let pte = E::spec_from_u64(self.pt_mem.read(base, i as nat));
             assert(entry->Node_0 == self.construct_node(pte.spec_addr(), level + 1));
             // Recursive call on the child node
-            self.lemma_construct_node_fully_populated(pte.spec_addr(), level + 1);
+            self.lemma_construct_node_all_nonempty(pte.spec_addr(), level + 1);
         }
     }
 
@@ -485,7 +485,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         }
     }
 
-    /// Lemma. The tree model constructed from a well-formed page table is well-formed.
+    /// Lemma. The tree model constructed from a well-formed page table is also well-formed.
     pub proof fn lemma_wf_implies_node_wf(self)
         requires
             self.wf(),
@@ -495,15 +495,15 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         self.lemma_construct_node_wf(self.pt_mem.root, 0);
     }
 
-    /// Lemma. The tree model constructed from a well-formed and fully populated page table is also fully populated.
-    pub proof fn lemma_fully_populated_implies_node_fully_populated(self)
+    /// Lemma. The tree model constructed from a well-formed and all_nonempty page table is also all_nonempty.
+    pub proof fn lemma_all_nonempty_implies_node_all_nonempty(self)
         requires
             self.wf(),
-            self.fully_populated(),
+            self.all_nonempty(),
         ensures
-            self@.root.fully_populated(),
+            self@.root.all_nonempty(),
     {
-        self.lemma_construct_node_fully_populated(self.pt_mem.root, 0);
+        self.lemma_construct_node_all_nonempty(self.pt_mem.root, 0);
     }
 
     /// Lemma. The tree model constructed from an empty page table is also empty.
@@ -989,8 +989,8 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         }
     }
 
-    /// Lemma. Inserting an entry using `insert` preserves fully populated.
-    pub proof fn lemma_insert_preserves_fully_populated(
+    /// Lemma. Inserting an entry using `insert` preserves all_nonempty.
+    pub proof fn lemma_insert_preserves_all_nonempty(
         self,
         vbase: SpecVAddr,
         base: SpecPAddr,
@@ -1000,7 +1000,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.fully_populated_except(base),
+            self.all_nonempty_except(base),
             self.pt_mem.contains_table_with_level(base, level),
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
@@ -1011,7 +1011,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 level,
                 target_level,
                 new_pte,
-            ).0.fully_populated(),
+            ).0.all_nonempty(),
         decreases target_level - level,
     {
         broadcast use crate::page_table::pte::group_pte_lemmas;
@@ -1026,7 +1026,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 if pte.spec_valid() {
                     assert(!pte.spec_huge());
                     // Recursively insert into the next table
-                    self.lemma_insert_preserves_fully_populated(
+                    self.lemma_insert_preserves_all_nonempty(
                         vbase,
                         pte.spec_addr(),
                         level + 1,
@@ -1055,7 +1055,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                             assert(self.pt_mem.contains_table(base2));
                         }
                     }
-                    s2.lemma_insert_preserves_fully_populated(
+                    s2.lemma_insert_preserves_all_nonempty(
                         vbase,
                         new_base,
                         level + 1,
@@ -1065,7 +1065,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 }
             } else {
                 assert(inserted.pt_mem == self.pt_mem.write(base, idx, new_pte.spec_to_u64()));
-                // Inserting the new entry makes the table fully populated
+                // Inserting the new entry makes the table all_nonempty
                 assert forall|base2: SpecPAddr|
                     inserted.pt_mem.contains_table(base2) implies !inserted.is_table_empty(
                     base2,
@@ -2135,7 +2135,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     }
 
     /// Lemma. `prune` after `remove` will eliminate empty nodes.
-    pub proof fn lemma_prune_after_remove_preserves_fully_populated(
+    pub proof fn lemma_prune_after_remove_preserves_all_nonempty(
         self,
         vbase: SpecVAddr,
         base: SpecPAddr,
@@ -2143,7 +2143,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.fully_populated(),
+            self.all_nonempty(),
             self.pt_mem.contains_table_with_level(base, level),
             level < self.constants.arch.level_count(),
         ensures
@@ -2151,7 +2151,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 vbase,
                 base,
                 level,
-            ).fully_populated(),
+            ).all_nonempty(),
         decreases self.constants.arch.level_count() - level,
     {
         let (removed, res) = self.remove(vbase, base, level);
@@ -2197,7 +2197,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     }
                 } else {
                     // Intermediate node
-                    self.lemma_prune_after_remove_preserves_fully_populated(
+                    self.lemma_prune_after_remove_preserves_all_nonempty(
                         vbase,
                         pte.spec_addr(),
                         level + 1,
