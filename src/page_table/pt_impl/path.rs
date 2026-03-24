@@ -57,7 +57,7 @@ impl PTTreePath {
     }
 
     /// If `self` has a non-empty prefix `p` and the remaining tail is zero.
-    pub open spec fn has_real_prefix(self, p: Self) -> bool {
+    pub open spec fn has_padded_prefix(self, p: Self) -> bool {
         &&& self.has_prefix(p)
         &&& self.has_zero_tail(p.len())
     }
@@ -498,32 +498,32 @@ impl PTTreePath {
         }
     }
 
-    /// Lemma. If `a.to_vaddr()` is equal to `b.to_vaddr()`, then `a` is a real prefix of `b` or
-    /// `b` is a real prefix of `a`.
-    pub broadcast proof fn lemma_vaddr_eq_implies_real_prefix(arch: SpecPTArch, a: Self, b: Self)
+    /// Lemma. If `a.to_vaddr()` is equal to `b.to_vaddr()`, then `a` is a padded prefix of `b` or
+    /// `b` is a padded prefix of `a`.
+    pub broadcast proof fn lemma_vaddr_eq_implies_padded_prefix(arch: SpecPTArch, a: Self, b: Self)
         requires
             #[trigger] arch.valid(),
             a.valid(arch, 0),
             b.valid(arch, 0),
             a.to_vaddr(arch) == b.to_vaddr(arch),
         ensures
-            #[trigger] a.has_real_prefix(b) || b.has_real_prefix(a),
+            #[trigger] a.has_padded_prefix(b) || b.has_padded_prefix(a),
     {
         if a.has_prefix(b) {
             if !a.has_zero_tail(b.len()) {
-                Self::lemma_vaddr_eq_implies_real_prefix_contradiction(arch, a, b);
+                Self::lemma_vaddr_eq_implies_padded_prefix_contradiction(arch, a, b);
             }
         } else if b.has_prefix(a) {
             if !b.has_zero_tail(a.len()) {
-                Self::lemma_vaddr_eq_implies_real_prefix_contradiction(arch, b, a);
+                Self::lemma_vaddr_eq_implies_padded_prefix_contradiction(arch, b, a);
             }
         } else {
             Self::lemma_nonprefix_implies_vaddr_inequality(arch, a, b);
         }
     }
 
-    /// Helper lemma to prove `lemma_vaddr_eq_implies_real_prefix` by contradiction.
-    proof fn lemma_vaddr_eq_implies_real_prefix_contradiction(arch: SpecPTArch, a: Self, b: Self)
+    /// Helper lemma to prove `lemma_vaddr_eq_implies_padded_prefix` by contradiction.
+    proof fn lemma_vaddr_eq_implies_padded_prefix_contradiction(arch: SpecPTArch, a: Self, b: Self)
         requires
             arch.valid(),
             a.valid(arch, 0),
@@ -576,13 +576,13 @@ impl PTTreePath {
         assert(pref2.to_vaddr(arch).0 <= a.to_vaddr(arch).0);
     }
 
-    /// Lemma. If `a` is a real prefix of `b`, then `a.to_vaddr() == b.to_vaddr()`.
-    pub broadcast proof fn lemma_real_prefix_implies_vaddr_eq(arch: SpecPTArch, a: Self, b: Self)
+    /// Lemma. If `a` is a padded prefix of `b`, then `a.to_vaddr() == b.to_vaddr()`.
+    pub broadcast proof fn lemma_padded_prefix_implies_vaddr_eq(arch: SpecPTArch, a: Self, b: Self)
         requires
             #[trigger] arch.valid(),
             a.valid(arch, 0),
             b.valid(arch, 0),
-            #[trigger] a.has_real_prefix(b),
+            #[trigger] a.has_padded_prefix(b),
         ensures
             a.to_vaddr(arch) == b.to_vaddr(arch),
     {
@@ -799,8 +799,8 @@ pub broadcast group group_pt_tree_path_lemmas {
     PTTreePath::lemma_to_vaddr_upper_bound,
     PTTreePath::lemma_path_order_implies_vaddr_order,
     PTTreePath::lemma_nonprefix_implies_vaddr_inequality,
-    PTTreePath::lemma_vaddr_eq_implies_real_prefix,
-    PTTreePath::lemma_real_prefix_implies_vaddr_eq,
+    PTTreePath::lemma_vaddr_eq_implies_padded_prefix,
+    PTTreePath::lemma_padded_prefix_implies_vaddr_eq,
     PTTreePath::lemma_vaddr_range_from_path,
     PTTreePath::lemma_to_vaddr_inverts_from_vaddr,
 }

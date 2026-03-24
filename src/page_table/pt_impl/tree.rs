@@ -1519,14 +1519,14 @@ impl PTTreeNode {
         lemma_map_eq_pair(self.path_mappings().remove(real_path), new.path_mappings());
     }
 
-    /// Lemma. If `path2` is contained in `self.path_mappings()`, and `path2` is a real prefix
+    /// Lemma. If `path2` is contained in `self.path_mappings()`, and `path2` is a padded prefix
     /// of `path`, then `self.remove(path)` succeeds.
-    pub proof fn lemma_remove_real_prefix_ok(self, path: PTTreePath, path2: PTTreePath)
+    pub proof fn lemma_remove_padded_prefix_ok(self, path: PTTreePath, path2: PTTreePath)
         requires
             self.wf(),
             path.valid(self.constants.arch, self.level),
             self.path_mappings().contains_key(path2),
-            path.has_real_prefix(path2),
+            path.has_padded_prefix(path2),
         ensures
             self.remove(path).1 is Ok,
         decreases path2.len(),
@@ -1538,7 +1538,7 @@ impl PTTreeNode {
         assert(self.entries.contains(entry));
         if path2.len() > 1 {
             assert(entry is Node);
-            entry->Node_0.lemma_remove_real_prefix_ok(remain, remain2);
+            entry->Node_0.lemma_remove_padded_prefix_ok(remain, remain2);
         }
     }
 
@@ -2320,7 +2320,7 @@ impl PTTreeModel {
         if self.mappings().contains_key(vbase) {
             let path2 = choose|path: PTTreePath| #[trigger]
                 self.root.path_mappings().contains_key(path) && path.to_vaddr(self.arch()) == vbase;
-            PTTreePath::lemma_vaddr_eq_implies_real_prefix(self.arch(), path, path2);
+            PTTreePath::lemma_vaddr_eq_implies_padded_prefix(self.arch(), path, path2);
             assert(self.root.visit(path2).last() is Frame);
 
             // The prefix relation leads to a contradiction of the lasted visited entry.
@@ -2375,15 +2375,15 @@ impl PTTreeModel {
         );
         let real_path = self.root.real_path(path);
 
-        // Prove `real_path` is a real prefix of `path`.
+        // Prove `real_path` is a padded prefix of `path`.
         self.root.lemma_remove_ok_implies_visit_reaches_frame(path);
         self.root.lemma_visit_length_bounds(path);
         self.root.lemma_real_path_valid(path);
         self.root.lemma_real_path_visits_same_entry(path);
         assert(self.root.path_mappings().contains_key(real_path));
-        assert(path.has_real_prefix(real_path));
+        assert(path.has_padded_prefix(real_path));
 
-        PTTreePath::lemma_real_prefix_implies_vaddr_eq(self.arch(), path, real_path);
+        PTTreePath::lemma_padded_prefix_implies_vaddr_eq(self.arch(), path, real_path);
         assert(real_path.to_vaddr(self.arch()) == vbase);
         assert(self.mappings().contains_key(vbase));
     }
@@ -2406,9 +2406,9 @@ impl PTTreeModel {
             self.root.path_mappings().contains_key(path) && path.to_vaddr(self.arch()) == vbase;
 
         PTTreePath::lemma_to_vaddr_inverts_from_vaddr(self.arch(), vbase, path);
-        PTTreePath::lemma_vaddr_eq_implies_real_prefix(self.arch(), path, path2);
-        assert(path.has_real_prefix(path2));
-        self.root.lemma_remove_real_prefix_ok(path, path2);
+        PTTreePath::lemma_vaddr_eq_implies_padded_prefix(self.arch(), path, path2);
+        assert(path.has_padded_prefix(path2));
+        self.root.lemma_remove_padded_prefix_ok(path, path2);
     }
 
     /// Lemma. A successful `unmap` operation removes the `(vbase, frame)` pair from mappings.
@@ -2436,7 +2436,7 @@ impl PTTreeModel {
         self.root.lemma_real_path_valid(path);
         self.root.lemma_real_path_visits_same_entry(path);
         assert(self.root.path_mappings().contains_key(real_path));
-        assert(path.has_real_prefix(real_path));
+        assert(path.has_padded_prefix(real_path));
 
         // `path_mappings` is updated according to lemma.
         self.root.lemma_remove_removes_path_mapping(path);
