@@ -6,7 +6,6 @@ use vstd::prelude::*;
 // use super::pt_mem::PageTableMem;
 use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 use crate::address::frame::{Frame, MemAttr, SpecFrame};
-use crate::frame_allocator::frame_trait::FrameAllocator;
 use crate::global_allocator::GlobalAllocator;
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 
@@ -63,6 +62,8 @@ impl PageTableState {
         &&& self.constants.arch.is_valid_frame_size(
             frame.size,
         )
+        // Base vaddr should be within vspace size
+        &&& vbase.0 < self.constants.arch.vspace_size()
         // Base vaddr should align to frame size
         &&& vbase.aligned(
             frame.size.as_nat(),
@@ -98,8 +99,10 @@ impl PageTableState {
 
     /// Unmap precondition.
     pub open spec fn unmap_pre(self, vbase: SpecVAddr) -> bool {
+        // Base vaddr should be within vspace size
+        &&& vbase.0 < self.constants.arch.vspace_size()
         // Base vaddr should align to leaf frame size
-        vbase.aligned(self.constants.arch.leaf_frame_size().as_nat())
+        &&& vbase.aligned(self.constants.arch.leaf_frame_size().as_nat())
     }
 
     /// State transition - unmap a virtual address.
@@ -123,8 +126,10 @@ impl PageTableState {
 
     /// Query precondition.
     pub open spec fn query_pre(self, vaddr: SpecVAddr) -> bool {
-        // Base vaddr should align to 8 bytes
-        vaddr.aligned(8)
+        // Vaddr should be within vspace size
+        &&& vaddr.0 < self.constants.arch.vspace_size()
+        // Vaddr should align to 8 bytes
+        &&& vaddr.aligned(8)
     }
 
     /// Query the physical frame mapped to a virtual address.
@@ -215,6 +220,9 @@ pub trait PageTable<A> where Self: Sized, A: GlobalAllocator {
     spec fn invariants(&self, allocator: &A) -> bool;
 
     /// Create an empty page table
+    ///
+    /// TODO: we assume all tables in the hierarchical page table contain 512 8-byte entries, which is true
+    /// for hvisor's aarch64 implementation. We can make it more general in the future.
     fn new(allocator: &mut A, cid: usize, constants: PTConstants) -> (pt: Self)
         requires
             old(allocator).invariants(),
@@ -222,6 +230,9 @@ pub trait PageTable<A> where Self: Sized, A: GlobalAllocator {
             old(allocator).view().clients[cid as nat].is_empty(),
             !old(allocator).view().free.is_empty(),
             constants@.valid(),
+            forall|level: nat|
+                level < constants.arch@.level_count() ==> constants.arch@.entry_count(level) == 512,
+            A::frame_size() == 4096,
         ensures
             pt.view(allocator).constants == constants@,
             pt.view(allocator).init(),

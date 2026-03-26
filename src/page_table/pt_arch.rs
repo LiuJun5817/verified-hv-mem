@@ -65,6 +65,11 @@ impl SpecPTArch {
         self.entry_count(level) * PTE_SIZE
     }
 
+    /// The upper bound of virtual address space supported by the page table architecture.
+    pub open spec fn vspace_size(self) -> nat {
+        self.frame_size(0).as_nat() * self.entry_count(0)
+    }
+
     /// Check if `size` is a valid frame size.
     pub open spec fn is_valid_frame_size(self, size: FrameSize) -> bool {
         exists|level: nat| level < self.level_count() && self.frame_size(level) == size
