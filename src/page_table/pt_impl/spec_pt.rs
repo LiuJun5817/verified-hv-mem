@@ -1,5 +1,6 @@
 //! Spec-mode page table implementation. Used for refinement proofs.
 use core::marker::PhantomData;
+use std::io::Empty;
 use vstd::prelude::*;
 
 use super::{
@@ -84,7 +85,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             ).spec_valid()
     }
 
-    /// Well-formedness of the page table.
+    /// Structure well-formedness of the page table.
     pub open spec fn wf(self) -> bool {
         // Architecture
         &&& self.pt_mem.arch
@@ -130,6 +131,17 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     ||| (pte1.spec_addr() != pte2.spec_addr())
                 }
             }
+    }
+
+    /// For each table except `base`, it contains at least one valid pte.
+    pub open spec fn all_nonempty_except(self, base: SpecPAddr) -> bool {
+        forall|base2: SpecPAddr|
+            self.pt_mem.contains_table(base2) && base2 != base ==> !self.is_table_empty(base2)
+    }
+
+    /// All tables contain at least one valid pte.
+    pub open spec fn all_nonempty(self) -> bool {
+        forall|base: SpecPAddr| self.pt_mem.contains_table(base) ==> !self.is_table_empty(base)
     }
 
     /// Recursively construct a `PTTreeNode` from a subtable.
@@ -288,7 +300,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     (self, Err(()))
                 }
             } else {
-                // Intermediate node
                 if pte.spec_huge() {
                     if vbase.aligned(self.constants.arch.frame_size(level).as_nat()) {
                         (
@@ -302,6 +313,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         (self, Err(()))
                     }
                 } else {
+                    // Intermediate node
                     self.remove(vbase, pte.spec_addr(), level + 1)
                 }
             }
@@ -372,9 +384,8 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         }
     }
 
-    /// Lemma. Constructing a node from memory with a valid table results in a
-    /// well-formed node.
-    pub proof fn lemma_construct_node_implies_node_wf(self, base: SpecPAddr, level: nat)
+    /// Lemma. If a subtree is well-formed, then the node constructed from it is also well-formed.
+    pub proof fn lemma_construct_node_wf(self, base: SpecPAddr, level: nat)
         requires
             self.wf(),
             self.pt_mem.contains_table_with_level(base, level),
@@ -402,27 +413,55 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     assert(self.pt_mem.contains_table(pte.spec_addr()));
                     assert(self.pt_mem.level(pte.spec_addr()) == level + 1);
                     self.construct_node_facts(pte.spec_addr(), level + 1);
-                    self.lemma_construct_node_implies_node_wf(pte.spec_addr(), level + 1);
+                    self.lemma_construct_node_wf(pte.spec_addr(), level + 1);
                 },
                 NodeEntry::Empty => (),
             }
         }
     }
 
-    /// Lemma. The tree model derived from the executable page table is well-formed.
-    pub proof fn lemma_wf_implies_node_wf(self)
+    /// Lemma. If a subtree is well-formed and all_nonempty, then the node constructed from it
+    /// is also all_nonempty.
+    pub proof fn lemma_construct_node_all_nonempty(self, base: SpecPAddr, level: nat)
         requires
             self.wf(),
+            self.all_nonempty(),
+            self.pt_mem.contains_table_with_level(base, level),
+            level < self.constants.arch.level_count(),
         ensures
-            self@.wf(),
+            self.construct_node(base, level).all_nonempty(),
+        decreases self.constants.arch.level_count() - level,
     {
-        self.lemma_construct_node_implies_node_wf(self.pt_mem.root, 0);
-        // TODO: fully_populated not checked
-        assume(false);
+        let node = self.construct_node(base, level);
+        self.construct_node_facts(base, level);
+
+        // At least one entry is valid and points to a frame or a subtable
+        assert(self.pt_mem.contains_table(base));
+        let i = choose|i: nat|
+            #![auto]
+            i < node.entries.len() && E::spec_from_u64(self.pt_mem.read(base, i)).spec_valid();
+        assert(node.entries.contains(node.entries[i as int]));
+        assert(exists|entry: NodeEntry| #[trigger]
+            node.entries.contains(entry) && !(entry is Empty));
+
+        // Satisfied recursively
+        assert forall|entry: NodeEntry| #[trigger]
+            node.entries.contains(entry) && PTTreeNode::is_entry_valid(
+                entry,
+                node.level,
+                node.constants,
+            ) && entry is Node implies entry->Node_0.all_nonempty() by {
+            let i = choose|i| 0 <= i < node.entries.len() && node.entries[i] == entry;
+            assert(self.pt_mem.accessible(base, i as nat));
+            let pte = E::spec_from_u64(self.pt_mem.read(base, i as nat));
+            assert(entry->Node_0 == self.construct_node(pte.spec_addr(), level + 1));
+            // Recursive call on the child node
+            self.lemma_construct_node_all_nonempty(pte.spec_addr(), level + 1);
+        }
     }
 
-    /// Lemma. Empty table --construct_node--> empty node.
-    pub proof fn lemma_empty_table_constructs_empty_node(self, base: SpecPAddr)
+    /// Lemma. If a table is empty, then the node constructed from it is also empty.
+    pub proof fn lemma_construct_node_empty(self, base: SpecPAddr)
         requires
             self.wf(),
             self.pt_mem.contains_table(base),
@@ -444,6 +483,38 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 assert(node.entries.contains(node.entries[idx as int]));
             }
         }
+    }
+
+    /// Lemma. The tree model constructed from a well-formed page table is also well-formed.
+    pub proof fn lemma_wf_implies_node_wf(self)
+        requires
+            self.wf(),
+        ensures
+            self@.root.wf(),
+    {
+        self.lemma_construct_node_wf(self.pt_mem.root, 0);
+    }
+
+    /// Lemma. The tree model constructed from a well-formed and all_nonempty page table is also all_nonempty.
+    pub proof fn lemma_all_nonempty_implies_node_all_nonempty(self)
+        requires
+            self.wf(),
+            self.all_nonempty(),
+        ensures
+            self@.root.all_nonempty(),
+    {
+        self.lemma_construct_node_all_nonempty(self.pt_mem.root, 0);
+    }
+
+    /// Lemma. The tree model constructed from an empty page table is also empty.
+    pub proof fn lemma_empty_implies_node_empty(self)
+        requires
+            self.wf(),
+            self.is_table_empty(self.pt_mem.root),
+        ensures
+            self@.root.empty(),
+    {
+        self.lemma_construct_node_empty(self.pt_mem.root);
     }
 
     /// Lemma. The chain returned by `collect_table_chain` is well-formed: each address
@@ -625,7 +696,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         let end = (arch.level_count() - 1) as nat;
         let path = PTTreePath::from_vaddr(vaddr, arch, level, end);
         // Precondition of `visit`: node.wf and path.valid
-        self.lemma_construct_node_implies_node_wf(base, level);
+        self.lemma_construct_node_wf(base, level);
         let visited = node.visit(path);
 
         let (idx, remain) = path.step();
@@ -918,6 +989,98 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         }
     }
 
+    /// Lemma. Inserting an entry using `insert` preserves all_nonempty.
+    pub proof fn lemma_insert_preserves_all_nonempty(
+        self,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
+        level: nat,
+        target_level: nat,
+        new_pte: E,
+    )
+        requires
+            self.wf(),
+            self.all_nonempty_except(base),
+            self.pt_mem.contains_table_with_level(base, level),
+            level <= target_level < self.constants.arch.level_count(),
+            self.pte_valid_frame(new_pte, target_level),
+        ensures
+            self.insert(vbase, base, level, target_level, new_pte).1 is Ok ==> self.insert(
+                vbase,
+                base,
+                level,
+                target_level,
+                new_pte,
+            ).0.all_nonempty(),
+        decreases target_level - level,
+    {
+        broadcast use crate::page_table::pte::group_pte_lemmas;
+
+        let (inserted, res) = self.insert(vbase, base, level, target_level, new_pte);
+        let idx = self.constants.arch.pte_index(vbase, level);
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+        assert(self.pt_mem.accessible(base, idx));
+
+        if res is Ok {
+            if level < target_level {
+                if pte.spec_valid() {
+                    assert(!pte.spec_huge());
+                    // Recursively insert into the next table
+                    self.lemma_insert_preserves_all_nonempty(
+                        vbase,
+                        pte.spec_addr(),
+                        level + 1,
+                        target_level,
+                        new_pte,
+                    );
+                } else {
+                    // Allocate intermediate table
+                    let (pt_mem, new_base) = self.pt_mem.alloc_table(level + 1);
+                    let pt_mem = pt_mem.write(
+                        base,
+                        idx,
+                        E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                    );
+                    // `s2` is the state after allocating an intermediate table
+                    let s2 = Self::new(pt_mem, self.constants);
+
+                    // All tables except `new_base` contain at least one valid entry
+                    assert forall|base2: SpecPAddr| #[trigger]
+                        pt_mem.contains_table(base2) && base2
+                            != new_base implies !s2.is_table_empty(base2) by {
+                        if base2 == base {
+                            assert(s2.pt_mem.read(base2, idx) == new_pte.spec_to_u64());
+                            E::lemma_from_to_u64_inverse(s2.pt_mem.read(base2, idx));
+                        } else {
+                            assert(self.pt_mem.contains_table(base2));
+                        }
+                    }
+                    s2.lemma_insert_preserves_all_nonempty(
+                        vbase,
+                        new_base,
+                        level + 1,
+                        target_level,
+                        new_pte,
+                    );
+                }
+            } else {
+                assert(inserted.pt_mem == self.pt_mem.write(base, idx, new_pte.spec_to_u64()));
+                // Inserting the new entry makes the table all_nonempty
+                assert forall|base2: SpecPAddr|
+                    inserted.pt_mem.contains_table(base2) implies !inserted.is_table_empty(
+                    base2,
+                ) by {
+                    if base2 == base {
+                        assert(inserted.pt_mem.read(base2, idx) == new_pte.spec_to_u64());
+                        E::lemma_from_to_u64_inverse(inserted.pt_mem.read(base2, idx));
+                    } else {
+                        assert(self.pt_mem.contains_table(base2));
+                    }
+                }
+            }
+        }
+    }
+
     /// Lemma. When `insert` allocates an intermediate table, the result must succeed (`Ok`).
     pub proof fn lemma_insert_intermediate_node_results_ok(
         self,
@@ -1199,8 +1362,8 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
 
         let arch = self.constants.arch;
         let path = PTTreePath::from_vaddr(vbase, arch, level, target_level);
-        self.lemma_construct_node_implies_node_wf(base, level);
-        s2.lemma_construct_node_implies_node_wf(base, level);
+        self.lemma_construct_node_wf(base, level);
+        s2.lemma_construct_node_wf(base, level);
 
         let (idx, remain) = path.step();
         let entry = node.entries[idx as int];
@@ -1443,8 +1606,8 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         let end = (arch.level_count() - 1) as nat;
         let path = PTTreePath::from_vaddr(vbase, arch, level, end);
         // Precondition of `remove`: node.wf and path.valid
-        self.lemma_construct_node_implies_node_wf(base, level);
-        s2.lemma_construct_node_implies_node_wf(base, level);
+        self.lemma_construct_node_wf(base, level);
+        s2.lemma_construct_node_wf(base, level);
 
         let (idx, remain) = path.step();
         let entry = node.entries[idx as int];
@@ -1860,8 +2023,8 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         let arch = self.constants.arch;
         let end = (arch.level_count() - 1) as nat;
         let path = PTTreePath::from_vaddr(vaddr, arch, level, end);
-        self.lemma_construct_node_implies_node_wf(base, level);
-        s2.lemma_construct_node_implies_node_wf(base, level);
+        self.lemma_construct_node_wf(base, level);
+        s2.lemma_construct_node_wf(base, level);
 
         let (idx, remain) = path.step();
         let entry = node.entries[idx as int];
@@ -1890,7 +2053,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             // The content of table `base` is not affected after `prune`
             assert(s3.pt_mem.table_view(base) == self.pt_mem.table_view(base));
 
-            s3.lemma_empty_table_constructs_empty_node(pte.spec_addr());
+            s3.lemma_construct_node_empty(pte.spec_addr());
             if s3.is_table_empty(subtable_base) {
                 // Lemma shows `new_subnode` is empty
                 assert(right == node.update(idx, NodeEntry::Empty));
@@ -1967,6 +2130,79 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     }
                 }
                 assert(node2.entries == right.entries);
+            }
+        }
+    }
+
+    /// Lemma. `prune` after `remove` will eliminate empty nodes.
+    pub proof fn lemma_prune_after_remove_preserves_all_nonempty(
+        self,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
+        level: nat,
+    )
+        requires
+            self.wf(),
+            self.all_nonempty(),
+            self.pt_mem.contains_table_with_level(base, level),
+            level < self.constants.arch.level_count(),
+        ensures
+            self.remove(vbase, base, level).1 is Ok ==> self.remove(vbase, base, level).0.prune(
+                vbase,
+                base,
+                level,
+            ).all_nonempty(),
+        decreases self.constants.arch.level_count() - level,
+    {
+        let (removed, res) = self.remove(vbase, base, level);
+        let pruned = removed.prune(vbase, base, level);
+        let idx = self.constants.arch.pte_index(vbase, level);
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+
+        if res is Ok {
+            assert(pte.spec_valid());
+            if level >= self.constants.arch.level_count() - 1 {
+                // Leaf node
+                assert(vbase.aligned(self.constants.arch.frame_size(level).as_nat()));
+                // Update entry (base, idx)
+                assert(removed.pt_mem == self.pt_mem.write(
+                    base,
+                    idx,
+                    E::spec_empty().spec_to_u64(),
+                ));
+                // Pruned if `base` is empty after remove
+                if pruned.is_table_empty(base) {
+                    assert(pruned.pt_mem == removed.pt_mem.dealloc_table(base).write(
+                        base,
+                        idx,
+                        E::spec_empty().spec_to_u64(),
+                    ));
+                }
+            } else {
+                if pte.spec_huge() {
+                    assert(vbase.aligned(self.constants.arch.frame_size(level).as_nat()));
+                    // Update entry (base, idx)
+                    assert(removed.pt_mem == self.pt_mem.write(
+                        base,
+                        idx,
+                        E::spec_empty().spec_to_u64(),
+                    ));
+                    // Pruned if `base` is empty after remove
+                    if pruned.is_table_empty(base) {
+                        assert(pruned.pt_mem == removed.pt_mem.dealloc_table(base).write(
+                            base,
+                            idx,
+                            E::spec_empty().spec_to_u64(),
+                        ));
+                    }
+                } else {
+                    // Intermediate node
+                    self.lemma_prune_after_remove_preserves_all_nonempty(
+                        vbase,
+                        pte.spec_addr(),
+                        level + 1,
+                    );
+                }
             }
         }
     }

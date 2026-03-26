@@ -54,8 +54,10 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
 
     /// Invariants that must implied at initial state and preseved after each operation.
     pub open spec fn invariants(&self, allocator: &A) -> bool {
+        let view = self.view(allocator);
         &&& self.pt_mem.invariants(allocator)
-        &&& self.view(allocator).wf()
+        &&& view.wf()
+        &&& (view.pt_mem.init() || view.all_nonempty())
     }
 
     /// Construct a new page table.
@@ -98,7 +100,8 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
     /// If all pte in a table are invalid.
     pub fn is_table_empty(&self, allocator: &A, base: PAddr, level: usize) -> (res: bool)
         requires
-            self.invariants(allocator),
+            self.pt_mem.invariants(allocator),
+            self.view(allocator).wf(),
             self.view(allocator).pt_mem.contains_table(base@),
             self.view(allocator).pt_mem.level(base@) == level,
         ensures
@@ -107,7 +110,8 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
         let entry_count = self.constants.arch.entry_count(level);
         for i in 0..entry_count
             invariant
-                self.invariants(allocator),
+                self.pt_mem.invariants(allocator),
+                self.view(allocator).wf(),
                 self.constants.arch@.entry_count(level as nat) == entry_count,
                 self.view(allocator).pt_mem.contains_table(base@),
                 self.view(allocator).pt_mem.level(base@) == level,
@@ -161,7 +165,8 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
         new_pte: E,
     ) -> (res: PagingResult)
         requires
-            old(self).invariants(old(allocator)),
+            old(self).pt_mem.invariants(old(allocator)),
+            old(self).view(old(allocator)).wf(),
             level <= target_level < old(self).arch().level_count(),
             old(self).pt_mem.view(old(allocator)).contains_table(base@),
             old(self).pt_mem.view(old(allocator)).level(base@) == level,
@@ -175,7 +180,8 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
                 target_level as nat,
                 new_pte,
             ),
-            self.invariants(allocator),
+            self.pt_mem.invariants(allocator),
+            self.view(allocator).wf(),
             res is Err ==> old(self).view(old(allocator)) == self.view(allocator),
         decreases old(self).arch().level_count() - level as nat,
     {
@@ -235,7 +241,8 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
     pub fn remove(&mut self, allocator: &A, vbase: VAddr, base: PAddr, level: usize) -> (res:
         PagingResult)
         requires
-            old(self).invariants(allocator),
+            old(self).pt_mem.invariants(allocator),
+            old(self).view(allocator).wf(),
             level < old(self).arch().level_count(),
             old(self).pt_mem.view(allocator).contains_table(base@),
             old(self).pt_mem.view(allocator).level(base@) == level,
@@ -245,7 +252,8 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
                 base@,
                 level as nat,
             ),
-            self.invariants(allocator),
+            self.pt_mem.invariants(allocator),
+            self.view(allocator).wf(),
             res is Err ==> old(self).view(allocator) == self.view(allocator),
         decreases old(self).arch().level_count() - level as nat,
     {
@@ -282,7 +290,8 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
     /// Recursively deallocate empty tables along `vaddr` from `base`.
     pub fn prune(&mut self, allocator: &mut A, vaddr: VAddr, base: PAddr, level: usize)
         requires
-            old(self).invariants(old(allocator)),
+            old(self).pt_mem.invariants(old(allocator)),
+            old(self).view(old(allocator)).wf(),
             level < old(self).arch().level_count(),
             old(self).pt_mem.view(old(allocator)).contains_table(base@),
             old(self).pt_mem.view(old(allocator)).level(base@) == level,
@@ -292,7 +301,8 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
                 base@,
                 level as nat,
             ),
-            self.invariants(allocator),
+            self.pt_mem.invariants(allocator),
+            self.view(allocator).wf(),
         decreases old(self).arch().level_count() - level as nat,
     {
         proof { self.view(allocator).lemma_prune_preserves_wf(vaddr@, base@, level as nat) }
@@ -352,7 +362,7 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
             self.view(allocator).construct_node_facts(root, 0);
 
             // spec `get_pte` == node `visit`
-            self.view(allocator).lemma_construct_node_implies_node_wf(root, 0);
+            self.view(allocator).lemma_construct_node_wf(root, 0);
             let node = self.view(allocator).construct_node(root, 0);
             self.view(allocator).lemma_walk_consistent_with_model(vaddr@, root, 0);
             node.lemma_visit_length_bounds(
@@ -442,6 +452,13 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
                 target_level as nat,
                 new_pte,
             );
+            self.view(allocator).lemma_insert_preserves_all_nonempty(
+                vbase@,
+                root,
+                0,
+                target_level as nat,
+                new_pte,
+            );
             // Ensures #2
             self.view(allocator).lemma_insert_consistent_with_model(
                 vbase@,
@@ -478,7 +495,15 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
             self.view(allocator).construct_node_facts(root, 0);
             // Ensures #1
             self.view(allocator).lemma_remove_preserves_wf(vbase@, root, 0);
+            if !self.view(allocator).is_table_empty(root) {
+                self.view(allocator).lemma_prune_after_remove_preserves_all_nonempty(
+                    vbase@,
+                    root,
+                    0,
+                );
+            }
             // Ensures #2
+
             self.view(allocator).lemma_remove_consistent_with_model(vbase@, root, 0);
             self.view(allocator).lemma_remove_preserves_root(vbase@, root, 0);
         }
