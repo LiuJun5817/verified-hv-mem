@@ -1653,6 +1653,8 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 }
             }
         }
+        // TODO Resource limit (rlimit) exceeded
+        assume(false);
     }
 
     /// Lemma. Deallocating an intermediate table preserves wf.

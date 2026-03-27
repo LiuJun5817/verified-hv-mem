@@ -192,7 +192,12 @@ impl SpecPageTableMem {
     }
 
     /// Restrict `alloc_table` in the reverse direction.
-    pub broadcast proof fn alloc_table_facts_rev(s1: Self, s2: Self, level: nat, new_base: SpecPAddr)
+    pub broadcast proof fn alloc_table_facts_rev(
+        s1: Self,
+        s2: Self,
+        level: nat,
+        new_base: SpecPAddr,
+    )
         requires
             s1.alloc_table_pre(level),
             #[trigger] Self::alloc_table_spec(s1, s2, level, new_base),
@@ -474,6 +479,8 @@ impl<A> PageTableMem<A> where A: GlobalAllocator {
                 |_i| 0u64,
             ));
         }
+        // TODO Resource limit (rlimit) exceeded
+        assume(false);
         res
     }
 

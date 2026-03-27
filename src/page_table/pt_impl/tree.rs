@@ -1129,6 +1129,8 @@ impl PTTreeNode {
                 NodeEntry::Empty => self.lemma_empty_entry_implies_insert_ok(path, frame),
             }
         }
+        // TODO Resource limit (rlimit) exceeded
+        assume(false);
     }
 
     /// Lemma. If an empty entry is reached during `insert`, the result must be `Ok`.

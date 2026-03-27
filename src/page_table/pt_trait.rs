@@ -50,6 +50,27 @@ pub struct PageTableState {
 
 /// State transition specification.
 impl PageTableState {
+    /// Well-formedness of the page table state.
+    pub open spec fn wf(self) -> bool {
+        // Mappings are valid
+        &&& forall|vbase: SpecVAddr, frame: SpecFrame| #[trigger]
+            self.mappings.contains_pair(vbase, frame) ==> {
+                &&& self.constants.arch.is_valid_frame_size(frame.size)
+                &&& vbase.0 < self.constants.arch.vspace_size()
+                &&& vbase.aligned(frame.size.as_nat())
+                &&& frame.base.aligned(frame.size.as_nat())
+            }
+            // Mappings do not overlap
+        &&& forall|vbase1: SpecVAddr, frame1: SpecFrame, vbase2: SpecVAddr, frame2: SpecFrame|
+         #[trigger]
+            self.mappings.contains_pair(vbase1, frame1) && #[trigger] self.mappings.contains_pair(
+                vbase2,
+                frame2,
+            ) && (vbase1 != vbase2) ==> {
+                !SpecVAddr::overlap(vbase1, frame1.size.as_nat(), vbase2, frame2.size.as_nat())
+            }
+    }
+
     /// Init state.
     pub open spec fn init(self) -> bool {
         &&& self.mappings === Map::empty()
@@ -63,7 +84,8 @@ impl PageTableState {
             frame.size,
         )
         // Base vaddr should be within vspace size
-        &&& vbase.0 < self.constants.arch.vspace_size()
+        &&& vbase.0
+            < self.constants.arch.vspace_size()
         // Base vaddr should align to frame size
         &&& vbase.aligned(
             frame.size.as_nat(),
@@ -100,7 +122,8 @@ impl PageTableState {
     /// Unmap precondition.
     pub open spec fn unmap_pre(self, vbase: SpecVAddr) -> bool {
         // Base vaddr should be within vspace size
-        &&& vbase.0 < self.constants.arch.vspace_size()
+        &&& vbase.0
+            < self.constants.arch.vspace_size()
         // Base vaddr should align to leaf frame size
         &&& vbase.aligned(self.constants.arch.leaf_frame_size().as_nat())
     }
@@ -127,7 +150,8 @@ impl PageTableState {
     /// Query precondition.
     pub open spec fn query_pre(self, vaddr: SpecVAddr) -> bool {
         // Vaddr should be within vspace size
-        &&& vaddr.0 < self.constants.arch.vspace_size()
+        &&& vaddr.0
+            < self.constants.arch.vspace_size()
         // Vaddr should align to 8 bytes
         &&& vaddr.aligned(8)
     }
@@ -148,6 +172,92 @@ impl PageTableState {
         } else {
             // Query fails
             &&& res is Err
+        }
+    }
+
+    /// Lemma. `map` preserves well-formedness.
+    pub fn lemma_map_preserves_wf(
+        s1: Self,
+        s2: Self,
+        vbase: SpecVAddr,
+        frame: SpecFrame,
+        res: PagingResult,
+    )
+        requires
+            s1.wf(),
+            s2.map_pre(vbase, frame),
+            Self::map(s1, s2, vbase, frame, res),
+        ensures
+            s2.wf(),
+    {
+        assert forall|vbase2: SpecVAddr, frame2: SpecFrame| #[trigger]
+            s2.mappings.contains_pair(vbase2, frame2) implies {
+            &&& s2.constants.arch.is_valid_frame_size(frame2.size)
+            &&& vbase2.0 < s2.constants.arch.vspace_size()
+            &&& vbase2.aligned(frame2.size.as_nat())
+            &&& frame2.base.aligned(frame2.size.as_nat())
+        } by {
+            if vbase2 != vbase {
+                assert(s1.mappings.contains_pair(vbase2, frame2));
+            }
+        }
+        assert forall|vbase1: SpecVAddr, frame1: SpecFrame, vbase2: SpecVAddr, frame2: SpecFrame|
+         #[trigger]
+            s2.mappings.contains_pair(vbase1, frame1) && #[trigger] s2.mappings.contains_pair(
+                vbase2,
+                frame2,
+            ) && (vbase1 != vbase2) implies {
+            !SpecVAddr::overlap(vbase1, frame1.size.as_nat(), vbase2, frame2.size.as_nat())
+        } by {
+            if vbase1 != vbase && vbase2 != vbase {
+                assert(s1.mappings.contains_pair(vbase1, frame1));
+                assert(s1.mappings.contains_pair(vbase2, frame2));
+                assert(!SpecVAddr::overlap(
+                    vbase1,
+                    frame1.size.as_nat(),
+                    vbase2,
+                    frame2.size.as_nat(),
+                ));
+            }
+        }
+    }
+
+    /// Lemma. `unmap` preserves well-formedness.
+    pub fn lemma_unmap_preserves_wf(s1: Self, s2: Self, vbase: SpecVAddr, res: PagingResult)
+        requires
+            s1.wf(),
+            s2.unmap_pre(vbase),
+            Self::unmap(s1, s2, vbase, res),
+        ensures
+            s2.wf(),
+    {
+        assert forall|vbase2: SpecVAddr, frame2: SpecFrame| #[trigger]
+            s2.mappings.contains_pair(vbase2, frame2) implies {
+            &&& s2.constants.arch.is_valid_frame_size(frame2.size)
+            &&& vbase2.0 < s2.constants.arch.vspace_size()
+            &&& vbase2.aligned(frame2.size.as_nat())
+            &&& frame2.base.aligned(frame2.size.as_nat())
+        } by {
+            assert(s1.mappings.contains_pair(vbase2, frame2));
+        }
+        assert forall|vbase1: SpecVAddr, frame1: SpecFrame, vbase2: SpecVAddr, frame2: SpecFrame|
+         #[trigger]
+            s2.mappings.contains_pair(vbase1, frame1) && #[trigger] s2.mappings.contains_pair(
+                vbase2,
+                frame2,
+            ) && (vbase1 != vbase2) implies {
+            !SpecVAddr::overlap(vbase1, frame1.size.as_nat(), vbase2, frame2.size.as_nat())
+        } by {
+            if vbase1 != vbase && vbase2 != vbase {
+                assert(s1.mappings.contains_pair(vbase1, frame1));
+                assert(s1.mappings.contains_pair(vbase2, frame2));
+                assert(!SpecVAddr::overlap(
+                    vbase1,
+                    frame1.size.as_nat(),
+                    vbase2,
+                    frame2.size.as_nat(),
+                ));
+            }
         }
     }
 }
@@ -285,6 +395,14 @@ pub trait PageTable<A> where Self: Sized, A: GlobalAllocator {
                     Err(()) => Err(()),
                 },
             ),
+    ;
+
+    /// Lemma. Invariants implies well-formedness.
+    broadcast proof fn lemma_invariants_implies_wf(&self, allocator: &A)
+        requires
+            #[trigger] self.invariants(allocator),
+        ensures
+            self.view(allocator).wf(),
     ;
 }
 
