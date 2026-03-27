@@ -14,6 +14,8 @@ use vstd::{invariant, prelude::*};
 
 verus! {
 
+broadcast use crate::page_table::PageTable::lemma_invariants_implies_wf;
+
 /// Specification of a memory set viewed by higher-level components.
 pub trait MemorySet<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
     /// View the memory set as a list of memory regions.
@@ -611,8 +613,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                             vaddr@,
                             (region.pages - (i - 1)) as nat * PAGE_SIZE as nat,
                         ));
-                        // TODO
-                        assume(vbase2.aligned(PAGE_SIZE as nat));
+                        assert(vbase2.aligned(PAGE_SIZE as nat));
                         assert(vbase2.0 - vaddr@.0 >= PAGE_SIZE);
                         assert(SpecVAddr::interval_subset(
                             vbase2,
@@ -705,28 +706,6 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
 
         Ok(())
     }
-}
-
-proof fn lemma_regions_not_overlaps_implies_pages_disjoint(
-    region1: MemoryRegion,
-    region2: MemoryRegion,
-    p: nat,
-    q: nat,
-)
-    requires
-        region1.spec_valid(),
-        region2.spec_valid(),
-        p < region1.pages as nat,
-        q < region2.pages as nat,
-        !region1.spec_overlaps(region2),
-    ensures
-        !SpecVAddr::overlap(
-            region1.start@,
-            p * PAGE_SIZE as nat,
-            region2.start@,
-            q * PAGE_SIZE as nat,
-        ),
-{
 }
 
 } // verus!

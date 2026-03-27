@@ -89,6 +89,20 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: GlobalAllocator, E: PageT
         }
         self.0.query(allocator, vaddr)
     }
+
+    proof fn lemma_invariants_implies_wf(&self, allocator: &A) {   
+        let view = self.0.view(allocator);
+        view.lemma_wf_implies_node_wf();
+        view.construct_node_facts(view.pt_mem.root, 0);
+        if view.is_table_empty(view.pt_mem.root) {
+            view.lemma_empty_implies_node_empty();
+        } else {
+            view.lemma_all_nonempty_implies_node_all_nonempty();
+        }
+        assert(view.view().wf());
+        view.view().lemma_mappings_nonoverlap_in_vmem();
+        view.view().lemma_mappings_valid();
+    }
 }
 
 } // verus!

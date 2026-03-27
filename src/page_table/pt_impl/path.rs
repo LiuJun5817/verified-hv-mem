@@ -317,8 +317,6 @@ impl PTTreePath {
         assert(forall|i| 0 <= i < self.len() ==> parts[i] % fsize == 0);
         // All parts align to the frame size of the last level, prove that sum does too.
         lemma_parts_align_implies_sum_align(parts, fsize);
-        // TODO Resource limit (rlimit) exceeded
-        assume(false);
     }
 
     /// Lemma. If `path` has a prefix `pref`, then `path.to_vaddr()` has a lower bound.
