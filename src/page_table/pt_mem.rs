@@ -154,6 +154,11 @@ impl SpecPageTableMem {
         &&& new_base.aligned(
             s1.arch.table_size(level),
         )
+        // TODO: assume smallest page size is 4096
+        &&& new_base.aligned(
+            4096,
+        )
+        &&& new_base.0 < usize::MAX
         // new table doesn't overlap with existing tables
         &&& forall|base: SpecPAddr| #[trigger]
             s1.tables.contains_key(base) ==> !SpecPAddr::overlap(

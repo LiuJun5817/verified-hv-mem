@@ -1004,6 +1004,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             self.pt_mem.contains_table_with_level(base, level),
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
+            new_pte.wf(),
         ensures
             self.insert(vbase, base, level, target_level, new_pte).1 is Ok ==> self.insert(
                 vbase,
@@ -1253,6 +1254,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             level <= target_level < self.constants.arch.level_count(),
             level <= level2 < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
+            new_pte.wf(),
             !self.collect_table_chain(vbase, base, level).contains(base2),
         ensures
             self.construct_node(base2, level2) == self.insert(
@@ -1288,6 +1290,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             let entry = node.entries[i];
             let entry2 = node2.entries[i];
             let pte = E::spec_from_u64(self.pt_mem.read(base2, i as nat));
+            E::lemma_from_u64_wf(self.pt_mem.read(base2, i as nat));
             assert(self.pt_mem.accessible(base2, i as nat));
             let pte2 = E::spec_from_u64(s2.pt_mem.read(base2, i as nat));
             E::lemma_eq_by_u64(pte, pte2);
@@ -1338,6 +1341,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             self.pt_mem.contains_table_with_level(base, level),
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
+            new_pte.wf(),
         ensures
             ({
                 let (s2, res) = self.insert(vbase, base, level, target_level, new_pte);
@@ -1951,6 +1955,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         } by {
             let entry = node.entries[i];
             let pte = E::spec_from_u64(self.pt_mem.read(base2, i as nat));
+            E::lemma_from_u64_wf(self.pt_mem.read(base2, i as nat));
             assert(self.pt_mem.accessible(base2, i as nat));
             let pte2 = E::spec_from_u64(s2.pt_mem.read(base2, i as nat));
             E::lemma_eq_by_u64(pte, pte2);
