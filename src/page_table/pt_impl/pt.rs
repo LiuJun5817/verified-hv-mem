@@ -172,6 +172,7 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
             old(self).pt_mem.view(old(allocator)).level(base@) == level,
             old(self).view(old(allocator)).pte_valid_frame(new_pte, target_level as nat),
             !old(allocator).view().free.is_empty(),
+            new_pte.wf(),
         ensures
             (self.view(allocator), res) == old(self).view(old(allocator)).insert(
                 vbase@,
@@ -440,6 +441,7 @@ impl<A, E> PageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
             ;
         }
         let new_pte = E::new(frame.base, frame.attr, huge);
+        assert(new_pte.wf());
 
         proof {
             let root = self.pt_mem.view(allocator).root;
