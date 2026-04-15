@@ -40,7 +40,7 @@ impl GlobalAllocatorModel {
                 ==> !self.clients[cid].contains(
                 fid,
             )
-            // No frame is in multiple clients
+        // No frame is in multiple clients
         &&& forall|fid: nat, c1: nat, c2: nat|
             #![auto]
             self.clients.contains_key(c1) && self.clients.contains_key(c2) && c1 != c2 ==> !(

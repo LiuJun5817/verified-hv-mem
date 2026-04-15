@@ -213,7 +213,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                 ==> !self.regions[i].spec_overlaps(
                 self.regions[j],
             )
-            // Page table contains mappings only within these regions
+        // Page table contains mappings only within these regions
         &&& forall|vbase: SpecVAddr, frame: SpecFrame| #[trigger]
             self.pt.view(allocator).mappings.contains_pair(vbase, frame)
                 ==> self.has_region_for_frame(
