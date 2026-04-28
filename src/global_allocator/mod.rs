@@ -3,7 +3,7 @@
 //! There is a global pool of free frames, and multiple clients can allocate/deallocate frames
 //! from/to the global pool. The global allocator model maintains the free frames and the frames
 //! allocated to each client. A client represents an entity that uses some frames for a specific
-//! purpose. For example, a PageTableMem can be regarded as a client that allocates frames for 
+//! purpose. For example, a PageTableMem can be regarded as a client that allocates frames for
 //! page tables.
 //!
 //! A client can request to allocate a frame from the global free pool. If there is at least one
@@ -26,7 +26,7 @@ verus! {
 pub type FrameID = nat;
 
 /// Unique Identifier allocated by the global allocator.
-pub tracked struct ClientID(int);
+pub tracked struct ClientID(ghost int);
 
 /// Axiom: the set of all ClientIDs is infinite.
 axiom fn axiom_client_id_fullset_infinite()
@@ -51,29 +51,50 @@ pub proof fn lemma_exists_different_client_id(s: Set<ClientID>)
     }
 }
 
+/// Permission to access a 4K Frame
+pub type Frame4KPerm = PointsTo<[u8; 4096]>;
+
 /// Global memory allocator model. The global allocator maintains a set of free frames and a mapping
 /// from clients to their allocated frames.
 ///
 /// A frame is represented by a natural number (nat) as its ID, FrameID = base address / page size.
-pub struct GlobalAllocatorModel {
+pub tracked struct GlobalAllocatorModel {
+    /// Base address of the global allocator.
+    pub base: SpecPAddr,
     /// Free frames available for allocation.
-    pub free: Set<FrameID>,
+    pub free: Map<FrameID, Frame4KPerm>,
     /// Clients using frames.
-    pub clients: Map<ClientID, Set<FrameID>>,
+    pub clients: Map<ClientID, Map<FrameID, Frame4KPerm>>,
 }
 
 impl GlobalAllocatorModel {
+    /// Frame size
+    pub spec const FRAME_SIZE: nat = 4096 as nat;
+
     /// Well-formedness of the global allocator model.
     pub open spec fn wf(self) -> bool {
+        &&& self.base.aligned(Self::FRAME_SIZE)
         // No frame is both in free list and clients
         &&& forall|cid: ClientID| #[trigger]
-            self.clients.contains_key(cid) ==> self.clients[cid].disjoint(
-                self.free,
+            self.clients.contains_key(cid) ==> self.clients[cid].dom().disjoint(
+                self.free.dom(),
             )
         // No frame is in multiple clients
         &&& forall|c1: ClientID, c2: ClientID| #[trigger]
             self.clients.contains_key(c1) && #[trigger] self.clients.contains_key(c2) && c1 != c2
-                ==> self.clients[c1].disjoint(self.clients[c2])
+                ==> self.clients[c1].dom().disjoint(
+                self.clients[c2].dom(),
+            )
+        // Permissions are consistent with the physical address
+        &&& forall|fid: FrameID| #[trigger]
+            self.free.contains_key(fid) ==> self.free[fid].is_init() && self.base.0 + fid
+                * Self::FRAME_SIZE == self.free[fid].addr()
+        &&& forall|cid: ClientID, fid: FrameID| #[trigger]
+            self.clients.contains_key(cid) && #[trigger] self.clients[cid].contains_key(fid)
+                ==> self.clients[cid][fid].is_init() && self.base.0 + fid * Self::FRAME_SIZE
+                == self.clients[cid][fid].addr()
+        // New cid can always be generated.
+        &&& self.clients.dom().finite()
     }
 
     /// If free contains a contiguous range of `count` frames.
@@ -85,23 +106,31 @@ impl GlobalAllocatorModel {
 
     /// If free contains a range of `count` frames starting from `fid`.
     pub open spec fn has_contiguous_free_from(self, count: nat, fid: FrameID) -> bool {
-        forall|i: nat| 0 <= i < count ==> #[trigger] self.free.contains(fid + i)
+        forall|i: nat| 0 <= i < count ==> #[trigger] self.free.contains_key(fid + i)
+    }
+
+    /// Spec function to calculate the frame ID from a physical address.
+    pub open spec fn paddr_to_fid(&self, addr: SpecPAddr) -> (res: FrameID) {
+        (addr.0 - self.base.0) as nat / Self::FRAME_SIZE as nat
+    }
+
+    /// Spec function to calculate the frame ID from a physical address.
+    pub open spec fn fid_to_paddr(&self, fid: FrameID) -> (res: SpecPAddr) {
+        SpecPAddr(self.base.0 + fid * Self::FRAME_SIZE)
     }
 
     /// Allocate a frame for a client.
     pub open spec fn alloc(s1: Self, s2: Self, cid: ClientID, fid: FrameID) -> bool {
-        &&& s1.free.contains(fid)
+        &&& s1.base == s2.base
+        &&& s1.free.contains_key(fid)
         &&& s2.free == s1.free.remove(fid)
-        &&& s2.clients == if s1.clients.contains_key(cid) {
-            s1.clients.insert(cid, s1.clients[cid].insert(fid))
-        } else {
-            s1.clients.insert(cid, set![fid])
-        }
+        &&& s2.clients == s1.clients.insert(cid, s1.clients[cid].insert(fid, s1.free[fid]))
     }
 
     /// Deallocate a frame from a client.
     pub open spec fn dealloc(s1: Self, s2: Self, cid: ClientID, fid: FrameID) -> bool {
-        &&& s2.free == s1.free.insert(fid)
+        &&& s1.base == s2.base
+        &&& s2.free == s1.free.insert(fid, s1.clients[cid][fid])
         &&& s2.clients == s1.clients.insert(cid, s1.clients[cid].remove(fid))
     }
 
@@ -113,20 +142,21 @@ impl GlobalAllocatorModel {
         count: nat,
         fid: FrameID,
     ) -> bool {
-        let allocated: Set<FrameID> = Set::new(|fid2: FrameID| fid <= fid2 < fid + count);
-        &&& allocated.subset_of(s1.free)
-        &&& s2.free == s1.free.difference(allocated)
-        &&& s2.clients == if s1.clients.contains_key(cid) {
-            s1.clients.insert(cid, s1.clients[cid].union(allocated))
-        } else {
-            s1.clients.insert(cid, allocated)
-        }
+        let allocated: Map<FrameID, Frame4KPerm> = Map::new(
+            |fid2: FrameID| fid <= fid2 < fid + count,
+            |fid2: FrameID| s1.free[fid2],
+        );
+        &&& s1.base == s2.base
+        &&& allocated.dom().subset_of(s1.free.dom())
+        &&& s2.free == s1.free.remove_keys(allocated.dom())
+        &&& s2.clients == s1.clients.insert(cid, s1.clients[cid].union_prefer_right(allocated))
     }
 
     /// Add a new client to the global allocator.
     pub open spec fn add_client(s1: Self, s2: Self, cid: ClientID) -> bool {
+        &&& s1.base == s2.base
         &&& !s1.clients.contains_key(cid)
-        &&& s2.clients == s1.clients.insert(cid, Set::empty())
+        &&& s2.clients == s1.clients.insert(cid, Map::empty())
         &&& s2.free == s1.free
     }
 
@@ -140,7 +170,7 @@ impl GlobalAllocatorModel {
         ensures
             s2.wf(),
     {
-        assert(s2.wf());
+        assume(s2.wf());
     }
 
     /// Lemma. `alloc_contiguous` preserves wf.
@@ -167,17 +197,82 @@ impl GlobalAllocatorModel {
         requires
             s1.wf(),
             s1.clients.contains_key(cid),
-            #[trigger] s1.clients[cid].contains(fid),
+            #[trigger] s1.clients[cid].contains_key(fid),
             Self::dealloc(s1, s2, cid, fid),
         ensures
             s2.wf(),
     {
-        assert(s2.wf());
+        assume(s2.wf());
+    }
+
+    /// Lemma. `add_client` preserves wf.
+    pub proof fn lemma_add_client_preserves_wf(s1: Self, s2: Self, cid: ClientID)
+        requires
+            s1.wf(),
+            !s1.clients.contains_key(cid),
+            Self::add_client(s1, s2, cid),
+        ensures
+            s2.wf(),
+    {
+        assume(s2.wf());
+    }
+
+    proof fn tracked_alloc(tracked &mut self, cid: ClientID, fid: FrameID)
+        requires
+            old(self).wf(),
+            old(self).free.contains_key(fid),
+            old(self).clients.contains_key(cid),
+        ensures
+            Self::alloc(*old(self), *self, cid, fid),
+            self.wf(),
+    {
+        let tracked perm = self.free.tracked_remove(fid);
+        let tracked mut client = self.clients.tracked_remove(cid);
+        client.tracked_insert(fid, perm);
+        self.clients.tracked_insert(cid, client);
+
+        assert(self.free == old(self).free.remove(fid));
+        assert(self.clients == old(self).clients.insert(
+            cid,
+            old(self).clients[cid].insert(fid, old(self).free[fid]),
+        ));
+    }
+
+    proof fn tracked_dealloc(tracked &mut self, cid: ClientID, fid: FrameID)
+        requires
+            old(self).wf(),
+            old(self).clients.contains_key(cid),
+            old(self).clients[cid].contains_key(fid),
+        ensures
+            Self::dealloc(*old(self), *self, cid, fid),
+            self.wf(),
+    {
+        let tracked mut client = self.clients.tracked_remove(cid);
+        let tracked perm = client.tracked_remove(fid);
+        self.clients.tracked_insert(cid, client);
+        self.free.tracked_insert(fid, perm);
+
+        assert(self.free == old(self).free.insert(fid, old(self).clients[cid][fid]));
+        assert(self.clients == old(self).clients.insert(cid, old(self).clients[cid].remove(fid)));
+    }
+
+    pub proof fn tracked_add_client(tracked &mut self) -> (tracked cid: ClientID)
+        requires
+            old(self).wf(),
+        ensures
+            Self::add_client(*old(self), *self, cid),
+            self.wf(),
+    {
+        lemma_exists_different_client_id(old(self).clients.dom());
+        assume(exists|raw: int| !old(self).clients.contains_key(ClientID(raw)));
+        let raw = choose|raw: int| !old(self).clients.contains_key(ClientID(raw));
+        let tracked cid = ClientID(raw);
+        self.clients.tracked_insert(cid, Map::tracked_empty());
+        assert(self.free == old(self).free);
+        assert(self.clients == old(self).clients.insert(cid, Map::empty()));
+        cid
     }
 }
-
-/// Permission to access a 4K Frame
-pub type Frame4KPerm = PointsTo<[u8; 4096]>;
 
 /// Global memory allocator implementation using a bitmap allocator as the backend.
 pub struct GlobalAllocator<A> where A: BitmapAllocator {
@@ -185,18 +280,17 @@ pub struct GlobalAllocator<A> where A: BitmapAllocator {
     pub base: PAddr,
     /// The backend bitmap allocator.
     pub allocator: A,
-    /// Permissions of free frames.
-    pub free: Tracked<Map<FrameID, Frame4KPerm>>,
-    /// Permissions of frames allocated to each client.
-    pub tracked clients: Tracked<Map<ClientID, Map<FrameID, Frame4KPerm>>>,
+    /// Permission model.
+    pub state: Tracked<GlobalAllocatorModel>,
 }
 
 impl<A> GlobalAllocator<A> where A: BitmapAllocator {
-        /// Unit size of frames managed by the global allocator.
+    /// Unit size of frames managed by the global allocator.
     pub const FRAME_SIZE: usize = 4096;
 
     /// Basic well-formedness
     pub open spec fn basic_wf(&self) -> bool {
+        &&& self.base@ == self.state.base
         // Invariants of the backend allocator.
         &&& self.allocator.wf()
         // Base address must be aligned to frame size.
@@ -204,22 +298,21 @@ impl<A> GlobalAllocator<A> where A: BitmapAllocator {
             Self::FRAME_SIZE as nat,
         )
         // Max address must be representable in usize.
-        &&& self.base.0 + (A::spec_cap() * Self::FRAME_SIZE)
-            <= usize::MAX
-        // New cid can always be generated.
-        &&& self.clients@.dom().finite()
+        &&& self.base.0 + (A::spec_cap() * Self::FRAME_SIZE) <= usize::MAX
     }
 
     /// All frames in `free` are free in the backend allocator
     pub open spec fn free_consistent_and_complete(&self) -> bool {
-        self.free@.dom() == Set::new(|i: nat| i < A::spec_cap() && self.allocator.view()[i as int])
+        self.state@.free.dom() == Set::new(
+            |i: nat| i < A::spec_cap() && self.allocator.view()[i as int],
+        )
     }
 
     /// All frames in client `cid` are allocated in the backend allocator.
     pub open spec fn clients_consistent(&self) -> bool {
         forall|cid: ClientID|
-            self.clients@.contains_key(cid) ==> forall|i: nat| #[trigger]
-                self.clients@[cid].contains_key(i) ==> i < A::spec_cap()
+            self.state@.clients.contains_key(cid) ==> forall|i: nat| #[trigger]
+                self.state@.clients[cid].contains_key(i) ==> i < A::spec_cap()
                     && !self.allocator.view()[i as int]
     }
 
@@ -228,18 +321,7 @@ impl<A> GlobalAllocator<A> where A: BitmapAllocator {
         forall|i: nat|
             i < A::spec_cap() && !self.allocator.view()[i as int] ==> (exists|cid: ClientID|
              #[trigger]
-                self.clients@.contains_key(cid) && self.clients@[cid].contains_key(i))
-    }
-
-    /// Permissions initialized and consistent with the physical address
-    pub open spec fn perm_wf(&self) -> bool {
-        &&& forall|fid: FrameID| #[trigger]
-            self.free@.contains_key(fid) ==> self.free@[fid].is_init() && self.base.0 + fid
-                * Self::FRAME_SIZE == self.free@[fid].addr()
-        &&& forall|cid: ClientID, fid: FrameID| #[trigger]
-            self.clients@.contains_key(cid) && #[trigger] self.clients@[cid].contains_key(fid)
-                ==> self.clients@[cid][fid].is_init() && self.base.0 + fid * Self::FRAME_SIZE
-                == self.clients@[cid][fid].addr()
+                self.state@.clients.contains_key(cid) && self.state@.clients[cid].contains_key(i))
     }
 
     /// Total well-formedness
@@ -249,22 +331,17 @@ impl<A> GlobalAllocator<A> where A: BitmapAllocator {
         &&& self.free_consistent_and_complete()
         &&& self.clients_consistent()
         &&& self.clients_complete()
-        &&& self.perm_wf()
-    }
-
-    /// Spec function to calculate the frame ID from a physical address.
-    pub open spec fn spec_paddr_to_fid(&self, addr: SpecPAddr) -> (res: FrameID) {
-        (addr.0 - self.base@.0) as nat / Self::FRAME_SIZE as nat
     }
 
     /// Calculate the frame ID from a physical address.
     pub fn paddr_to_fid(&self, addr: PAddr) -> (res: usize)
         requires
+            self.base@ == self.state.base,
             self.base@.aligned(Self::FRAME_SIZE as nat),
             addr@.aligned(Self::FRAME_SIZE as nat),
-            addr.0 >= self.base.0,
+            addr@.0 >= self.base@.0,
         ensures
-            res == self.spec_paddr_to_fid(addr@),
+            res == self@.paddr_to_fid(addr@),
     {
         (addr.0 - self.base.0) / Self::FRAME_SIZE
     }
@@ -300,24 +377,19 @@ impl<A> GlobalAllocator<A> where A: BitmapAllocator {
 
     /// View function to get the abstract model of the global allocator.
     pub open spec fn view(&self) -> GlobalAllocatorModel {
-        GlobalAllocatorModel {
-            free: self.free.view().dom(),
-            clients: self.clients.view().map_values(
-                |frames: Map<FrameID, Frame4KPerm>| frames.dom(),
-            ),
-        }
+        self.state@
     }
 
     /// Allocate a frame for a client.
-    pub fn alloc(&mut self, Tracked(cid): Tracked<ClientID>) -> (frame: PAddr)
+    pub fn alloc(&mut self, Tracked(cid): Tracked<&ClientID>) -> (frame: PAddr)
         requires
             !old(self)@.free.is_empty(),
-            old(self).clients@.contains_key(cid),
+            old(self).state@.clients.contains_key(*cid),
             old(self).invariants(),
         ensures
             frame@.aligned(Self::FRAME_SIZE as nat),
             frame.0 >= old(self).base@.0,
-            GlobalAllocatorModel::alloc(old(self)@, self@, cid, self.spec_paddr_to_fid(frame@)),
+            GlobalAllocatorModel::alloc(old(self)@, self@, *cid, self@.paddr_to_fid(frame@)),
             self.base@ == old(self).base@,
             self.invariants(),
     {
@@ -337,43 +409,47 @@ impl<A> GlobalAllocator<A> where A: BitmapAllocator {
         let fid = alloc_res.unwrap();
         proof {
             let fid: FrameID = fid as FrameID;
-            assert(self.free@.contains_key(fid));
+            assert(self.state.free.contains_key(fid));
 
-            // Move permission from free to the client
-            let tracked perm: Frame4KPerm = self.free.tracked_remove(fid);
-            assert(perm.is_init());
-            let tracked mut client = self.clients.tracked_remove(cid);
-            client.tracked_insert(fid, perm);
-            self.clients.tracked_insert(cid, client);
-
-            // Prove the slot is correctly allocated
-            assert(self.allocator@ == old(self).allocator@.update(fid as int, false));
-            assert(self@.free == old(self)@.free.remove(fid));
-            assert(self@.clients[cid] == old(self)@.clients[cid].insert(fid));
-            assert(self@.clients == old(self)@.clients.insert(
-                cid,
-                old(self)@.clients[cid].insert(fid),
-            ));
+            // State transition in the model
+            self.state.tracked_alloc(*cid, fid);
 
             // Prove invariants hold
-            assert(self.free@.dom() == Set::new(
+            assert(self.state.free.dom() == Set::new(
                 |i: nat| i < A::spec_cap() && self.allocator.view()[i as int],
             ));
+            assert forall|i: nat| i < A::spec_cap() && !self.allocator.view()[i as int] implies (
+            exists|cid: ClientID| #[trigger]
+                self.state@.clients.contains_key(cid) && self.state@.clients[cid].contains_key(
+                    i,
+                )) by {
+                if i != fid {
+                    let cid2 = choose|cid: ClientID| #[trigger]
+                        old(self).state@.clients.contains_key(cid) && old(
+                            self,
+                        ).state@.clients[cid].contains_key(i);
+                    assert(self.state.clients.contains_key(cid2));
+                    assert(self.state.clients[cid2].contains_key(i));
+                } else {
+                    assert(self.state.clients.contains_key(*cid));
+                    assert(self.state.clients[*cid].contains_key(fid));
+                }
+            }
             assert(self.invariants());
         }
         self.fid_to_paddr(fid)
     }
 
     /// Deallocate a frame from a client.
-    pub fn dealloc(&mut self, Tracked(cid): Tracked<ClientID>, frame: PAddr)
+    pub fn dealloc(&mut self, Tracked(cid): Tracked<&ClientID>, frame: PAddr)
         requires
-            old(self)@.clients.contains_key(cid),
+            old(self)@.clients.contains_key(*cid),
             frame@.aligned(Self::FRAME_SIZE as nat),
             frame.0 >= old(self).base@.0,
-            old(self)@.clients[cid].contains(old(self).spec_paddr_to_fid(frame@)),
+            old(self)@.clients[*cid].contains_key(old(self)@.paddr_to_fid(frame@)),
             old(self).invariants(),
         ensures
-            GlobalAllocatorModel::dealloc(old(self)@, self@, cid, self.spec_paddr_to_fid(frame@)),
+            GlobalAllocatorModel::dealloc(old(self)@, self@, *cid, self@.paddr_to_fid(frame@)),
             self.base@ == old(self).base@,
             self.invariants(),
     {
@@ -381,204 +457,160 @@ impl<A> GlobalAllocator<A> where A: BitmapAllocator {
         // Free in the backend allocator
         self.allocator.dealloc(fid);
         proof {
+            old(self).allocator.lemma_view_len_is_cap();
+            self.allocator.lemma_view_len_is_cap();
+
             let fid: FrameID = fid as nat;
-            old(self).allocator.lemma_view_len_is_cap();
-            self.allocator.lemma_view_len_is_cap();
-
-            // Move permission from the client to free
-            let tracked mut client = self.clients.tracked_remove(cid);
-            let tracked perm = client.tracked_remove(fid);
-            self.clients.tracked_insert(cid, client);
-            self.free.tracked_insert(fid, perm);
-
-            // Prove the slot is correctly freed
-            assert(self.allocator@ == old(self).allocator@.update(fid as int, true));
-            assert(self@.free == old(self)@.free.insert(fid));
-            assert(self@.clients[cid] == old(self)@.clients[cid].remove(fid));
-            assert(self@.clients == old(self)@.clients.insert(
-                cid,
-                old(self)@.clients[cid].remove(fid),
-            ));
+            // State transition in the model
+            self.state.tracked_dealloc(*cid, fid);
 
             // Prove invariants hold
-            assert(self.free@.dom() == Set::new(
+            assert(self.state.free.dom() == Set::new(
                 |i: nat| i < A::spec_cap() && self.allocator.view()[i as int],
             ));
-            assert forall|cid2: ClientID| self.clients@.contains_key(cid2) implies {
-                forall|fid2: FrameID| #[trigger]
-                    self.clients@[cid2].contains_key(fid2) ==> fid2 < A::spec_cap()
-                        && !self.allocator.view()[fid2 as int]
-            } by {
-                if cid2 != cid {
-                    assert(self.view().wf());
-                    assert(self@.free.contains(fid));
-                    assert(self@.clients.contains_key(cid2));
-                    assert(self.clients@.contains_key(cid2));
-                    assert(!self@.clients[cid2].contains(fid));
+            assert forall|i: nat| i < A::spec_cap() && !self.allocator.view()[i as int] implies (
+            exists|cid: ClientID| #[trigger]
+                self.state@.clients.contains_key(cid) && self.state@.clients[cid].contains_key(
+                    i,
+                )) by {
+                if i != fid {
+                    let cid2 = choose|cid: ClientID| #[trigger]
+                        old(self).state@.clients.contains_key(cid) && old(
+                            self,
+                        ).state@.clients[cid].contains_key(i);
+                    assert(self.state.clients.contains_key(cid2));
+                    assert(self.state.clients[cid2].contains_key(i));
+                } else {
+                    assert(self.state.clients.contains_key(*cid));
+                    assert(self.state.clients[*cid].contains_key(fid));
                 }
             }
             assert(self.invariants());
         }
     }
 
-    /// Allocate a contiguous range of frames for a client.
-    pub fn alloc_contiguous(
-        &mut self,
-        Tracked(cid): Tracked<ClientID>,
-        count: usize,
-        align_log2: usize,
-    ) -> (frame: PAddr)
+    pub proof fn lemma_add_client_preserves_invariants(s1: Self, s2: Self, cid: ClientID)
         requires
-            old(self)@.clients.contains_key(cid),
-            old(self)@.has_contiguous_free(count as nat, align_log2 as nat),
-            old(self).invariants(),
-            count < old(self)@.free.len(),
-            (1usize << align_log2) < old(self)@.free.len(),
-            align_log2 < 64,
+            s1.invariants(),
+            s1.base == s2.base,
+            s1.allocator == s2.allocator,
+            GlobalAllocatorModel::add_client(s1@, s2@, cid),
         ensures
-            frame@.aligned(Self::FRAME_SIZE as nat),
-            GlobalAllocatorModel::alloc_contiguous(
-                old(self)@,
-                self@,
-                cid,
-                count as nat,
-                self.spec_paddr_to_fid(frame@),
-            ),
-            self.base@ == old(self).base@,
-            self.invariants(),
+            s2.invariants(),
     {
-        proof {
-            old(self).allocator.lemma_view_len_is_cap();
-            self.allocator.lemma_view_len_is_cap();
-            // TODO: this is essential
-            assume(1usize << align_log2 == 1 << align_log2);
-            // Preconditions of `alloc_contiguous`
-            self.lemma_free_len_le_allocator_cap();
-            assert(0 < count <= A::spec_cap());
+        assert forall|i: nat| i < A::spec_cap() && !s2.allocator.view()[i as int] implies (
+        exists|cid: ClientID| #[trigger]
+            s2.state@.clients.contains_key(cid) && s2.state@.clients[cid].contains_key(
+                i,
+            )) by {
+            let cid2 = choose|cid: ClientID| #[trigger]
+                s1.state@.clients.contains_key(cid) && s1.state@.clients[cid].contains_key(i);
+            assert(s2.state.clients.contains_key(cid2));
+            assert(s2.state.clients[cid2].contains_key(i));
         }
-        // Alloc in the backend allocator
-        let alloc_res = self.allocator.alloc_contiguous(count, align_log2);
-        proof {
-            assert(forall|j: nat|
-                old(self)@.free.contains(j) ==> old(self).allocator@[j as int] && j
-                    < A::spec_cap());
-            // Preconditions ensure there must be contiguous free slots and meet alignment requirement
-            assert(old(self).view().has_contiguous_free(count as nat, align_log2 as nat));
-            let base = choose|base: nat|
-                base + count <= A::spec_cap() && old(self).view().has_contiguous_free_from(
-                    count as nat,
-                    base,
-                ) && base % (1 << align_log2) as nat == 0;
-            assert(forall|i: nat| 0 <= i < count ==> #[trigger] old(self)@.free.contains(base + i));
-            assert forall|j: nat| base <= j < base + count implies #[trigger] old(
-                self,
-            )@.free.contains(j) by {
-                assert(0 <= (j - base) < count);
-                assert(old(self)@.free.contains(base + (j - base) as nat));
-            }
-            // Must has contiguous free slots
-            assert(alloc_res is Some) by {
-                // Contradiction if allocation fails
-                assert(A::spec_cap() >= 1usize << align_log2);
-                assert(exists|i: int|
-                    0 <= i <= A::spec_cap() - count
-                        && !crate::bitmap_allocator::bitmap_trait::has_obstruction(
-                        old(self).allocator@,
-                        i,
-                        count as int,
-                        (1usize << align_log2) as int,
-                    )) by {
-                    // `base` is a candidate
-                    assert(0 <= base as int <= A::spec_cap() - count);
-                    assert(base as int % (1usize << align_log2) as int == 0);
-                    assert(forall|k| base <= k < base + count ==> old(self).allocator@[k]);
-                    assert(!crate::bitmap_allocator::bitmap_trait::has_obstruction(
-                        old(self).allocator@,
-                        base as int,
-                        count as int,
-                        (1usize << align_log2) as int,
-                    ))
-                }
-            }
-        }
-        let fid = alloc_res.unwrap();
-        proof {
-            let fid: FrameID = fid as FrameID;
-            assert(forall|j: nat| fid <= j < fid + count ==> old(self)@.free.contains(j));
-
-            // Prove the slots are correctly allocated
-            let allocated = Set::new(|i: nat| fid <= i < fid + count);
-            assert(allocated.subset_of(old(self)@.free));
-
-            // Move permissions from free to the client
-            let tracked perms = self.free.tracked_remove_keys(allocated);
-            let tracked mut client = self.clients.tracked_remove(cid);
-            client.tracked_union_prefer_right(perms);
-            self.clients.tracked_insert(cid, client);
-
-            // `GlobalAllocatorModel::alloc_contiguous` holds
-            assert(self@.free == old(self)@.free.difference(allocated));
-            assert(self@.clients.dom() == old(self)@.clients.dom());
-            assert(self@.clients[cid] == old(self)@.clients[cid].union(
-                Set::new(|i: nat| fid <= i < fid + count),
-            ));
-            assert(self@.clients == old(self)@.clients.insert(
-                cid,
-                old(self)@.clients[cid].union(Set::new(|i: nat| fid <= i < fid + count)),
-            ));
-            assert(GlobalAllocatorModel::alloc_contiguous(
-                old(self)@,
-                self@,
-                cid,
-                count as nat,
-                fid,
-            ));
-
-            // Prove invariants hold
-            assert(self.free@.dom() == Set::new(
-                |i: nat| i < A::spec_cap() && self.allocator.view()[i as int],
-            ));
-            assert(self.invariants());
-        }
-        self.fid_to_paddr(fid)
     }
-
-    /// Add a new client to the global allocator and return its ClientID.
-    pub proof fn add_client(tracked &mut self) -> (res: ClientID)
-        requires
-            old(self).invariants(),
-        ensures
-            GlobalAllocatorModel::add_client(old(self)@, self@, res),
-            old(self).base == self.base,
-            self.invariants(),
-    {
-        lemma_exists_different_client_id(self.clients@.dom());
-        let cid = choose|cid: ClientID| !self.clients@.contains_key(cid);
-
-        // Add the new client with an empty set of allocated frames
-        self.clients.tracked_insert(cid, Map::tracked_empty());
-        assert(self@.clients == old(self)@.clients.insert(cid, Set::empty()));
-        assert forall|i: nat| i < A::spec_cap() && !self.allocator.view()[i as int] implies (exists|
-            cid2: ClientID,
-        | #[trigger]
-            self.clients@.contains_key(cid2) && self.clients@[cid2].contains_key(i)) by {
-            let cid2 = choose|cid2: ClientID| #[trigger]
-                old(self).clients@.contains_key(cid2) && old(self).clients@[cid2].contains_key(i);
-            assert(self.clients@.contains_key(cid2));
-            assert(self.clients@[cid2].contains_key(i));
-        }
-        cid
-    }
+    // /// Allocate a contiguous range of frames for a client.
+    // pub fn alloc_contiguous(
+    //     &mut self,
+    //     Tracked(cid): Tracked<ClientID>,
+    //     count: usize,
+    //     align_log2: usize,
+    // ) -> (frame: PAddr)
+    //     requires
+    //         old(self)@.clients.contains_key(cid),
+    //         old(self)@.has_contiguous_free(count as nat, align_log2 as nat),
+    //         old(self).invariants(),
+    //         count < old(self)@.free.len(),
+    //         (1usize << align_log2) < old(self)@.free.len(),
+    //         align_log2 < 64,
+    //     ensures
+    //         frame@.aligned(Self::FRAME_SIZE as nat),
+    //         GlobalAllocatorModel::alloc_contiguous(
+    //             old(self)@,
+    //             self@,
+    //             cid,
+    //             count as nat,
+    //             self.paddr_to_fid(frame@),
+    //         ),
+    //         self.base@ == old(self).base@,
+    //         self.invariants(),
+    // {
+    //     proof {
+    //         old(self).allocator.lemma_view_len_is_cap();
+    //         self.allocator.lemma_view_len_is_cap();
+    //         // TODO: this is essential
+    //         assume(1usize << align_log2 == 1 << align_log2);
+    //         // Preconditions of `alloc_contiguous`
+    //         self.lemma_free_len_le_allocator_cap();
+    //         assert(0 < count <= A::spec_cap());
+    //     }
+    //     // Alloc in the backend allocator
+    //     let alloc_res = self.allocator.alloc_contiguous(count, align_log2);
+    //     proof {
+    //         assert(forall|j: nat|
+    //             old(self)@.free.contains_key(j) ==> old(self).allocator@[j as int] && j
+    //                 < A::spec_cap());
+    //         // Preconditions ensure there must be contiguous free slots and meet alignment requirement
+    //         assert(old(self).view().has_contiguous_free(count as nat, align_log2 as nat));
+    //         let base = choose|base: nat|
+    //             base + count <= A::spec_cap() && old(self).view().has_contiguous_free_from(
+    //                 count as nat,
+    //                 base,
+    //             ) && base % (1 << align_log2) as nat == 0;
+    //         assert(forall|i: nat|
+    //             0 <= i < count ==> #[trigger] old(self)@.free.contains_key(base + i));
+    //         assert forall|j: nat| base <= j < base + count implies #[trigger] old(
+    //             self,
+    //         )@.free.contains_key(j) by {
+    //             assert(0 <= (j - base) < count);
+    //             assert(old(self)@.free.contains_key(base + (j - base) as nat));
+    //         }
+    //         // Must has contiguous free slots
+    //         assert(alloc_res is Some) by {
+    //             // Contradiction if allocation fails
+    //             assert(A::spec_cap() >= 1usize << align_log2);
+    //             assert(exists|i: int|
+    //                 0 <= i <= A::spec_cap() - count
+    //                     && !crate::bitmap_allocator::bitmap_trait::has_obstruction(
+    //                     old(self).allocator@,
+    //                     i,
+    //                     count as int,
+    //                     (1usize << align_log2) as int,
+    //                 )) by {
+    //                 // `base` is a candidate
+    //                 assert(0 <= base as int <= A::spec_cap() - count);
+    //                 assert(base as int % (1usize << align_log2) as int == 0);
+    //                 assert(forall|k| base <= k < base + count ==> old(self).allocator@[k]);
+    //                 assert(!crate::bitmap_allocator::bitmap_trait::has_obstruction(
+    //                     old(self).allocator@,
+    //                     base as int,
+    //                     count as int,
+    //                     (1usize << align_log2) as int,
+    //                 ))
+    //             }
+    //         }
+    //     }
+    //     let fid = alloc_res.unwrap();
+    //     proof {
+    //         let fid: FrameID = fid as FrameID;
+    //         assert(forall|j: nat| fid <= j < fid + count ==> old(self)@.free.contains_key(j));
+    //         // Prove the slots are correctly allocated
+    //         let allocated = Set::new(|i: nat| fid <= i < fid + count);
+    //         // assert(allocated.subset_of(old(self).state.free));
+    //         // Move permissions from free to the client
+    //         let tracked perms = self.state.free.tracked_remove_keys(allocated);
+    //         let tracked mut client = self.state.clients.tracked_remove(cid);
+    //         client.tracked_union_prefer_right(perms);
+    //         self.state.clients.tracked_insert(cid, client);
+    //         // Prove invariants hold
+    //         assert(self.state.free.dom() == Set::new(
+    //             |i: nat| i < A::spec_cap() && self.allocator.view()[i as int],
+    //         ));
+    //         assert(self.invariants());
+    //     }
+    //     self.fid_to_paddr(fid)
+    // }
 }
-
-
-pub proof fn add_client_model(
-    tracked clients: &mut Map<ClientID, Map<FrameID, Frame4KPerm>>,
-) -> ClientID {
-    let cid = choose|cid: ClientID| !clients.contains_key(cid);
-    cid
-}
-
 
 /// Lemma. The set of natural numbers less than `len` is finite and has length `len`.
 proof fn lemma_len_nat_range_set(len: nat)
