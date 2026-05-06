@@ -54,6 +54,9 @@ pub proof fn lemma_exists_different_client_id(s: Set<ClientID>)
 /// Permission to access a 4K Frame
 pub type Frame4KPerm = PointsTo<[u8; 4096]>;
 
+/// A marker spec funtion indicates a frame is empty.
+pub uninterp spec fn frame_is_empty(perm: &Frame4KPerm) -> bool;
+
 /// Global memory allocator model. The global allocator maintains a set of free frames and a mapping
 /// from clients to their allocated frames.
 ///
@@ -93,6 +96,9 @@ impl GlobalAllocatorModel {
             self.clients.contains_key(cid) && #[trigger] self.clients[cid].contains_key(fid)
                 ==> self.clients[cid][fid].is_init() && self.base.0 + fid * Self::FRAME_SIZE
                 == self.clients[cid][fid].addr()
+        // Free frames are empty
+        &&& forall|fid: FrameID| #[trigger]
+            self.free.contains_key(fid) ==> frame_is_empty(&self.free[fid])
         // New cid can always be generated.
         &&& self.clients.dom().finite()
     }
@@ -253,6 +259,7 @@ impl GlobalAllocatorModel {
             old(self).wf(),
             old(self).clients.contains_key(cid),
             old(self).clients[cid].contains_key(fid),
+            frame_is_empty(&old(self).clients[cid][fid]),
         ensures
             Self::dealloc(*old(self), *self, cid, fid),
             self.wf(),
@@ -457,6 +464,7 @@ impl<A> GlobalAllocator<A> where A: BitmapAllocator {
             frame@.aligned(Self::FRAME_SIZE as nat),
             frame.0 >= old(self).base@.0,
             old(self)@.clients[*cid].contains_key(old(self)@.paddr_to_fid(frame@)),
+            frame_is_empty(&old(self)@.clients[*cid][old(self)@.paddr_to_fid(frame@)]),
             old(self).invariants(),
         ensures
             GlobalAllocatorModel::dealloc(old(self)@, self@, *cid, self@.paddr_to_fid(frame@)),

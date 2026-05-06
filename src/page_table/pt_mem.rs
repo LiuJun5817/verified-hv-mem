@@ -2,20 +2,24 @@
 //!
 //! Page Table Memory is a collection of page tables, and provides read/write, alloc/dealloc functionality.
 //! The implementation should refine the specification defined in `spec::memory::PageTableMem`.
-use std::{borrow::Borrow, marker::PhantomData};
-use vstd::{
-    prelude::*,
-    simple_pptr::{PPtr, PointsTo},
-};
-
 use crate::{
     address::{
         addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
         frame::FrameSize,
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
-    global_allocator::{self, ClientID, Frame4KPerm, GlobalAllocator, GlobalAllocatorModel},
-    page_table::pt_arch::{PTArch, SpecPTArch},
+    global_allocator::{
+        self, frame_is_empty, ClientID, Frame4KPerm, GlobalAllocator, GlobalAllocatorModel,
+    },
+    page_table::{
+        pt_arch::{PTArch, SpecPTArch},
+        table::*,
+    },
+};
+use std::{borrow::Borrow, marker::PhantomData};
+use vstd::{
+    prelude::*,
+    simple_pptr::{PPtr, PointsTo},
 };
 
 verus! {
@@ -447,7 +451,7 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
             res.invariants(&allocator.state),
             allocator.invariants(),
     {
-        broadcast use lemma_frame4k_to_u64_seq_eq;
+        broadcast use lemma_frame4k_to_u64_seq;
 
         let tracked cid = allocator.state.tracked_add_client();
         proof {
@@ -475,12 +479,14 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
             ) == allocator.state@.clients[cid].dom());
             assert(res.view(&allocator.state).contents.dom() == Set::empty().insert(root@));
             assert(res.view(&allocator.state).wf());
-
             assert(res.invariants(&allocator.state));
 
             // Prove `init`
-            // Assume true, not verifiable yet
-            assume(res.view(&allocator.state).contents[res.root@] == Seq::new(
+            // New table is empty
+            assert(frame_is_empty(
+                &allocator.state.clients[cid][allocator.state.paddr_to_fid(root@)],
+            ));
+            assert(res.view(&allocator.state).contents[res.root@] == Seq::new(
                 arch@.entry_count(0),
                 |_i| 0u64,
             ));
@@ -509,6 +515,8 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
             allocator.invariants(),
             self.invariants(&allocator.state),
     {
+        broadcast use lemma_frame4k_to_u64_seq;
+
         let new_base = allocator.alloc(Tracked(self.cid.borrow()));
         self.tables = Ghost(self.tables@.insert(new_base@, level as nat));
 
@@ -523,7 +531,7 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
             let s2: SpecPageTableMem = self.view(&allocator.state);
 
             assert(new_base@.aligned(self.arch.view().table_size(level as nat)));
-            // new table doesn't overlap with existing tables
+            // New table doesn't overlap with existing tables
             assert forall|base: SpecPAddr| #[trigger]
                 s1.tables.contains_key(base) implies !SpecPAddr::overlap(
                 new_base@,
@@ -535,11 +543,12 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
                 assert(old(allocator).view().clients[cid].contains_key(fid2));
                 assert(base != new_base@);
             }
-            // new table is added
+            // New table is added
             assert(s2.tables == s1.tables.insert(new_base@, level as nat));
 
-            // Assume: new table is empty
-            assume(s2.contents[new_base@] == Seq::new(
+            // New table is empty
+            assert(frame_is_empty(&allocator.state.clients[cid][fid]));
+            assert(s2.contents[new_base@] == Seq::new(
                 s2.arch.entry_count(level as nat),
                 |_i| 0u64,
             ));
@@ -579,12 +588,43 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
             allocator.invariants(),
             self.invariants(&allocator.state),
     {
-        // For simplicity we assume the deallocated table is always empty, so we don't zero it.
+        let ghost cid = self.cid@;
+        let ghost fid = allocator@.paddr_to_fid(base@);
+
+        // Take permission from the allocator
+        let tracked mut client = allocator.state.clients.tracked_remove(cid);
+        assert(client.contains_key(fid));
+        let tracked frame_perm: Frame4KPerm = client.tracked_remove(fid);
+
+        // Convert the permission to table permission
+        let tracked table_perm: Table512Perm = frame4k_perm_to_table512_perm(frame_perm);
+
+        // Use PPtr to clear the table contents before deallocating the frame
+        let pptr = PPtr::<Table512>::from_addr(base.0);
+        let mut table = pptr.read(Tracked(&table_perm));
+        table.clear();
+        pptr.write(Tracked(&mut table_perm), table);
+
+        let tracked frame_perm: Frame4KPerm = table512_perm_to_frame4k_perm(table_perm);
+        proof {
+            // Restore the permission to the allocator
+            client.tracked_insert(fid, frame_perm);
+            allocator.state.clients.tracked_insert(self.cid@, client);
+            assert(self.tables.view().dom().map(|addr: SpecPAddr| allocator@.paddr_to_fid(addr))
+                == allocator.state.clients[cid].dom());
+            assert(self.view(&allocator@).contents == self.view(&old(allocator)@).contents.insert(
+                base@,
+                frame4k_to_u64_seq(&frame_perm),
+            ));
+            lemma_frame4k_to_u64_seq(&frame_perm);
+            assert(table_perm.mem_contents().value().spec_is_empty());
+            assert(frame_is_empty(&frame_perm));
+        }
+
         allocator.dealloc(Tracked(self.cid.borrow()), base);
         self.tables = Ghost(self.tables@.remove(base@));
 
         proof {
-            let cid = self.cid@;
             let s1: SpecPageTableMem = old(self).view(&old(allocator).state);
             let s2: SpecPageTableMem = self.view(&allocator.state);
 
@@ -688,121 +728,6 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
             ));
         }
     }
-}
-
-/// A single page table, which contains a fixed number of `u64` entries. The type parameter `N` is the
-/// number of entries in the table.
-#[derive(Clone, Copy)]
-pub struct Table<const N: usize> {
-    pub entries: [u64; N],
-}
-
-impl<const N: usize> Table<N> {
-    pub open spec fn view(&self) -> Seq<u64> {
-        self.entries.view()
-    }
-
-    pub open spec fn spec_index(&self, index: usize) -> u64
-        recommends
-            0 <= index < N,
-    {
-        self.view()[index as int]
-    }
-
-    pub open spec fn spec_is_empty(&self) -> bool {
-        forall|x: usize| 0 <= x < N ==> self.spec_index(x) == 0
-    }
-
-    pub fn init(&mut self)
-        ensures
-            forall|i: usize| 0 <= i < N ==> self.spec_index(i) == 0,
-    {
-        for i in 0..N
-            invariant
-                0 <= i <= N,
-                forall|j: usize| 0 <= j < i ==> self.spec_index(j) == 0,
-        {
-            let ghost old_self = *self;
-            self.entries[i] = 0;
-            assert forall|j: usize| 0 <= j < i implies self.spec_index(j) == 0 by {
-                assert(self.spec_index(j) == old_self.spec_index(j));
-            }
-        }
-    }
-
-    pub fn index(&self, index: usize) -> (res: u64)
-        requires
-            0 <= index < N,
-        ensures
-            res == self.spec_index(index),
-    {
-        self.entries[index]
-    }
-
-    pub fn set(&mut self, index: usize, value: u64)
-        requires
-            0 <= index < N,
-        ensures
-            self@ == old(self)@.update(index as int, value),
-    {
-        self.entries[index] = value;
-    }
-}
-
-/// A 4K byte page table with 512 entries.
-pub type Table512 = Table<512>;
-
-/// Permission for a 4K byte page table, which points to a `Table512`.
-pub type Table512Perm = PointsTo<Table512>;
-
-/// Convert a `Frame4KPerm` referenceto a `Table512Perm` reference. Assume safety.
-#[verifier::external_body]
-proof fn frame4k_perm_ref_to_table512_perm_ref(
-    tracked frame_perm: &Frame4KPerm,
-) -> (tracked table_perm: &Table512Perm)
-    ensures
-        table_perm.addr() == frame_perm.addr(),
-        table_perm.is_init() == frame_perm.is_init(),
-        table_perm.mem_contents().value()@ == frame4k_to_u64_seq(frame_perm),
-{
-    let tracked table_perm: Tracked<&Table512Perm> = Tracked::assume_new();
-    table_perm@
-}
-
-/// Convert a `Table512Perm` to a `Frame4KPerm`. Assume safety.
-#[verifier::external_body]
-proof fn frame4k_perm_to_table512_perm(tracked frame_perm: Frame4KPerm) -> (tracked table_perm:
-    Table512Perm)
-    ensures
-        table_perm.addr() == frame_perm.addr(),
-        table_perm.is_init() == frame_perm.is_init(),
-        table_perm.mem_contents().value()@ == frame4k_to_u64_seq(&frame_perm),
-{
-    let tracked table_perm: Tracked<Table512Perm> = Tracked::assume_new();
-    table_perm@
-}
-
-/// Convert a `Table512Perm` to a `Frame4KPerm`. Assume safety.
-#[verifier::external_body]
-proof fn table512_perm_to_frame4k_perm(tracked table_perm: Table512Perm) -> (tracked frame_perm:
-    Frame4KPerm)
-    ensures
-        frame_perm.addr() == table_perm.addr(),
-        frame_perm.is_init() == table_perm.is_init(),
-        frame4k_to_u64_seq(&frame_perm) == table_perm.mem_contents().value()@,
-{
-    let tracked frame_perm: Tracked<Frame4KPerm> = Tracked::assume_new();
-    frame_perm@
-}
-
-/// Interpret the contents of a `Frame4KPerm` as a sequence of `u64` entries.
-pub uninterp spec fn frame4k_to_u64_seq(perm: &Frame4KPerm) -> Seq<u64>;
-
-broadcast proof fn lemma_frame4k_to_u64_seq_eq(perm: &Frame4KPerm)
-    ensures
-        #[trigger] frame4k_to_u64_seq(perm).len() == 512,
-{
-    admit();
 }
 
 } // verus!
