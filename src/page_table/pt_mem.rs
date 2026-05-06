@@ -63,6 +63,10 @@ impl SpecPageTableMem {
             self.root,
             0,
         )
+        // Contains only one level 0 table.
+        &&& forall|base: SpecPAddr| #[trigger]
+            self.tables.contains_key(base) && self.tables[base] == 0 ==> base
+                == self.root
         // Table level is valid.
         &&& forall|base: SpecPAddr| #[trigger]
             self.tables.contains_key(base) ==> self.tables[base]
@@ -108,14 +112,6 @@ impl SpecPageTableMem {
         &&& self.contents[self.root] == Seq::new(self.arch.entry_count(0), |_i| 0u64)
     }
 
-    /// If a table is empty.
-    pub open spec fn is_table_empty(self, base: SpecPAddr) -> bool
-        recommends
-            self.contains_table(base),
-    {
-        self.contents[base] == Seq::new(self.contents[base].len(), |_i| 0u64)
-    }
-
     /// If accessing the given table at the given index is allowed.
     pub open spec fn accessible(self, base: SpecPAddr, index: nat) -> bool {
         self.contains_table(base) && index < self.arch.entry_count(self.tables[base])
@@ -137,7 +133,7 @@ impl SpecPageTableMem {
 
     /// Precondition for `alloc_table`.
     pub open spec fn alloc_table_pre(self, level: nat) -> bool {
-        level < self.arch.level_count()
+        0 < level < self.arch.level_count()
     }
 
     /// Specification of `alloc_table`.
@@ -502,7 +498,7 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
             old(allocator).invariants(),
             old(self).invariants(&old(allocator).state),
             !old(allocator).view().free.is_empty(),
-            level < old(self).arch.view().level_count(),
+            0 < level < old(self).arch.view().level_count(),
         ensures
             SpecPageTableMem::alloc_table_spec(
                 old(self).view(&old(allocator).state),
@@ -657,6 +653,7 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
                 index as nat,
                 value,
             ),
+            GlobalAllocatorModel::write_frame(*old(allocator), *allocator),
             self.invariants(allocator),
             allocator.wf(),
     {

@@ -160,6 +160,16 @@ impl GlobalAllocatorModel {
         &&& s2.free == s1.free
     }
 
+    /// State transition that only changes frame contents
+    pub open spec fn write_frame(s1: Self, s2: Self) -> bool {
+        &&& s2.wf() == s1.wf()
+        &&& s2.base == s1.base
+        &&& s2.free.dom() == s1.free.dom()
+        &&& s2.clients.dom() == s1.clients.dom()
+        &&& forall|cid: ClientID| #[trigger] 
+            s1.clients.contains_key(cid) ==> s2.clients[cid].dom() == s1.clients[cid].dom()
+    }
+
     /// Lemma. `alloc` preserves wf.
     pub proof fn lemma_alloc_preserves_wf(s1: Self, s2: Self, cid: ClientID, fid: FrameID)
         requires
@@ -508,6 +518,17 @@ impl<A> GlobalAllocator<A> where A: BitmapAllocator {
             assert(s2.state.clients.contains_key(cid2));
             assert(s2.state.clients[cid2].contains_key(i));
         }
+    }
+
+    pub proof fn lemma_write_frame_preserves_invariants(s1: Self, s2: Self)
+        requires
+            s1.invariants(),
+            s1.base == s2.base,
+            s1.allocator == s2.allocator,
+            GlobalAllocatorModel::write_frame(s1.state@, s2.state@),
+        ensures
+            s2.invariants(),
+    {
     }
     // /// Allocate a contiguous range of frames for a client.
     // pub fn alloc_contiguous(

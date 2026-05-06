@@ -10,7 +10,8 @@ use crate::{
         addr::{SpecPAddr, VAddr},
         frame::Frame,
     },
-    global_allocator::GlobalAllocator,
+    bitmap_allocator::bitmap_trait::BitmapAllocator,
+    global_allocator::{GlobalAllocator, GlobalAllocatorModel},
 };
 use vstd::prelude::*;
 
@@ -23,33 +24,35 @@ verus! {
 
 /// Wrap `pt::PageTable` to implement `pt_trait::PageTable` trait, which is the specification
 /// required by higher-level components.
-pub struct ExPageTable<A, E>(pub pt::PageTable<A, E>) where A: GlobalAllocator, E: PageTableEntry;
+pub struct ExPageTable<A, E>(pub pt::PageTable<A, E>) where A: BitmapAllocator, E: PageTableEntry;
 
-impl<A, E> PageTable<A> for ExPageTable<A, E> where A: GlobalAllocator, E: PageTableEntry {
-    open spec fn view(&self, allocator: &A) -> PageTableState {
+impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
+    open spec fn view(&self, allocator: &GlobalAllocatorModel) -> PageTableState {
         self.0.view(allocator).view().view()
     }
 
-    open spec fn invariants(&self, allocator: &A) -> bool {
+    open spec fn invariants(&self, allocator: &GlobalAllocatorModel) -> bool {
         self.0.invariants(allocator)
     }
 
-    fn new(allocator: &mut A, cid: usize, constants: PTConstants) -> (pt: Self) {
+    fn new(allocator: &mut GlobalAllocator<A>, constants: PTConstants) -> (pt: Self) {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
-        let pt = pt::PageTable::<A, E>::new(allocator, cid, constants);
+        let pt = pt::PageTable::<A, E>::new(allocator, constants);
         proof {
-            pt.view(allocator).construct_node_facts(pt.view(allocator).pt_mem.root, 0);
-            assert(pt.view(allocator).view().view().mappings === Map::empty());
+            pt.view(&allocator@).construct_node_facts(pt.view(&allocator@).pt_mem.root, 0);
+            assert(pt.view(&allocator@).view().view().mappings === Map::empty());
         }
         ExPageTable(pt)
     }
 
-    fn map(&mut self, allocator: &mut A, vbase: VAddr, frame: Frame) -> (res: Result<(), ()>) {
+    fn map(&mut self, allocator: &mut GlobalAllocator<A>, vbase: VAddr, frame: Frame) -> (res:
+        Result<(), ()>) {
         proof {
-            let view = self.0.view(allocator);
+            let view = self.0.view(&allocator@);
             view.lemma_wf_implies_node_wf();
             view.construct_node_facts(view.pt_mem.root, 0);
+            view.lemma_all_nonempty_above_root_implies();
             if view.is_table_empty(view.pt_mem.root) {
                 view.lemma_empty_implies_node_empty();
             } else {
@@ -60,11 +63,12 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: GlobalAllocator, E: PageT
         self.0.map(allocator, vbase, frame)
     }
 
-    fn unmap(&mut self, allocator: &mut A, vbase: VAddr) -> (res: Result<(), ()>) {
+    fn unmap(&mut self, allocator: &mut GlobalAllocator<A>, vbase: VAddr) -> (res: Result<(), ()>) {
         proof {
-            let view = self.0.view(allocator);
+            let view = self.0.view(&allocator@);
             view.lemma_wf_implies_node_wf();
             view.construct_node_facts(view.pt_mem.root, 0);
+            view.lemma_all_nonempty_above_root_implies();
             if view.is_table_empty(view.pt_mem.root) {
                 view.lemma_empty_implies_node_empty();
             } else {
@@ -75,11 +79,13 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: GlobalAllocator, E: PageT
         self.0.unmap(allocator, vbase)
     }
 
-    fn query(&self, allocator: &A, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>) {
+    fn query(&self, Tracked(allocator): Tracked<&GlobalAllocatorModel>, vaddr: VAddr) -> (res:
+        Result<(VAddr, Frame), ()>) {
         proof {
             let view = self.0.view(allocator);
             view.lemma_wf_implies_node_wf();
             view.construct_node_facts(view.pt_mem.root, 0);
+            view.lemma_all_nonempty_above_root_implies();
             if view.is_table_empty(view.pt_mem.root) {
                 view.lemma_empty_implies_node_empty();
             } else {
@@ -87,13 +93,14 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: GlobalAllocator, E: PageT
             }
             view.view().query_refinement(vaddr@);
         }
-        self.0.query(allocator, vaddr)
+        self.0.query(Tracked(allocator), vaddr)
     }
 
-    proof fn lemma_invariants_implies_wf(&self, allocator: &A) {   
+    proof fn lemma_invariants_implies_wf(&self, allocator: &GlobalAllocatorModel) {
         let view = self.0.view(allocator);
         view.lemma_wf_implies_node_wf();
         view.construct_node_facts(view.pt_mem.root, 0);
+        view.lemma_all_nonempty_above_root_implies();
         if view.is_table_empty(view.pt_mem.root) {
             view.lemma_empty_implies_node_empty();
         } else {

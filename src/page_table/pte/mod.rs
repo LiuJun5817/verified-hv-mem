@@ -157,6 +157,18 @@ pub trait PageTableEntry: Sized {
         ensures
             #[trigger] Self::spec_from_u64(val).spec_to_u64() == val,
     ;
+
+    /// `from_u64` and `to_u64` are inverses.
+    broadcast proof fn lemma_from_to_u64_inverse_alter(self)
+        requires
+            self.wf(),
+        ensures
+            #[trigger] Self::spec_from_u64(self.spec_to_u64()) == self,
+    {
+        Self::lemma_from_to_u64_inverse(self.spec_to_u64());
+        Self::lemma_from_u64_wf(self.spec_to_u64());
+        Self::lemma_eq_by_u64(Self::spec_from_u64(self.spec_to_u64()), self);
+    }
 }
 
 /// Broadcasted lemmas for GhostPTE.
@@ -168,6 +180,7 @@ pub broadcast group group_pte_lemmas {
     PageTableEntry::lemma_empty_invalid,
     PageTableEntry::lemma_eq_by_u64,
     PageTableEntry::lemma_from_to_u64_inverse,
+    PageTableEntry::lemma_from_to_u64_inverse_alter,
     PageTableEntry::lemma_new_keeps_value,
 }
 

@@ -1,6 +1,5 @@
 //! Spec-mode page table implementation. Used for refinement proofs.
 use core::marker::PhantomData;
-use std::io::Empty;
 use vstd::prelude::*;
 
 use super::{
@@ -134,12 +133,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     ||| (pte1.spec_addr() != pte2.spec_addr())
                 }
             }
-    }
-
-    /// For each table except `base`, it contains at least one valid pte.
-    pub open spec fn all_nonempty_except(self, base: SpecPAddr) -> bool {
-        forall|base2: SpecPAddr|
-            self.pt_mem.contains_table(base2) && base2 != base ==> !self.is_table_empty(base2)
     }
 
     /// All tables contain at least one valid pte.
@@ -525,6 +518,27 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             self@.root.empty(),
     {
         self.lemma_construct_node_empty(self.pt_mem.root);
+    }
+
+    /// Lemma. `all_nonempty_above(0)` implies `all_nonempty()` or `is_table_empty(root)`.
+    pub proof fn lemma_all_nonempty_above_root_implies(self)
+        requires
+            self.wf(),
+            self.all_nonempty_above(0),
+        ensures
+            self.all_nonempty() || self.is_table_empty(self.pt_mem.root),
+    {
+        if !self.is_table_empty(self.pt_mem.root) {
+            assert forall|base: SpecPAddr|
+                self.pt_mem.contains_table(base) implies !self.is_table_empty(base) by {
+                let level = self.pt_mem.level(base);
+                if level == 0 {
+                    assert(base == self.pt_mem.root);
+                } else {
+                    assert(self.pt_mem.contains_table_with_level(base, level));
+                }
+            }
+        }
     }
 
     /// Lemma. The chain returned by `collect_table_chain` is well-formed: each address
@@ -917,13 +931,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         if level < target_level {
             if pte.spec_valid() {
                 if !pte.spec_huge() {
-                    self.lemma_insert_preserves_wf(
-                        vbase,
-                        pte.spec_addr(),
-                        level + 1,
-                        target_level,
-                        new_pte,
-                    );
                     self.lemma_insert_preserves_old_tables(
                         vbase,
                         pte.spec_addr(),
@@ -1140,6 +1147,104 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         }
     }
 
+    /// Lemma. Every table in `inserted` that was not in `self` was freshly allocated
+    /// at a level strictly greater than the starting level.
+    /// Consequence: a table at the starting level in `inserted` must have been in `self`.
+    pub proof fn lemma_insert_new_table_above_level(
+        self,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
+        level: nat,
+        target_level: nat,
+        new_pte: E,
+        base2: SpecPAddr,
+    )
+        requires
+            self.wf(),
+            self.pt_mem.contains_table_with_level(base, level),
+            level <= target_level < self.constants.arch.level_count(),
+            self.pte_valid_frame(new_pte, target_level),
+            self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.contains_table(base2),
+            !self.pt_mem.contains_table(base2),
+        ensures
+            self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.level(base2) > level,
+        decreases target_level - level,
+    {
+        broadcast use crate::page_table::pte::group_pte_lemmas;
+
+        let idx = self.constants.arch.pte_index(vbase, level);
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+        assert(self.pt_mem.accessible(base, idx));
+
+        if level < target_level {
+            if pte.spec_valid() {
+                if !pte.spec_huge() {
+                    // inserted = self.insert(vbase, pte.spec_addr(), level+1, ...).0
+                    // By IH (starting level = level+1): base2 ∉ self → inserted.level(base2) > level+1 > level
+                    assert(self.pt_mem.contains_table_with_level(pte.spec_addr(), level + 1));
+                    self.lemma_insert_new_table_above_level(
+                        vbase,
+                        pte.spec_addr(),
+                        level + 1,
+                        target_level,
+                        new_pte,
+                        base2,
+                    );
+                }
+                // pte.spec_huge(): inserted == self, contradicts base2 ∉ self but base2 ∈ inserted
+
+            } else {
+                // alloc_table(level+1) creates new_base at level+1; then recurse at level+1
+                let (pt_mem2, new_base) = self.pt_mem.alloc_table(level + 1);
+                broadcast use SpecPageTableMem::alloc_table_facts;
+
+                assert(SpecPageTableMem::alloc_table_spec(
+                    self.pt_mem,
+                    pt_mem2,
+                    level + 1,
+                    new_base,
+                ));
+                let pt_mem3 = pt_mem2.write(
+                    base,
+                    idx,
+                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                );
+                let allocated = Self::new(pt_mem3, self.constants);
+                // allocated.pt_mem.tables = self.pt_mem.tables.insert(new_base, level+1)
+                self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
+                if base2 == new_base {
+                    // new_base is at level+1; inserted.pt_mem.level(new_base) = level+1 > level
+                    allocated.lemma_insert_preserves_old_tables(
+                        vbase,
+                        new_base,
+                        level + 1,
+                        target_level,
+                        new_pte,
+                        new_base,
+                    );
+                    assert(self.insert(vbase, base, level, target_level, new_pte).0.pt_mem.level(
+                        base2,
+                    ) == level + 1);
+                } else {
+                    // base2 ∉ self.pt_mem and base2 ≠ new_base → base2 ∉ allocated.pt_mem
+                    assert(!allocated.pt_mem.contains_table(base2));
+                    // By IH (starting level = level+1, base = new_base): inserted.level(base2) > level+1 > level
+                    allocated.lemma_insert_new_table_above_level(
+                        vbase,
+                        new_base,
+                        level + 1,
+                        target_level,
+                        new_pte,
+                        base2,
+                    );
+                }
+            }
+        }
+        // level == target_level: inserted.pt_mem.tables == self.pt_mem.tables (write/identity)
+        // contradicts base2 ∉ self but base2 ∈ inserted
+
+    }
+
     /// Lemma. Inserting an entry using `insert` preserves all_nonempty.
     pub proof fn lemma_insert_preserves_all_nonempty(
         self,
@@ -1151,23 +1256,21 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     )
         requires
             self.wf(),
-            self.all_nonempty_except(base),
+            self.all_nonempty_above(level),
             self.pt_mem.contains_table_with_level(base, level),
             level <= target_level < self.constants.arch.level_count(),
             self.pte_valid_frame(new_pte, target_level),
         ensures
-            self.insert(vbase, base, level, target_level, new_pte).1 is Ok ==> self.insert(
-                vbase,
-                base,
-                level,
-                target_level,
-                new_pte,
-            ).0.all_nonempty(),
+            ({
+                let (inserted, res) = self.insert(vbase, base, level, target_level, new_pte);
+                res is Ok ==> inserted.all_nonempty_above(level) && !inserted.is_table_empty(base)
+            }),
         decreases target_level - level,
     {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
         let (inserted, res) = self.insert(vbase, base, level, target_level, new_pte);
+        self.lemma_insert_preserves_wf(vbase, base, level, target_level, new_pte);
         let idx = self.constants.arch.pte_index(vbase, level);
         let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
         assert(self.pt_mem.accessible(base, idx));
@@ -1176,6 +1279,14 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             if level < target_level {
                 if pte.spec_valid() {
                     assert(!pte.spec_huge());
+                    // `inserted` is the result of recursively inserting into the next table
+                    assert(inserted == self.insert(
+                        vbase,
+                        pte.spec_addr(),
+                        level + 1,
+                        target_level,
+                        new_pte,
+                    ).0);
                     // Recursively insert into the next table
                     self.lemma_insert_preserves_all_nonempty(
                         vbase,
@@ -1184,6 +1295,131 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         target_level,
                         new_pte,
                     );
+                    assert(inserted.all_nonempty_above(level + 1));
+                    self.lemma_insert_preserves_old_tables(
+                        vbase,
+                        pte.spec_addr(),
+                        level + 1,
+                        target_level,
+                        new_pte,
+                        base,
+                    );
+                    self.lemma_insert_preserves_old_tables(
+                        vbase,
+                        pte.spec_addr(),
+                        level + 1,
+                        target_level,
+                        new_pte,
+                        pte.spec_addr(),
+                    );
+                    assert(!self.collect_table_chain(vbase, pte.spec_addr(), level + 1).contains(
+                        base,
+                    )) by {
+                        if self.collect_table_chain(vbase, pte.spec_addr(), level + 1).contains(
+                            base,
+                        ) {
+                            self.lemma_chain_level_ge(vbase, pte.spec_addr(), level + 1, base);
+                            assert(false);
+                        }
+                    };
+                    self.lemma_insert_preserves_tables_outside_chain(
+                        vbase,
+                        pte.spec_addr(),
+                        level + 1,
+                        target_level,
+                        new_pte,
+                        base,
+                    );
+
+                    // For `inserted`, all tables at `level + 1` contain at least one valid entry
+                    assert forall|base2: SpecPAddr| #[trigger]
+                        inserted.pt_mem.contains_table_with_level(
+                            base2,
+                            level + 1,
+                        ) implies !inserted.is_table_empty(base2) by {
+                        // If `base2` is the head of the chain (i.e., == pte.spec_addr()), it is
+                        // non-empty by the recursive `all_nonempty_above(level + 1)` result.
+                        // If `base2` is NOT on the chain, its contents are unchanged from `self`,
+                        // where it is already non-empty by `self.all_nonempty_above(level)`.
+                        if base2 != pte.spec_addr() {
+                            // base2 is at level+1 in `inserted`. Since insert starting at level+1
+                            // only allocates new tables at level+2 and above, any table at level+1
+                            // in `inserted` that is not newly created must have been in `self`.
+                            assert(self.pt_mem.contains_table_with_level(base2, level + 1)) by {
+                                if !self.pt_mem.contains_table(base2) {
+                                    // By lemma_insert_new_table_above_level (starting level = level+1):
+                                    // inserted.pt_mem.level(base2) > level+1. But it equals level+1. Contradiction.
+                                    self.lemma_insert_new_table_above_level(
+                                        vbase,
+                                        pte.spec_addr(),
+                                        level + 1,
+                                        target_level,
+                                        new_pte,
+                                        base2,
+                                    );
+                                    assert(false);
+                                }
+                                self.lemma_insert_preserves_old_tables(
+                                    vbase,
+                                    pte.spec_addr(),
+                                    level + 1,
+                                    target_level,
+                                    new_pte,
+                                    base2,
+                                );
+                            };
+                            // base2 is at level+1 and differs from the chain head, so it is
+                            // not in the chain starting at pte.spec_addr() at level+1.
+                            assert(!self.collect_table_chain(
+                                vbase,
+                                pte.spec_addr(),
+                                level + 1,
+                            ).contains(base2)) by {
+                                if self.collect_table_chain(
+                                    vbase,
+                                    pte.spec_addr(),
+                                    level + 1,
+                                ).contains(base2) {
+                                    self.lemma_table_at_chain_start_level_is_head(
+                                        vbase,
+                                        pte.spec_addr(),
+                                        level + 1,
+                                        base2,
+                                    );
+                                    assert(false);
+                                }
+                            };
+                            self.lemma_insert_preserves_tables_outside_chain(
+                                vbase,
+                                pte.spec_addr(),
+                                level + 1,
+                                target_level,
+                                new_pte,
+                                base2,
+                            );
+                            assert(inserted.pt_mem.contents[base2] == self.pt_mem.contents[base2]);
+                            assert(self.pt_mem.contains_table_with_level(base2, level + 1));
+                            assert(!self.is_table_empty(base2));
+                            assert(forall|idx2: nat|
+                                idx2 < self.constants.arch.entry_count(level + 1)
+                                    ==> inserted.pt_mem.read(base2, idx2) == self.pt_mem.read(
+                                    base2,
+                                    idx2,
+                                ));
+                        }
+                    }
+                    // For `inserted`, all tables higher than `level` contain at least one valid entry
+                    assert forall|base2: SpecPAddr, level2: nat| #[trigger]
+                        inserted.pt_mem.contains_table_with_level(base2, level2) && level2
+                            > level implies !inserted.is_table_empty(base2) by {
+                        if level2 > level + 1 {
+                            // level2 > level + 1, so it is non-empty by all_nonempty_above(level+1)
+                            assert(inserted.pt_mem.contains_table_with_level(base2, level2));
+                        }
+                    }
+                    assert(!inserted.is_table_empty(base)) by {
+                        assert(E::spec_from_u64(inserted.pt_mem.read(base, idx)).spec_valid());
+                    }
                 } else {
                     // Allocate intermediate table
                     let (pt_mem, new_base) = self.pt_mem.alloc_table(level + 1);
@@ -1192,59 +1428,186 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         idx,
                         E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
                     );
-                    // `s2` is the state after allocating an intermediate table
-                    let s2 = Self::new(pt_mem, self.constants);
+                    // `allocated` is the state after allocating an intermediate table
+                    let allocated = Self::new(pt_mem, self.constants);
                     self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
 
-                    // All tables except `new_base` contain at least one valid entry
-                    assert forall|base2: SpecPAddr| #[trigger]
-                        pt_mem.contains_table(base2) && base2
-                            != new_base implies !s2.is_table_empty(base2) by {
-                        if base2 == base {
-                            assert(s2.pt_mem.read(base2, idx) == E::spec_new(
+                    // For `allocated`, all tables higher than `level` except `new_base` contain at least one valid entry
+                    assert forall|base2: SpecPAddr, level2: nat| #[trigger]
+                        allocated.pt_mem.contains_table_with_level(base2, level2) && level2 > level
+                            && base2 != new_base implies !allocated.is_table_empty(base2) by {
+                        assert(self.pt_mem.contains_table_with_level(base2, level2));
+                        assert(!self.is_table_empty(base2));
+                        assert(forall|idx2: nat|
+                            idx2 < self.constants.arch.entry_count(level2)
+                                ==> allocated.pt_mem.read(base2, idx2) == self.pt_mem.read(
+                                base2,
+                                idx2,
+                            ));
+                    }
+
+                    // `inserted` is the state after recursively inserting into the next table
+                    assert(inserted == allocated.insert(
+                        vbase,
+                        new_base,
+                        level + 1,
+                        target_level,
+                        new_pte,
+                    ).0);
+                    assert(!allocated.collect_table_chain(vbase, new_base, level + 1).contains(
+                        base,
+                    )) by {
+                        if allocated.collect_table_chain(vbase, new_base, level + 1).contains(
+                            base,
+                        ) {
+                            allocated.lemma_table_at_chain_start_level_is_head(
+                                vbase,
                                 new_base,
-                                MemAttr::spec_default(),
-                                false,
-                            ).spec_to_u64());
-                        } else {
-                            assert(self.pt_mem.contains_table(base2));
+                                level + 1,
+                                base,
+                            );
+                            assert(false);
+                        }
+                    };
+                    allocated.lemma_insert_preserves_tables_outside_chain(
+                        vbase,
+                        new_base,
+                        level + 1,
+                        target_level,
+                        new_pte,
+                        base,
+                    );
+
+                    // `allocated.all_nonempty_above(level + 1)` holds trivially because
+                    // `new_base` is the only table at level+1 in `allocated`, and it is empty
+                    // (no entry has yet been written). But we only need `all_nonempty_above(level+1)`
+                    // for tables ABOVE level+1 (i.e., level2 > level+1), which are all from `self`.
+                    assert(allocated.all_nonempty_above(level + 1)) by {
+                        assert forall|base2: SpecPAddr, level2: nat|
+                            allocated.pt_mem.contains_table_with_level(base2, level2) && level2
+                                > level + 1 implies !allocated.is_table_empty(base2) by {
+                            assert(self.pt_mem.contains_table_with_level(base2, level2));
                             assert(!self.is_table_empty(base2));
                             assert(forall|idx2: nat|
-                                idx2 < self.constants.arch.entry_count(self.pt_mem.level(base2))
-                                    ==> s2.pt_mem.read(base2, idx2) == self.pt_mem.read(
+                                idx2 < self.constants.arch.entry_count(level2)
+                                    ==> allocated.pt_mem.read(base2, idx2) == self.pt_mem.read(
                                     base2,
                                     idx2,
                                 ));
                         }
                     }
-                    s2.lemma_insert_preserves_all_nonempty(
+                    allocated.lemma_insert_preserves_all_nonempty(
                         vbase,
                         new_base,
                         level + 1,
                         target_level,
                         new_pte,
                     );
+                    assert(inserted.all_nonempty_above(level + 1));
+                    // For `inserted`, all tables at `level + 1` contain at least one valid entry
+                    assert forall|base2: SpecPAddr| #[trigger]
+                        inserted.pt_mem.contains_table_with_level(
+                            base2,
+                            level + 1,
+                        ) implies !inserted.is_table_empty(base2) by {
+                        // `new_base` is the chain head — it receives an inserted entry so is non-empty.
+                        // Every other table at level+1 is not on the chain; its contents are
+                        // unchanged from `allocated` (hence from `self`), where it is non-empty.
+                        if base2 != new_base {
+                            // base2 is at level+1 in `inserted`. Insert starting at level+1 only
+                            // allocates new tables at level+2 and above. So base2 must have been
+                            // in `allocated.pt_mem` (which contains all of `self.pt_mem` plus new_base).
+                            assert(allocated.pt_mem.contains_table_with_level(base2, level + 1))
+                                by {
+                                if !allocated.pt_mem.contains_table(base2) {
+                                    // By lemma_insert_new_table_above_level (starting level = level+1):
+                                    // inserted.pt_mem.level(base2) > level+1. But it equals level+1. Contradiction.
+                                    allocated.lemma_insert_new_table_above_level(
+                                        vbase,
+                                        new_base,
+                                        level + 1,
+                                        target_level,
+                                        new_pte,
+                                        base2,
+                                    );
+                                    assert(false);
+                                }
+                                allocated.lemma_insert_preserves_old_tables(
+                                    vbase,
+                                    new_base,
+                                    level + 1,
+                                    target_level,
+                                    new_pte,
+                                    base2,
+                                );
+                            };
+                            // base2 != chain head => not in the chain
+                            assert(!allocated.collect_table_chain(
+                                vbase,
+                                new_base,
+                                level + 1,
+                            ).contains(base2)) by {
+                                if allocated.collect_table_chain(
+                                    vbase,
+                                    new_base,
+                                    level + 1,
+                                ).contains(base2) {
+                                    allocated.lemma_table_at_chain_start_level_is_head(
+                                        vbase,
+                                        new_base,
+                                        level + 1,
+                                        base2,
+                                    );
+                                    assert(false);
+                                }
+                            };
+                            allocated.lemma_insert_preserves_tables_outside_chain(
+                                vbase,
+                                new_base,
+                                level + 1,
+                                target_level,
+                                new_pte,
+                                base2,
+                            );
+                            assert(inserted.pt_mem.contents[base2]
+                                == allocated.pt_mem.contents[base2]);
+                            assert(allocated.pt_mem.contains_table_with_level(base2, level + 1));
+                            assert(!allocated.is_table_empty(base2));
+                            assert(forall|idx2: nat|
+                                idx2 < self.constants.arch.entry_count(level + 1)
+                                    ==> inserted.pt_mem.read(base2, idx2) == allocated.pt_mem.read(
+                                    base2,
+                                    idx2,
+                                ));
+                        }
+                    }
+                    // For `inserted`, all tables higher than `level` contain at least one valid entry
+                    assert forall|base2: SpecPAddr, level2: nat| #[trigger]
+                        inserted.pt_mem.contains_table_with_level(base2, level2) && level2
+                            > level implies !inserted.is_table_empty(base2) by {
+                        if level2 > level + 1 {
+                            // level2 > level + 1, so it is non-empty by all_nonempty_above(level+1)
+                            assert(inserted.pt_mem.contains_table_with_level(base2, level2));
+                        }
+                    }
+                    assert(!inserted.is_table_empty(base)) by {
+                        assert(E::spec_from_u64(inserted.pt_mem.read(base, idx)).spec_valid());
+                    }
                 }
             } else {
                 assert(inserted.pt_mem == self.pt_mem.write(base, idx, new_pte.spec_to_u64()));
                 // Inserting the new entry makes the table all_nonempty
-                assert forall|base2: SpecPAddr|
-                    inserted.pt_mem.contains_table(base2) implies !inserted.is_table_empty(
-                    base2,
-                ) by {
-                    if base2 == base {
-                        assert(inserted.pt_mem.read(base2, idx) == new_pte.spec_to_u64());
-                        E::lemma_from_to_u64_inverse(inserted.pt_mem.read(base2, idx));
-                    } else {
-                        assert(self.pt_mem.contains_table(base2));
-                        assert(!self.is_table_empty(base2));
-                        assert(forall|idx2: nat|
-                            idx2 < self.constants.arch.entry_count(self.pt_mem.level(base2))
-                                ==> inserted.pt_mem.read(base2, idx2) == self.pt_mem.read(
-                                base2,
-                                idx2,
-                            ));
-                    }
+                assert forall|base2: SpecPAddr, level2: nat| #[trigger]
+                    inserted.pt_mem.contains_table_with_level(base2, level2) && level2
+                        > level implies !inserted.is_table_empty(base2) by {
+                    assert(self.pt_mem.contains_table_with_level(base2, level2));
+                    assert(!self.is_table_empty(base2));
+                    assert(forall|idx2: nat|
+                        idx2 < self.constants.arch.entry_count(self.pt_mem.level(base2))
+                            ==> inserted.pt_mem.read(base2, idx2) == self.pt_mem.read(base2, idx2));
+                }
+                assert(!inserted.is_table_empty(base)) by {
+                    assert(E::spec_from_u64(inserted.pt_mem.read(base, idx)).spec_valid());
                 }
             }
         }
@@ -2222,7 +2585,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 if pte.spec_huge() {
                     if vbase.aligned(self.constants.arch.frame_size(level).as_nat()) {
                         PTTreePath::lemma_from_vaddr_step(vbase, arch, level, end);
-                        lemma_aligned_implies_remain_zero(vbase, arch, level, end);
+                        PTTreePath::lemma_aligned_implies_remain_zero(vbase, arch, level, end);
                         assert(remain.is_zero());
                         // Update frame entry to empty
                         assert(s2.pt_mem == self.pt_mem.write(
@@ -2271,7 +2634,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         assert(!remain.is_zero()) by {
                             if remain.is_zero() {
                                 PTTreePath::lemma_from_vaddr_step(vbase, arch, level, end);
-                                lemma_remain_zero_implies_aligned(vbase, arch, level, end);
+                                PTTreePath::lemma_remain_zero_implies_aligned(vbase, arch, level, end);
                                 assert(vbase.aligned(
                                     self.constants.arch.frame_size(level).as_nat(),
                                 ));
@@ -2937,26 +3300,17 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         idx,
                         E::spec_empty().spec_to_u64(),
                     ));
-                    assert(forall|base2: SpecPAddr| #[trigger]
-                        removed.pt_mem.contains_table(base2) && base2 != base
-                            ==> removed.pt_mem.contents[base2] == self.pt_mem.contents[base2]);
-                    assert forall|base2: SpecPAddr|
-                        removed.pt_mem.contains_table(base2) && base2
-                            != base implies removed.is_table_empty(base2) == self.is_table_empty(
-                        base2,
-                    ) by {
+                    assert forall|base2: SpecPAddr, level2: nat|
+                        removed.pt_mem.contains_table_with_level(base2, level2) && level2
+                            > level implies !removed.is_table_empty(base2) by {
+                        assert(self.pt_mem.contains_table_with_level(base2, level2));
+                        assert(!self.is_table_empty(base2));
                         assert(forall|idx2: nat|
                             idx2 < self.constants.arch.entry_count(self.pt_mem.level(base2))
                                 ==> removed.pt_mem.read(base2, idx2) == self.pt_mem.read(
                                 base2,
                                 idx2,
                             ));
-                    }
-                    assert forall|base2: SpecPAddr, level2: nat|
-                        removed.pt_mem.contains_table_with_level(base2, level2) && level2
-                            > level implies !removed.is_table_empty(base2) by {
-                        assert(base2 != base);
-                        assert(self.pt_mem.contains_table_with_level(base2, level2));
                     }
                     assert(pruned == removed);
                     assert(pruned.all_nonempty_above(level));
@@ -2983,15 +3337,10 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         base,
                     );
                     assert(removed.pt_mem.contents[base] == self.pt_mem.contents[base]);
-                    let pte2 = E::spec_from_u64(removed.pt_mem.read(base, idx));
-                    assert(pte2 == pte);
-                    assert(pte2.spec_valid() && !pte2.spec_huge() && level
-                        < self.constants.arch.level_count() - 1);
 
+                    // `sub_pruned` is the result of pruning the child table
                     let sub_pruned = removed.prune(vbase, pte.spec_addr(), level + 1);
                     removed.lemma_prune_preserves_wf(vbase, pte.spec_addr(), level + 1);
-                    assert(sub_pruned.wf());
-
                     removed.lemma_prune_preserves_lower_tables(
                         vbase,
                         pte.spec_addr(),
@@ -3006,23 +3355,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     );
                     assert(sub_pruned.pt_mem.contains_table(base));
                     assert(sub_pruned.pt_mem.contains_table(pte.spec_addr()));
-                    assert(pte.spec_addr() != sub_pruned.pt_mem.root);
-                    assert(pte.spec_addr() != base);
-                    // sub_pruned.pt_mem.contains_table(base) and base != pte.spec_addr(), so accessible is preserved
-                    assert(sub_pruned.pt_mem.accessible(base, idx));
-                    broadcast use SpecPageTableMem::dealloc_table_facts;
-
-                    assert(sub_pruned.pt_mem.dealloc_table(pte.spec_addr()).accessible(base, idx))
-                        by {
-                        SpecPageTableMem::lemma_dealloc_table_preserves_accessibility(
-                            sub_pruned.pt_mem,
-                            sub_pruned.pt_mem.dealloc_table(pte.spec_addr()),
-                            pte.spec_addr(),
-                            base,
-                            idx,
-                        );
-                    };
-
                     self.lemma_prune_after_remove_preserves_all_nonempty(
                         vbase,
                         pte.spec_addr(),
@@ -3030,18 +3362,20 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     );
                     assert(sub_pruned.all_nonempty_above(level + 1));
 
-                    assert(removed.constants == self.constants);
-
-                    if sub_pruned.is_table_empty(pte2.spec_addr()) {
+                    if sub_pruned.is_table_empty(pte.spec_addr()) {
+                        // If the child table becomes empty after prune, it will be deallocated
                         assert(pruned.pt_mem == sub_pruned.pt_mem.dealloc_table(
-                            pte2.spec_addr(),
+                            pte.spec_addr(),
                         ).write(base, idx, E::spec_empty().spec_to_u64()));
                     } else {
+                        // Otherwise the child table is preserved after prune, so pruned == sub_pruned
                         assert(pruned == sub_pruned);
                     }
+
+                    // For `pruned`, all tables at level+1 are non-empty
                     assert forall|base2: SpecPAddr|
                         pruned.pt_mem.contains_table_with_level(base2, level + 1) && base2
-                            != pte2.spec_addr() implies !pruned.is_table_empty(base2) by {
+                            != pte.spec_addr() implies !pruned.is_table_empty(base2) by {
                         // base2 is in sub_pruned (since pruned = sub_pruned.dealloc(pte2).write and base2 != pte2)
                         assert(sub_pruned.pt_mem.contains_table_with_level(base2, level + 1));
                         // base2 is in removed (prune can only remove tables)
@@ -3115,6 +3449,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         assert(self.pt_mem.contains_table_with_level(base2, level + 1));
                         assert(!self.is_table_empty(base2));
                     }
+                    // For `pruned`, all tables higher than level+1 are non-empty
                     assert forall|base2: SpecPAddr, level2: nat|
                         pruned.pt_mem.contains_table_with_level(base2, level2) && level2
                             > level implies !pruned.is_table_empty(base2) by {
