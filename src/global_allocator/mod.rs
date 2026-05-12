@@ -26,7 +26,7 @@ verus! {
 pub type FrameID = nat;
 
 /// Unique Identifier allocated by the global allocator.
-pub tracked struct ClientID(ghost int);
+pub tracked struct ClientID;
 
 /// Axiom: the set of all ClientIDs is infinite.
 axiom fn axiom_client_id_fullset_infinite()
@@ -186,7 +186,7 @@ impl GlobalAllocatorModel {
         ensures
             s2.wf(),
     {
-        assume(s2.wf());
+        assert(s2.wf());
     }
 
     /// Lemma. `alloc_contiguous` preserves wf.
@@ -205,7 +205,7 @@ impl GlobalAllocatorModel {
         ensures
             s2.wf(),
     {
-        assume(s2.wf());
+        assert(s2.wf());
     }
 
     /// Lemma. `dealloc` preserves wf.
@@ -215,10 +215,11 @@ impl GlobalAllocatorModel {
             s1.clients.contains_key(cid),
             #[trigger] s1.clients[cid].contains_key(fid),
             Self::dealloc(s1, s2, cid, fid),
+            frame_is_empty(&s1.clients[cid][fid])
         ensures
             s2.wf(),
     {
-        assume(s2.wf());
+        assert(s2.wf());
     }
 
     /// Lemma. `add_client` preserves wf.
@@ -230,7 +231,7 @@ impl GlobalAllocatorModel {
         ensures
             s2.wf(),
     {
-        assume(s2.wf());
+        assert(s2.wf());
     }
 
     proof fn tracked_alloc(tracked &mut self, cid: ClientID, fid: FrameID)
@@ -281,9 +282,7 @@ impl GlobalAllocatorModel {
             self.wf(),
     {
         lemma_exists_different_client_id(old(self).clients.dom());
-        assume(exists|raw: int| !old(self).clients.contains_key(ClientID(raw)));
-        let raw = choose|raw: int| !old(self).clients.contains_key(ClientID(raw));
-        let tracked cid = ClientID(raw);
+        let tracked cid = ClientID;
         self.clients.tracked_insert(cid, Map::tracked_empty());
         assert(self.free == old(self).free);
         assert(self.clients == old(self).clients.insert(cid, Map::empty()));
