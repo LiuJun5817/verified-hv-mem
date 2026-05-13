@@ -1,9 +1,9 @@
-use vstd::prelude::*;
+use core::marker::PhantomData;
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::atomic_ghost::*;
-use vstd::multiset::*;
-use core::marker::PhantomData;
 use vstd::invariant::InvariantPredicate;
+use vstd::multiset::*;
+use vstd::prelude::*;
 
 tokenized_state_machine! {
 
@@ -113,11 +113,13 @@ MutexToks<K, V, Pred: InvariantPredicate<K, V>> {
 verus! {
 
 type MutexInstance<K, V, Pred> = MutexToks::Instance<K, V, Pred>;
+
 type MutexLockedToken<K, V, Pred> = MutexToks::locked<K, V, Pred>;
+
 type MutexOwnerToken<K, V, Pred> = MutexToks::owner<K, V, Pred>;
 
 struct_with_invariants! {
-    /// A mutex protecting an object of type `V` with invariant `Pred`. 
+    /// A mutex protecting an object of type `V` with invariant `Pred`.
     /// The mutex is identified by a key of type `K`.
     pub struct Mutex<K, V, Pred: InvariantPredicate<K, V>> {
         pub locked: AtomicBool<_, MutexLockedToken<K, V, Pred>, _>,
@@ -209,7 +211,8 @@ impl<K, V, Pred: InvariantPredicate<K, V>> Mutex<K, V, Pred> {
             let tracked mut owner_opt: Option<MutexOwnerToken<K, V, Pred>> = None;
             let tracked mut val_opt: Option<V> = None;
 
-            let result = atomic_with_ghost!(
+            let result =
+                atomic_with_ghost!(
                 &self.locked => compare_exchange(false, true);
                 returning res;
                 ghost g => {
@@ -237,10 +240,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> Mutex<K, V, Pred> {
                     Some(t) => t,
                     None => proof_from_false(),
                 };
-                return MutexGuard {
-                    handle: Tracked(owner),
-                    token: Tracked(val),
-                };
+                return MutexGuard { handle: Tracked(owner), token: Tracked(val) };
             }
         }
     }
