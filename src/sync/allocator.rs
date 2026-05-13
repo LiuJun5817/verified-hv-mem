@@ -7,8 +7,12 @@
 //! invariants (`inv_free_clients_disjoint` and `inv_clients_disjoint`) then
 //! guarantee, at the type level, that no two clients ever hold the same frame.
 use super::mutex::{Mutex, MutexGuard};
+use crate::address::addr::{PAddr, SpecPAddr};
+use crate::address::frame::Frame;
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
-use crate::global_allocator::{lemma_exists_different_client_id, ClientID, Frame4KPerm, FrameID};
+use crate::global_allocator::{
+    frame_is_empty, lemma_exists_different_client_id, ClientID, Frame4KPerm, FrameID,
+};
 use core::marker::PhantomData;
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::cell::{CellId, PCell, PointsTo};
@@ -17,9 +21,21 @@ use vstd::prelude::*;
 
 verus! {
 
+/// Frame Size: 4 KiB (4096 bytes).
+pub const FRAME_SIZE: usize = 4096;
+/// Frame size in spec mode.
+pub spec const SPEC_FRAME_SIZE: nat = 4096;
+
+/// Abstract function binding allocator instance id to its base address.
+pub uninterp spec fn inst_base(inst_id: InstanceId) -> SpecPAddr;
+
 tokenized_state_machine! {
     AllocSpec {
         fields {
+            /// The upper bound of FrameID
+            #[sharding(constant)]
+            pub cap: FrameID,
+
             /// The set of free (unallocated) frame IDs.
             /// Held as a single token by the ConcurrentAllocator.
             #[sharding(variable)]
@@ -39,6 +55,15 @@ tokenized_state_machine! {
 
         // ── Invariants ────────────────────────────────────────────────────────
 
+        /// Every frame ID is within the capacity bound.
+        #[invariant]
+        pub fn inv_cap(&self) -> bool {
+            &&& forall |fid: FrameID| #![auto]
+                    self.free_set.contains(fid) ==> fid < self.cap
+            &&& forall |cid: ClientID| #![auto] self.client_sets.contains_key(cid)
+                ==> forall |fid: FrameID| #![auto] self.client_sets[cid].contains(fid) ==> fid < self.cap
+        }
+    
         /// Every frame owned by a client is absent from the free set.
         #[invariant]
         pub fn inv_free_clients_disjoint(&self) -> bool {
@@ -73,10 +98,20 @@ tokenized_state_machine! {
                 };
             }
         }
+
+        /// If a client contains `fid`, then `fid` is within the capacity bound.
+        property! {
+            client_fid_within_cap(cid: ClientID, client: Set<FrameID>) {
+                have client_sets >= [cid => client];
+                assert(forall|fid: FrameID| #[trigger] client.contains(fid) ==> fid < pre.cap);
+            }
+        }
+
         // ── Initialization ───────────────────────────────────────────────────
 
         init! {
-            initialize() {
+            initialize(cap: FrameID) {
+                init cap         = cap;
                 init free_set    = Set::empty();
                 init registered  = Set::empty();
                 init client_sets = Map::empty();
@@ -84,19 +119,6 @@ tokenized_state_machine! {
         }
 
         // ── Transitions ──────────────────────────────────────────────────────
-
-        /// Add a single frame to the free pool (called during allocator setup).
-        /// Setup is defined as the phase before any client has been registered:
-        /// `require(pre.registered.is_empty())` encodes this. Combined with
-        /// `inv_registered`, this means `client_sets` is also empty, so
-        /// `inv_free_clients_disjoint` is vacuously satisfied after the update.
-        transition! {
-            add_free_frame(fid: FrameID) {
-                require(pre.registered.is_empty());
-                require(!pre.free_set.contains(fid));
-                update free_set = pre.free_set.insert(fid);
-            }
-        }
 
         /// Register a new client.
         /// `require(!pre.registered.contains(cid))` gives the ISC proof for the
@@ -137,25 +159,7 @@ tokenized_state_machine! {
         // or moves a frame in exactly the direction that preserves disjointness.
 
         #[inductive(initialize)]
-        fn initialize_inductive(post: Self) {}
-
-        #[inductive(add_free_frame)]
-        fn add_free_frame_inductive(pre: Self, post: Self, fid: FrameID) {
-            // add_free_frame only updates free_set; client_sets is unchanged.
-            // The TSM doesn't automatically expose this equality for map-sharded fields,
-            // so we state it as a targeted assumption.
-            assert(pre.client_sets =~= post.client_sets);
-            // pre.registered.is_empty() (transition require) + inv_registered =>
-            // no cid exists in pre.client_sets => post.client_sets is empty =>
-            // inv_free_clients_disjoint and inv_clients_disjoint are vacuously true.
-            assert forall |cid: ClientID| #[trigger] post.client_sets.contains_key(cid)
-                implies post.client_sets[cid].disjoint(post.free_set)
-            by {
-                assert(pre.inv_registered());
-                assert(!pre.registered.contains(cid));  // registered is empty
-                assert(!pre.client_sets.contains_key(cid)); // via inv_registered
-            }
-        }
+        fn initialize_inductive(post: Self, cap: FrameID) {}
 
         #[inductive(register_client)]
         fn register_client_inductive(pre: Self, post: Self, cid: ClientID) {
@@ -328,8 +332,8 @@ tokenized_state_machine! {
         }
     }
 }
-
 // ── Type aliases ──────────────────────────────────────────────────────────────
+
 pub type AllocInstance = AllocSpec::Instance;
 
 pub type FreeSetToken = AllocSpec::free_set;
@@ -354,36 +358,13 @@ impl AllocatorState {
     pub open spec fn wf(&self) -> bool {
         &&& self.free_tok.instance_id() == self.inst.id()
         &&& self.reg_tok.instance_id() == self.inst.id()
-        &&& self.free_tok.value() == self.free_perms.dom()
         &&& self.reg_tok.value().finite()
-    }
-
-    /// Create a fresh, empty allocator (no frames yet, no clients yet).
-    pub proof fn new() -> (tracked res: AllocatorState)
-        ensures
-            res.wf(),
-            res.free_tok.value() =~= Set::empty(),
-    {
-        let tracked (Tracked(inst), Tracked(free_tok), Tracked(reg_tok), _) =
-            AllocSpec::Instance::initialize();
-        AllocatorState { inst, free_tok, reg_tok, free_perms: Map::tracked_empty() }
-    }
-
-    /// Add one physical frame to the free pool.
-    /// Must be called during setup, before any client is registered.
-    pub proof fn add_frame(tracked &mut self, fid: FrameID, tracked perm: Frame4KPerm)
-        requires
-            old(self).wf(),
-            old(self).reg_tok.value().is_empty(),
-            !old(self).free_tok.value().contains(fid),
-        ensures
-            self.wf(),
-            self.free_tok.value() =~= old(self).free_tok.value().insert(fid),
-            self.inst.id() == old(self).inst.id(),
-            self.reg_tok.value() =~= old(self).reg_tok.value(),
-    {
-        self.inst.add_free_frame(fid, &mut self.free_tok, &self.reg_tok);
-        self.free_perms.tracked_insert(fid, perm);
+        &&& self.free_tok.value() == self.free_perms.dom()
+        &&& forall|fid: FrameID| #[trigger]
+            self.free_perms.contains_key(fid) ==> frame_is_empty(&self.free_perms[fid])
+        &&& forall|fid: FrameID| #[trigger]
+            self.free_perms.contains_key(fid) ==> self.free_perms[fid].is_init() && inst_base(self.inst.id()).0 + fid * SPEC_FRAME_SIZE
+                == self.free_perms[fid].addr()
     }
 
     /// Register a new client and return its initial (empty) token.
@@ -395,6 +376,7 @@ impl AllocatorState {
         ensures
             self.wf(),
             self.inst.id() == old(self).inst.id(),
+            self.inst.cap() == old(self).inst.cap(),
             self.free_tok.value() =~= old(self).free_tok.value(),
             ct.instance_id() == self.inst.id(),
             ct.key() == cid,
@@ -411,23 +393,29 @@ impl AllocatorState {
         tracked &mut self,
         tracked client: ClientState,
         fid: FrameID,
-        inst_id: Ghost<InstanceId>,
     ) -> (tracked new_client: ClientState)
         requires
             old(self).wf(),
-            client.wf(inst_id@),
-            inst_id@ == old(self).inst.id(),
+            client.wf(old(self).inst.id()),
             old(self).free_tok.value().contains(fid),
         ensures
             self.wf(),
             self.inst.id() == old(self).inst.id(),
+            self.inst.cap() == old(self).inst.cap(),
             self.free_tok.value() =~= old(self).free_tok.value().remove(fid),
-            new_client.wf(inst_id@),
+            new_client.wf(old(self).inst.id()),
+            !client.owns(fid),
             new_client.owns(fid),
+            new_client.owned_frames() =~= client.owned_frames().insert(fid),
+            forall|fid| #[trigger] client.frame_perms.contains_key(fid) ==> new_client.frame_perms[fid] == client.frame_perms[fid],
+            frame_is_empty(&new_client.frame_perms[fid]),
             new_client.client_tok.key() == client.client_tok.key(),
     {
         let tracked ClientState { client_tok, frame_perms: mut perms } = client;
         let cid = client_tok.key();
+        self.inst.free_client_disjoint(cid, client_tok.value(), &self.free_tok, &client_tok);
+        assert(!client_tok.value().contains(fid));
+        
         let tracked new_ct = self.inst.alloc(cid, fid, &mut self.free_tok, client_tok);
         let tracked perm = self.free_perms.tracked_remove(fid);
         perms.tracked_insert(fid, perm);
@@ -440,31 +428,32 @@ impl AllocatorState {
         tracked &mut self,
         tracked client: ClientState,
         fid: FrameID,
-        inst_id: Ghost<InstanceId>,
     ) -> (tracked new_client: ClientState)
         requires
             old(self).wf(),
-            client.wf(inst_id@),
-            inst_id@ == old(self).inst.id(),
+            client.wf(old(self).inst.id()),
             client.owns(fid),
+            frame_is_empty(&client.frame_perms[fid]),
         ensures
             self.wf(),
             self.inst.id() == old(self).inst.id(),
+            self.inst.cap() == old(self).inst.cap(),
             self.free_tok.value() =~= old(self).free_tok.value().insert(fid),
-            new_client.wf(inst_id@),
+            new_client.wf(old(self).inst.id()),
             !new_client.owns(fid),
+            new_client.owned_frames() =~= client.owned_frames().remove(fid),
             new_client.client_tok.key() == client.client_tok.key(),
     {
         let tracked ClientState { client_tok, frame_perms: mut perms } = client;
         let tracked perm = perms.tracked_remove(fid);
         let cid = client_tok.key();
         self.free_perms.tracked_insert(fid, perm);
+        
         let tracked new_ct = self.inst.dealloc(cid, fid, &mut self.free_tok, client_tok);
         ClientState { client_tok: new_ct, frame_perms: perms }
     }
 }
 
-// ── Client-side ghost state ───────────────────────────────────────────────────
 /// Ghost state held by a registered client.
 ///
 /// Core invariant: `client_tok.value() == frame_perms.dom()`.
@@ -476,14 +465,33 @@ pub tracked struct ClientState {
 }
 
 impl ClientState {
+    /// Core invariant: the client token and frame permissions are consistent with the allocator instance.
     pub open spec fn wf(&self, inst_id: InstanceId) -> bool {
         &&& self.client_tok.instance_id() == inst_id
         &&& self.client_tok.value() == self.frame_perms.dom()
+        &&& forall|fid: FrameID| #[trigger]
+            self.frame_perms.contains_key(fid) ==> self.frame_perms[fid].is_init()
+                && inst_base(inst_id).0 + fid * SPEC_FRAME_SIZE == self.frame_perms[fid].addr()
+    }
+
+    /// The instance ID of the allocator this client is registered with.
+    pub open spec fn inst_id(&self) -> InstanceId {
+        self.client_tok.instance_id()
+    }
+
+    /// The client's `ClientID` (key in the `AllocSpec` map sharding).
+    pub open spec fn cid(&self) -> ClientID {
+        self.client_tok.key()
     }
 
     /// The client exclusively owns `fid`.
     pub open spec fn owns(&self, fid: FrameID) -> bool {
         self.client_tok.value().contains(fid)
+    }
+
+    /// The set of frame IDs currently owned by this client.
+    pub open spec fn owned_frames(&self) -> Set<FrameID> {
+        self.client_tok.value()
     }
 
     /// Wrap a freshly-registered (empty) client token.
@@ -516,7 +524,6 @@ impl ClientState {
 // ============================================================================
 // Exec-level implementation
 // ============================================================================
-
 // ── Tracked mutex content ─────────────────────────────────────────────────────
 /// The tracked value stored inside the Mutex.
 ///
@@ -544,21 +551,28 @@ pub struct AllocMutexPred<A: BitmapAllocator>(PhantomData<A>);
 impl<A: BitmapAllocator> InvariantPredicate<AllocKey, MutexContent<A>> for AllocMutexPred<A> {
     open spec fn inv(k: AllocKey, v: MutexContent<A>) -> bool {
         &&& v.allocator_state.wf()
+        // AllocSpec instance matches key
         &&& v.allocator_state.inst.id()
-            == k.inst_id  // AllocSpec instance matches key
-        &&& v.bitmap_perm.is_init()  // bitmap is initialized in cell
-        &&& v.bitmap_perm.value().wf()  // the stored bitmap is well-formed
+            == k.inst_id
+        // Capacity matches bitmap size
+        &&& v.allocator_state.inst.cap() == A::spec_cap()
+        // bitmap is initialized in cell
+        &&& v.bitmap_perm.is_init()
+        // the stored bitmap is well-formed
+        &&& v.bitmap_perm.value().wf()
+        // bitmap_perm belongs to ConcurrentAllocator::bitmap
         &&& v.bitmap_perm@.pcell
-            === k.cell_id  // bitmap_perm belongs to ConcurrentAllocator::bitmap
-        &&& forall|i| 0 <= i < A::spec_cap() ==>
-            v.allocator_state.free_tok.value().contains(i as nat)
-                == v.bitmap_perm.value()@[i]  // bitmap matches free_tok
+            === k.cell_id
+        // bitmap matches free_tok
+        &&& forall|i|
+            0 <= i < A::spec_cap() ==> v.allocator_state.free_tok.value().contains(i as nat)
+                == v.bitmap_perm.value()@[i] 
     }
 }
 
 /// A concurrent global frame allocator implementation using a bitmap allocator and a spinlock
 /// mutex for synchronization.
-/// 
+///
 /// The state is split into two parts:
 ///
 ///   Mutex<AllocKey, MutexContent<A>, AllocMutexPred>
@@ -587,6 +601,8 @@ impl<A: BitmapAllocator> InvariantPredicate<AllocKey, MutexContent<A>> for Alloc
 ///                           unlock ────────┘
 /// ```
 pub struct ConcurrentAllocator<A: BitmapAllocator> {
+    /// Base address of the managed physical memory region.
+    pub base: PAddr,
     /// Spinlock: protects `MutexContent<A>` (ghost state + PCell permission).
     pub mutex: Mutex<AllocKey, MutexContent<A>, AllocMutexPred<A>>,
     /// Exec bitmap — write-accessed only while `mutex` is held.
@@ -594,24 +610,64 @@ pub struct ConcurrentAllocator<A: BitmapAllocator> {
 }
 
 impl<A: BitmapAllocator> ConcurrentAllocator<A> {
+    /// Specification helper to calculate the frame ID from a physical address.
+    pub open spec fn paddr_to_fid_spec(&self, addr: SpecPAddr) -> FrameID {
+        (addr.0 - self.base@.0) as nat / SPEC_FRAME_SIZE
+    }
+
+    /// Specification helper to calculate the physical address from a frame ID.
+    pub open spec fn fid_to_paddr_spec(&self, fid: FrameID) -> SpecPAddr {
+        SpecPAddr(self.base@.0 + fid * SPEC_FRAME_SIZE)
+    }
+
     pub open spec fn inst_id(&self) -> InstanceId {
         self.mutex.k@.inst_id
     }
 
     pub open spec fn wf(&self) -> bool {
         &&& A::cascade_not_overflow()
+        &&& self.base@.aligned(SPEC_FRAME_SIZE)
+        // Link exec base to spec base associated with the AllocSpec instance
+        &&& inst_base(self.inst_id()) == self.base@
+        &&& self.base.0 + (A::spec_cap() * FRAME_SIZE) <= usize::MAX
         &&& self.mutex.wf()
         // bitmap_perm in the mutex always belongs to self.bitmap
-        &&& self.bitmap.id()
-            === self.mutex.k@.cell_id  
+        &&& self.bitmap.id() === self.mutex.k@.cell_id
+    }
+
+    /// Calculate the frame ID from a physical address.
+    pub fn paddr_to_fid(&self, addr: PAddr) -> (res: usize)
+        requires
+            self.base@.aligned(SPEC_FRAME_SIZE),
+            addr@.aligned(SPEC_FRAME_SIZE),
+            addr@.0 >= self.base@.0,
+        ensures
+            res as nat == self.paddr_to_fid_spec(addr@),
+    {
+        (addr.0 - self.base.0) / FRAME_SIZE
+    }
+
+    /// Calculate the physical address from a frame ID.
+    pub fn fid_to_paddr(&self, fid: usize) -> (res: PAddr)
+        by (nonlinear_arith)
+        requires
+            self.base@.aligned(SPEC_FRAME_SIZE),
+            self.base.0 + fid * FRAME_SIZE <= usize::MAX,
+        ensures
+            res@ == self.fid_to_paddr_spec(fid as nat),
+            res@.aligned(SPEC_FRAME_SIZE),
+            res.0 == self.base.0 + fid * FRAME_SIZE,
+    {
+        PAddr(self.base.0 + fid * FRAME_SIZE)
     }
 
     /// Register a new client (acquires the lock briefly).
-    pub fn register_client(&self) -> (client: Client)
+    pub fn register_client(&self) -> (client: Tracked<ClientState>)
         requires
             self.wf(),
         ensures
             client.wf(self.inst_id()),
+            client.owned_frames() =~= Set::empty(),
     {
         // ── lock ──────────────────────────────────────────────────────────────
         let guard = self.mutex.lock();
@@ -625,16 +681,12 @@ impl<A: BitmapAllocator> ConcurrentAllocator<A> {
             lemma_exists_different_client_id(content.allocator_state.reg_tok.value());
             assert(!content.allocator_state.reg_tok.value().contains(cid));
             ct = content.allocator_state.register_client(cid);
+            assert(content.allocator_state.inst.cap() == A::spec_cap());
             assert(AllocMutexPred::<A>::inv(self.mutex.k@, content));
         }
         // ── unlock ────────────────────────────────────────────────────────────
         self.mutex.unlock(MutexGuard { handle, token: Tracked(content) });
-
-        let tracked cs;
-        proof {
-            cs = ClientState::new(ct);
-        }
-        Client { state: Tracked(cs), inst_id: Ghost(self.inst_id()) }
+        Tracked(ClientState::new(ct))
     }
 
     /// Allocate one free frame and transfer ownership to `client`.
@@ -643,17 +695,22 @@ impl<A: BitmapAllocator> ConcurrentAllocator<A> {
     /// many physical frames exist at the model level).  The lock is held
     /// **only for the duration of this call**; clients can call `borrow_frame`
     /// at any time without any lock.
-    pub fn alloc(&self, client: Client) -> (res: (usize, Client))
+    pub fn alloc(&self, Tracked(client): Tracked<ClientState>) -> (res: (PAddr, Tracked<ClientState>))
         requires
             self.wf(),
             client.wf(self.inst_id()),
         ensures
+            res.0@.aligned(SPEC_FRAME_SIZE),
+            res.0.0 >= self.base.0,
             res.1.wf(self.inst_id()),
             res.1.cid() == client.cid(),
-            res.1.owns(res.0 as nat),
+            !client.owns(self.paddr_to_fid_spec(res.0@)),
+            res.1.owns(self.paddr_to_fid_spec(res.0@)),
+            res.1.owned_frames() =~= client.owned_frames().insert(self.paddr_to_fid_spec(res.0@)),
+            forall|fid| #[trigger] client.frame_perms.contains_key(fid) ==> res.1.frame_perms[fid] == client.frame_perms[fid],
+            frame_is_empty(&res.1.frame_perms[self.paddr_to_fid_spec(res.0@)]),
     {
         broadcast use BitmapAllocator::lemma_view_len_is_cap;
-
         // ── lock ──────────────────────────────────────────────────────────────
         let guard = self.mutex.lock();
         let MutexGuard { handle, token } = guard;
@@ -663,38 +720,46 @@ impl<A: BitmapAllocator> ConcurrentAllocator<A> {
         // The free pool is non-empty (design assumption: infinitely many slots).
         // We assume bitmap.alloc() succeeds and unwrap the result.
         assume(exists|i: int| 0 <= i < A::spec_cap() && bitmap@[i]);
-        
+
         let idx = bitmap.alloc().unwrap();
         self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
 
-        let Client { state: Tracked(cs), inst_id } = client;
-        let tracked new_cs;
+        let tracked new_client;
         proof {
             let ghost old_content = content;
             // Bitmap reported idx free <==> free_tok contains idx as nat.
             assert(content.allocator_state.free_tok.value().contains(idx as nat));
-            new_cs = content.allocator_state.alloc(cs, idx as nat, Ghost(self.inst_id()));
-            
+            new_client = content.allocator_state.alloc(client, idx as nat);
+
             // AllocatorState wf restored.
             assert(AllocMutexPred::<A>::inv(self.mutex.k@, content));
         }
+        let frame = self.fid_to_paddr(idx);
         // ── unlock ────────────────────────────────────────────────────────────
         self.mutex.unlock(MutexGuard { handle, token: Tracked(content) });
-        (idx, Client { state: Tracked(new_cs), inst_id })
+        (frame, Tracked(new_client))
     }
 
-    /// Return frame `fid` from `client` back to the free pool.
-    pub fn dealloc(&self, client: Client, fid: usize) -> (new_client: Client)
+    /// Return `frame` from `client` back to the free pool.
+    pub fn dealloc(&self, Tracked(client): Tracked<ClientState>, frame: PAddr) -> (new_client: Tracked<
+        ClientState,
+    >)
         requires
             self.wf(),
             client.wf(self.inst_id()),
-            client.owns(fid as nat),
-            fid < A::spec_cap(),
+            frame@.aligned(SPEC_FRAME_SIZE),
+            frame.0 >= self.base.0,
+            client.owns(self.paddr_to_fid_spec(frame@)),
+            frame_is_empty(&client.frame_perms[self.paddr_to_fid_spec(frame@)]),
         ensures
             new_client.wf(self.inst_id()),
             new_client.cid() == client.cid(),
-            !new_client.owns(fid as nat),
+            !new_client.owns(self.paddr_to_fid_spec(frame@)),
+            new_client.owned_frames() =~= client.owned_frames().remove(
+                self.paddr_to_fid_spec(frame@),
+            ),
     {
+        let fid = self.paddr_to_fid(frame);
         // ── lock ──────────────────────────────────────────────────────────────
         let guard = self.mutex.lock();
         let MutexGuard { handle, token } = guard;
@@ -707,12 +772,17 @@ impl<A: BitmapAllocator> ConcurrentAllocator<A> {
         // The bit must be 0 (allocated) because client.owns(fid); justified by the
         // TSM disjointness invariant between free_set and client_sets.
         proof {
-            assert(client.state.owns(fid as nat));
+            assert(client.owns(fid as nat));
             content.allocator_state.inst.free_client_disjoint(
                 client.cid(),
-                client.state.client_tok.value(),
+                client.client_tok.value(),
                 &content.allocator_state.free_tok,
-                &client.state.client_tok,
+                &client.client_tok,
+            );
+            content.allocator_state.inst.client_fid_within_cap(
+                client.cid(),
+                client.client_tok.value(),
+                &client.client_tok,
             );
             assert(!content.allocator_state.free_tok.value().contains(fid as nat));
             bitmap.lemma_view_len_is_cap();
@@ -721,73 +791,15 @@ impl<A: BitmapAllocator> ConcurrentAllocator<A> {
         bitmap.dealloc(fid);
         self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
 
-        let Client { state, inst_id } = client;
-        let tracked new_cs;
+        let tracked new_client;
         proof {
-            let tracked cs = state.get();
-            new_cs = content.allocator_state.dealloc(cs, fid as nat, Ghost(self.inst_id()));
+            new_client = content.allocator_state.dealloc(client, fid as nat);
             assert(AllocMutexPred::<A>::inv(self.mutex.k@, content));
         }
         // ── unlock ────────────────────────────────────────────────────────────
         self.mutex.unlock(MutexGuard { handle, token: Tracked(content) });
-        Client { state: Tracked(new_cs), inst_id }
-    }
-}
-
-/// A registered participant in the `ConcurrentAllocator`.
-///
-/// Holds the `AllocSpec` client token and physical permissions for all frames
-/// it currently owns.  The `AllocSpec` invariants ensure — at the proof level —
-/// that no two clients ever hold the same frame.
-///
-/// `Client` is a **linear resource**: passed by value into `alloc`/`dealloc`
-/// and returned updated, which statically prevents aliased ownership.
-pub struct Client {
-    /// Ghost + tracked client state (token + physical permissions).
-    pub state: Tracked<ClientState>,
-    /// Ghost: which `ConcurrentAllocator` instance this client belongs to.
-    pub inst_id: Ghost<InstanceId>,
-}
-
-impl Client {
-    /// The `AllocSpec` instance this client belongs to.
-    pub open spec fn inst_id(&self) -> InstanceId {
-        self.inst_id@
-    }
-
-    /// The client's `ClientID` (key in the `AllocSpec` map sharding).
-    pub open spec fn cid(&self) -> ClientID {
-        self.state@.client_tok.key()
-    }
-
-    /// Well-formedness: token is bound to the right instance, perms match token.
-    pub open spec fn wf(&self, inst_id: InstanceId) -> bool {
-        &&& self.inst_id@ == inst_id
-        &&& self.state@.wf(inst_id)
-    }
-
-    /// The set of frame IDs currently owned by this client (spec only).
-    pub open spec fn owned_frames(&self) -> Set<FrameID> {
-        self.state@.client_tok.value()
-    }
-
-    /// Whether this client currently owns frame `fid` (spec only).
-    pub open spec fn owns(&self, fid: FrameID) -> bool {
-        self.state@.owns(fid)
-    }
-
-    /// Borrow the physical permission for a frame this client owns.
-    /// No lock needed — the client exclusively holds `fid` per the AllocSpec invariant.
-    pub fn borrow_frame<'a>(&'a self, fid: usize) -> (perm: Tracked<&'a Frame4KPerm>)
-        requires
-            self.wf(self.inst_id@),
-            self.state@.owns(fid as nat),
-        ensures
-            *perm@ == self.state@.frame_perms[fid as nat],
-    {
-        Tracked(self.state.borrow().borrow_perm(fid as nat, Ghost(self.inst_id@)))
+        Tracked(new_client)
     }
 }
 
 } // verus!
-
