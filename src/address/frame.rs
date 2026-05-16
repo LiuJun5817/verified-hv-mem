@@ -181,10 +181,7 @@ impl MemoryRegion {
             return false;
         }
         match self.mapper {
-            Mapper::Offset(off) => {
-                let max_vaddr = self.start.0 + self.pages * PAGE_SIZE;
-                off <= usize::MAX - max_vaddr && off % PAGE_SIZE == 0
-            },
+            Mapper::Offset(off) => off % PAGE_SIZE == 0,
             Mapper::Fixed(paddr) => paddr % PAGE_SIZE == 0,
         }
     }
@@ -197,6 +194,14 @@ impl MemoryRegion {
             res@ == self.start@.offset(self.pages as nat * PAGE_SIZE as nat),
     {
         VAddr(self.start.0 + self.pages * PAGE_SIZE)
+    }
+
+    /// Spec-mode Calculate the end.
+    pub open spec fn spec_end(&self) -> SpecVAddr
+        recommends
+            self.spec_valid(),
+    {
+        self.start@.offset(self.pages as nat * PAGE_SIZE as nat)
     }
 
     /// Spec-mode overlap check.
@@ -245,7 +250,10 @@ pub enum Mapper {
 impl Mapper {
     pub open spec fn valid(self, max_vaddr: nat) -> bool {
         match self {
-            Self::Offset(off) => off <= usize::MAX as nat - max_vaddr && off % PAGE_SIZE == 0,
+            Self::Offset(off) => {
+                &&& off % PAGE_SIZE == 0
+                &&& max_vaddr <= usize::MAX as nat
+            },
             Self::Fixed(paddr) => paddr % PAGE_SIZE == 0,
         }
     }
@@ -257,8 +265,20 @@ impl Mapper {
             vaddr.0 % PAGE_SIZE == 0 ==> res.0 % PAGE_SIZE == 0,
     {
         match self {
-            Self::Offset(off) => PAddr(vaddr.0 + *off),
+            Self::Offset(off) => PAddr(vaddr.0.wrapping_sub(*off)),
             Self::Fixed(paddr) => PAddr(*paddr),
+        }
+    }
+
+    pub open spec fn spec_map(self, vaddr: SpecVAddr) -> SpecPAddr
+        recommends
+            self.valid(vaddr.0),
+    {
+        match self {
+            Self::Offset(off) => SpecPAddr(
+                vstd::wrapping::usize_specs::wrapping_sub(vaddr.0 as usize, off) as nat,
+            ),
+            Self::Fixed(paddr) => SpecPAddr(paddr as nat),
         }
     }
 }

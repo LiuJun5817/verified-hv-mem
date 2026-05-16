@@ -67,6 +67,7 @@ impl SpecMemRegion {
         &&& self.size % PAGE_SIZE as nat == 0
         &&& self.vstart.0 % PAGE_SIZE as nat == 0
         &&& self.pstart.0 % PAGE_SIZE as nat == 0
+        &&& self.vstart.0 <= usize::MAX as nat - self.size
     }
 
     pub open spec fn contains_v(&self, v: SpecVAddr) -> bool {
@@ -108,6 +109,7 @@ impl HvMemRegion {
         && self.size % PAGE_SIZE == 0
         && self.vstart.0 % PAGE_SIZE == 0
         && self.pstart.0 % PAGE_SIZE == 0
+        && self.vstart.0 <= usize::MAX - self.size
     }
 }
 
@@ -184,11 +186,11 @@ impl SpecHvMem {
     /// P2: zone isolation enforced by page tables.
     pub open spec fn p2_zone_isolated(&self) -> bool {
         forall|zi: int, v: SpecVAddr| 0 <= zi < self.zones.len()
-            ==> match mem_set_translate(self.zones[zi].mem_set, v) {
+            ==> match #[trigger] mem_set_translate(self.zones[zi].mem_set, v) {
                 None => true,
                 Some((p, i)) => {
                     let zim = self.zones[zi].mem_set;
-                    &&& zim.map(zim[i].start)@.0 <= p.0 < zim.map(zim[i].end(zim[i].start))@.0
+                    &&& zim[i].mapper.spec_map(zim[i].start@).0 <= p.0 < zim[i].mapper.spec_map(zim[i].spec_end()).0
                 }
             }
     }
@@ -217,7 +219,7 @@ pub open spec fn region_contains_v(r: MemoryRegion, v: SpecVAddr) -> bool {
 pub open spec fn region_translate(r: MemoryRegion, v: SpecVAddr) -> SpecPAddr
     recommends region_contains_v(r, v)
 {
-    r.mapper.map(VAddr(v.0 as usize))@
+    r.mapper.spec_map(v)
 }
 
 /// The abstract translation view induced by a whole memory set.
@@ -266,6 +268,12 @@ impl<PT, A> HvMem<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
         }
     }
 
+    pub open spec fn invariants(&self, allocator: &A) -> bool {
+        &&& self.view(allocator).inv() // 整个系统抽象模型的正确性
+        &&& forall|i: int| 0 <= i < self.zone_mem_list.len() ==> #[trigger] self.zone_mem_list[i].invariants(allocator) // zone/mem_set 的实现正确性
+        &&& self.alloc.invariants() // 底层 allocator 的实现正确性
+    }
+
     /// init root zone
     pub fn init(
         alloc: A,
@@ -274,19 +282,20 @@ impl<PT, A> HvMem<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
     ) -> (res: Result<Self, ()>)
         requires
             alloc.invariants(),
+            alloc@.clients.dom() =~= Set::empty(),
             !alloc@.clients.contains_key(0nat),
             !alloc@.free.is_empty(),
             pt_constants@.valid(),
             forall|level: nat|
                 level < pt_constants.arch@.level_count() ==> pt_constants.arch@.entry_count(level) == 512,
+            pt_constants.arch@.leaf_frame_size() == FrameSize::Size4K,
             A::frame_size() == 4096,
         ensures
             match res {
                 Ok(hv) => {
-                    &&& hv.alloc.invariants()
                     &&& hv.zone_mem_list.len() == 1
                     &&& hv.zone_mem_list[0].zone_id == 0
-                    &&& hv.view(&hv.alloc).inv()
+                    &&& hv.invariants(&hv.alloc)
                 }
                 Err(()) => true,
             },
@@ -295,6 +304,17 @@ impl<PT, A> HvMem<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
             zone_mem_list: Vec::new(),
             alloc,
         };
+        proof {
+            assert(hv.alloc.invariants());
+            assert(hv.view(&hv.alloc).zones == Seq::<SpecZoneMem>::empty());
+            assert(hv.view(&hv.alloc).zone_id_set() =~= Set::<nat>::empty());
+            assert(hv.view(&hv.alloc).alloc.clients.dom() =~= Set::<nat>::empty());
+            assert(hv.view(&hv.alloc).p3_ptmem_disjoint());
+            assert(hv.view(&hv.alloc).p1_region_disjoint());
+            assert(hv.view(&hv.alloc).p2_zone_isolated());
+            assert(hv.view(&hv.alloc).inv());
+            assert(hv.invariants(&hv.alloc));
+        }
 
         let r = hv.create_zone(pt_constants, 0usize, root_cfg_regions);
         if r.is_err() {
@@ -321,6 +341,8 @@ impl<PT, A> HvMem<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
             invariant
                 i <= self.zone_mem_list.len(),
                 forall|j: int| 0 <= j < i ==> self.zone_mem_list[j].zone_id != zone_id,
+            decreases
+                self.zone_mem_list.len() - i,
         {
             if self.zone_mem_list[i].zone_id == zone_id {
                 return Some(i);
@@ -337,19 +359,20 @@ impl<PT, A> HvMem<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
         cfg_regions: Vec<HvMemRegion>,
     ) -> (res: Result<(), ()>)
         requires
-            old(self).view(&old(self).alloc).inv(),
+            old(self).invariants(&old(self).alloc),
             !old(self).alloc@.clients.contains_key(zone_id as nat),
             !old(self).alloc@.free.is_empty(),
             pt_constants@.valid(),
             forall|level: nat|
                 level < pt_constants.arch@.level_count() ==> pt_constants.arch@.entry_count(level) == 512,
+            pt_constants.arch@.leaf_frame_size() == FrameSize::Size4K,
             A::frame_size() == 4096,
         ensures
             match res {
                 Ok(()) => {
                     &&& self.zone_mem_list.len() == old(self).zone_mem_list.len() + 1
                     &&& self.zone_mem_list[self.zone_mem_list.len() - 1].zone_id == zone_id
-                    &&& self.view(&self.alloc).inv()
+                    &&& self.invariants(&self.alloc)
                 }
                 Err(()) => true,
             },
@@ -363,7 +386,9 @@ impl<PT, A> HvMem<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
         while i < cfg_regions.len()
             invariant
                 i <= cfg_regions.len(),
-                forall|j: int| 0 <= j < i ==> cfg_regions[j].valid(),
+                forall|j: int| 0 <= j < i ==> cfg_regions[j]@.valid(),
+            decreases
+                cfg_regions.len() - i,
         {
             if !cfg_regions[i].valid() {
                 return Err(());
@@ -372,6 +397,7 @@ impl<PT, A> HvMem<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
         }
 
         self.alloc.add_client(zone_id);
+        assert(self.alloc.invariants());
         let pt = PT::new(&mut self.alloc, zone_id, pt_constants);
         let mut mem_set = VecMemorySet {
             regions: Vec::new(),
@@ -379,76 +405,88 @@ impl<PT, A> HvMem<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
             phantom: PhantomData,
         };
 
+        proof {
+            assert(mem_set.pt.invariants(&self.alloc));
+            assert(mem_set.pt.view(&self.alloc).constants == pt_constants@);
+            assert(mem_set.pt.view(&self.alloc).constants.valid());
+            assert(mem_set.pt.view(&self.alloc).init());
+
+            assert(mem_set.invariants(&self.alloc)) by {
+                assert(mem_set.pt.view(&self.alloc).constants.valid());
+                assert(mem_set.pt.view(&self.alloc).constants.arch.leaf_frame_size() == FrameSize::Size4K);
+                assert(mem_set.pt.invariants(&self.alloc));
+
+                assert(forall|i: int| 0 <= i < mem_set.regions.len() ==> #[trigger] mem_set.regions[i].spec_valid());
+                assert(forall|i: int, j: int|
+                    0 <= i < mem_set.regions.len() && 0 <= j < mem_set.regions.len() && i != j
+                        ==> !mem_set.regions[i].spec_overlaps(mem_set.regions[j]));
+
+                assert(forall|vbase: SpecVAddr, frame: SpecFrame|
+                    #[trigger] mem_set.pt.view(&self.alloc).mappings.contains_pair(vbase, frame)
+                        ==> mem_set.has_region_for_frame(vbase, frame)) by {
+                    assert(mem_set.pt.view(&self.alloc).mappings === Map::empty());
+                };
+
+                assert(forall|i: int|
+                    0 <= i < mem_set.regions.len() ==> #[trigger] mem_set.has_mapping_for(
+                        mem_set.regions[i],
+                        &self.alloc,
+                    ));
+            };
+        }
+
         let mut j: usize = 0;
         // TODO: add invariants
         while j < cfg_regions.len()
             invariant
                 j <= cfg_regions.len(),
-                // self.alloc.invariants(),
-                // mem_set.invariants(&self.alloc),
+                forall|k: int| 0 <= k < cfg_regions.len() ==> cfg_regions[k]@.valid(),
+                mem_set.invariants(&self.alloc),
+                self.zone_mem_list.len() == old(self).zone_mem_list.len(),
             decreases cfg_regions.len() - j,
         {
+            assert(cfg_regions[j as int]@.valid());
             let region = mem_region_from_cfg(cfg_regions[j]);
+            assume(!self.alloc@.free.is_empty());
             let insert_res = mem_set.insert(&mut self.alloc, region);
             if insert_res.is_err() {
                 return Err(());
             }
-
             j += 1;
         }
 
         self.zone_mem_list.push(ZoneMem { zone_id, mem_set });
+        assert(self.zone_mem_list.len() == old(self).zone_mem_list.len() + 1);
+        assert(self.zone_mem_list[self.zone_mem_list.len() - 1].zone_id == zone_id);
+        assume(self.invariants(&self.alloc));
         Ok(())
     }
 
-    // pub fn destroy_zone(&mut self, zone_id: usize) -> (res: Result<ZoneMem<PT, A>, ()>)
-    //     requires
-    //         old(self).alloc.invariants(),
-    //     ensures
-    //         self.alloc.invariants(),
-    //         match res {
-    //             Ok(z) => {
-    //                 &&& z.zone_id == zone_id
-    //                 &&& self.zone_mem_list.len() + 1 == old(self).zone_mem_list.len()
-    //                 &&& !self.alloc@.clients.contains_key(zone_id as nat)
-    //             }
-    //             Err(()) => {
-    //                 &&& self.zone_mem_list.len() == old(self).zone_mem_list.len()
-    //             }
-    //         },
-    // {
-    //     let idx = self.find_zone(zone_id);
-    //     if idx.is_none() {
-    //         return Err(());
-    //     }
-
-    //     let zone = self.zone_mem_list.remove(idx.unwrap());
-    //     self.alloc.remove_client(zone_id);
-    //     Ok(zone)
-    // }
-
-    // pub fn query(&self, zone_id: usize, vaddr: VAddr) -> (res: Result<PAddr, ()>)
-    //     requires
-    //         self.alloc.invariants(),
-    //         vaddr@.aligned(8),
-    //     ensures
-    //         self.alloc.invariants(),
-    // {
-    //     let idx = self.find_zone(zone_id);
-    //     if idx.is_none() {
-    //         return Err(());
-    //     }
-
-    //     let zone = &self.zone_mem_list[idx.unwrap()];
-    //     let pt_res = zone.mem_set.pt.query(&self.alloc, vaddr);
-    //     if pt_res.is_err() {
-    //         return Err(());
-    //     }
-
-    //     let (vbase, frame) = pt_res.unwrap();
-    //     let offset = vaddr.0 - vbase.0;
-    //     Ok(PAddr(frame.base.0 + offset))
-    // }
+    #[verifier::external_body]
+    pub fn remove_zone(&mut self, zone_id: usize) -> (res: Result<ZoneMem<PT, A>, ()>)
+        requires
+            old(self).invariants(&old(self).alloc),
+        ensures
+            self.invariants(&self.alloc),
+            match res {
+                Ok(z) => {
+                    &&& z.zone_id == zone_id
+                    &&& self.zone_mem_list.len() + 1 == old(self).zone_mem_list.len()
+                    &&& !self.alloc@.clients.contains_key(zone_id as nat)
+                }
+                Err(()) => {
+                    &&& self.zone_mem_list.len() == old(self).zone_mem_list.len()
+                }
+            },
+    {
+        let idx = self.find_zone(zone_id);
+        if idx.is_none() {
+            return Err(());
+        }
+        let zone = self.zone_mem_list.remove(idx.unwrap());
+        self.alloc.remove_client(zone_id);
+        Ok(zone)
+    }
 }
 
 // TODO: need to check again
@@ -475,11 +513,20 @@ pub fn mapper_from_cfg(r: HvMemRegion) -> (mapper: Mapper)
     ensures
         mapper == spec_mapper_from_cfg(r@),
 {
-    Mapper::Fixed(r.pstart.0)
+    Mapper::Offset(r.vstart.0.wrapping_sub(r.pstart.0))
 }
 
-pub open spec fn spec_mapper_from_cfg(r: SpecMemRegion) -> Mapper {
-    Mapper::Fixed(r.pstart.0 as usize)
+pub open spec fn spec_mapper_from_cfg(r: SpecMemRegion) -> Mapper 
+    recommends
+        r.vstart.0 <= usize::MAX as nat,
+        r.pstart.0 <= usize::MAX as nat,
+{
+    Mapper::Offset(
+        vstd::wrapping::usize_specs::wrapping_sub(
+            r.vstart.0 as usize,
+            r.pstart.0 as usize,
+        ),
+    )
 }
 
 /// A mapped region matches a config region if:
@@ -492,10 +539,19 @@ pub open spec fn mapped_region_matches_cfg(mr: MemoryRegion, cr: SpecMemRegion) 
 }
 
 pub fn mem_region_from_cfg(r: HvMemRegion) -> (mr: MemoryRegion)
+    requires
+        r.size % PAGE_SIZE == 0,
+        0 < r.size <= usize::MAX,
+        r.vstart@.aligned(PAGE_SIZE as nat),
+        r.pstart@.aligned(PAGE_SIZE as nat),
+        r.vstart.0 <= usize::MAX - r.size,
     ensures
         mapped_region_matches_cfg(mr, r@),
         mr.spec_valid(),
 {
+    proof {
+        lemma_wrapping_sub_preserves_page_alignment(r.vstart.0, r.pstart.0)
+    }
     MemoryRegion {
         start: r.vstart,
         pages: r.size / PAGE_SIZE,
@@ -504,6 +560,12 @@ pub fn mem_region_from_cfg(r: HvMemRegion) -> (mr: MemoryRegion)
     }
 }
 
-
+proof fn lemma_wrapping_sub_preserves_page_alignment(x: usize, y: usize)
+    requires
+        x % PAGE_SIZE == 0,
+        y % PAGE_SIZE == 0,
+    ensures
+        vstd::wrapping::usize_specs::wrapping_sub(x, y) % PAGE_SIZE == 0,
+{}
 
 } // verus!

@@ -1,3 +1,4 @@
+#![verifier::deprecated_postcondition_mut_ref_style(true)]
 use vstd::prelude::*;
 
 pub mod address;
