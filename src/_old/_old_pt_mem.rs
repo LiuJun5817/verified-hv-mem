@@ -2,21 +2,25 @@
 //!
 //! Page Table Memory is a collection of page tables, and provides read/write, alloc/dealloc functionality.
 //! The implementation should refine the specification defined in `spec::memory::PageTableMem`.
-use super::allocator::{inst_base, ClientState, ConcurrentAllocator, SPEC_FRAME_SIZE};
 use crate::{
     address::{
         addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
         frame::FrameSize,
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
-    global_allocator::{frame_is_empty, Frame4KPerm, FrameID},
+    global_allocator::{
+        self, frame_is_empty, ClientID, Frame4KPerm, GlobalAllocator, GlobalAllocatorModel,
+    },
     page_table::{
         pt_arch::{PTArch, SpecPTArch},
         table::*,
     },
 };
-use std::marker::PhantomData;
-use vstd::{prelude::*, simple_pptr::PPtr};
+use std::{borrow::Borrow, marker::PhantomData};
+use vstd::{
+    prelude::*,
+    simple_pptr::{PPtr, PointsTo},
+};
 
 verus! {
 
@@ -378,10 +382,8 @@ pub struct PageTableMem<A> where A: BitmapAllocator {
     pub arch: PTArch,
     /// Root page table address, should be allocated at initialization and never change after that.
     pub root: PAddr,
-    /// Base address of the allocator.
-    pub allocator_base: Ghost<SpecPAddr>,
-    /// Abstract allocator client that tracks all page-table frames.
-    pub client: Tracked<Option<ClientState>>,
+    /// Global frame allocator client id
+    pub cid: Tracked<ClientID>,
     /// Tables in the page table memory (saved as ghost variable).
     pub tables: Ghost<Map<SpecPAddr, nat>>,
     /// Phantom data
@@ -389,27 +391,14 @@ pub struct PageTableMem<A> where A: BitmapAllocator {
 }
 
 impl<A> PageTableMem<A> where A: BitmapAllocator {
-    pub open spec fn inst_id(&self) -> InstanceId {
-        self.client@->Some_0.inst_id()
-    }
-
-    pub open spec fn paddr_to_fid_spec(&self, addr: SpecPAddr) -> FrameID {
-        (addr.0 - self.allocator_base@.0) as nat / SPEC_FRAME_SIZE
-    }
-
-    /// Get the abstract view of the page table memory from the client-owned frames.
-    pub open spec fn view(&self) -> SpecPageTableMem
-        recommends
-            self.client@ is Some,
-    {
+    /// Get the abstract view of the page table memory, based on the global frame allocator state.
+    pub open spec fn view(&self, allocator: &GlobalAllocatorModel) -> SpecPageTableMem {
         SpecPageTableMem {
             tables: self.tables@,
             contents: Map::new(
                 |base: SpecPAddr| self.tables@.contains_key(base),
                 |base: SpecPAddr|
-                    frame4k_to_u64_seq(
-                        &self.client@->Some_0.frame_perms[self.paddr_to_fid_spec(base)],
-                    ),
+                    frame4k_to_u64_seq(&allocator.clients[self.cid@][allocator.paddr_to_fid(base)]),
             ),
             arch: self.arch@,
             root: self.root@,
@@ -417,131 +406,131 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
     }
 
     /// Invariants that must be implied at initial state and preseved after each operation.
-    pub open spec fn invariants(&self) -> bool {
+    pub open spec fn invariants(&self, allocator: &GlobalAllocatorModel) -> bool {
         // Model invariants
-        &&& self.view().wf()
+        &&& self.view(
+            allocator,
+        ).wf()
         // Invariants of the page table memory.
         &&& self.arch.view().valid()
-        &&& self.client@ is Some
         // The client is valid.
-        &&& self.client@->Some_0.wf(
-            self.inst_id(),
-        )
-        // Base address consistent with AllocSpec instance
-        &&& self.allocator_base@ == inst_base(self.inst_id())
-        &&& self.allocator_base@.aligned(
-            SPEC_FRAME_SIZE,
+        &&& allocator.clients.contains_key(
+            self.cid@,
         )
         // The root table is allocated to the client.
-        &&& self.client@->Some_0.owns(
-            self.paddr_to_fid_spec(self.root@),
+        &&& allocator.clients[self.cid@].contains_key(
+            allocator.paddr_to_fid(self.root@),
         )
         // Tables are in valid address ranges and properly aligned.
         &&& forall|base: SpecPAddr| #[trigger]
-            self.tables.contains_key(base) ==> base.0 >= self.allocator_base@.0 && base.aligned(
-                SPEC_FRAME_SIZE,
+            self.tables.contains_key(base) ==> base.0 >= allocator.base.0 && base.aligned(
+                GlobalAllocator::<A>::FRAME_SIZE as nat,
             )
         // Tables are consistent with allocator.
-        &&& self.tables.dom().map(|addr: SpecPAddr| self.paddr_to_fid_spec(addr))
-            == self.client@->Some_0.owned_frames()
+        &&& self.tables.dom().map(|addr: SpecPAddr| allocator.paddr_to_fid(addr))
+            == allocator.clients[self.cid@].dom()
         // TODO: we assume all tables in the hierarchical page table contain 512 8-byte entries, which is true
         // for hvisor's aarch64 implementation. We can make it more general in the future.
         &&& forall|level: nat|
             level < self.arch.view().level_count() ==> self.arch.view().entry_count(level) == 512
+        &&& GlobalAllocator::<A>::FRAME_SIZE == 4096
     }
 
     /// Create a new page table memory.
-    pub fn new(allocator: &ConcurrentAllocator<A>, arch: PTArch) -> (res: Self)
+    pub fn new(allocator: &mut GlobalAllocator<A>, arch: PTArch) -> (res: Self)
         requires
-            allocator.wf(),
+            old(allocator).invariants(),
+            !old(allocator).view().free.is_empty(),
             arch@.valid(),
             // TODO: remove this assumption by supporting different page table layouts.
             forall|level: nat| level < arch@.level_count() ==> arch@.entry_count(level) == 512,
+            GlobalAllocator::<A>::FRAME_SIZE == 4096,
         ensures
             res.arch == arch,
-            res.inst_id() == allocator.inst_id(),
-            res.view().init(),
-            res.invariants(),
-            allocator.wf(),
+            res.view(&allocator.state).init(),
+            res.invariants(&allocator.state),
+            allocator.invariants(),
     {
         broadcast use lemma_frame4k_to_u64_seq;
 
-        let Tracked(client) = allocator.register_client();
-        let (root, Tracked(client)) = allocator.alloc(Tracked(client));
-
-        let tables = Ghost(Map::empty().insert(root@, 0));
-        let ghost fid = (root@.0 - allocator.base@.0) as nat / SPEC_FRAME_SIZE;
-        let tracked frame_perm: &Frame4KPerm = client.borrow_perm(fid, Ghost(allocator.inst_id()));
-
-        let res = Self {
-            arch,
-            root,
-            allocator_base: Ghost(inst_base(allocator.inst_id())),
-            client: Tracked(Some(client)),
-            tables,
-            _phantom: PhantomData,
-        };
+        let tracked cid = allocator.state.tracked_add_client();
         proof {
-            assert(res.client@ is Some);
-            assert(fid == res.paddr_to_fid_spec(root@));
-            assert(res.tables@.dom() == Set::empty().insert(root@));
-            assert(res.client@->Some_0.owned_frames() =~= Set::empty().insert(fid));
-            assert(res.view().contents.dom() == Set::empty().insert(root@));
-            assert(frame_is_empty(frame_perm));
-            assert(res.view().contents[res.root@] == Seq::new(arch@.entry_count(0), |_i| 0u64));
-            assert(res.view().contents == Map::empty().insert(
+            GlobalAllocator::lemma_add_client_preserves_invariants(
+                *old(allocator),
+                *allocator,
+                cid,
+            );
+            assert(allocator.invariants());
+        }
+        let root = allocator.alloc(Tracked(&cid));
+        let tables = Ghost(Map::empty().insert(root@, 0));
+        let res = Self { arch, cid: Tracked(cid), root, tables, _phantom: PhantomData };
+        proof {
+            // Prove invariants
+            assert(res.tables.view().dom() == Set::empty().insert(root@));
+            Set::empty().lemma_set_map_insert_commute(
+                root@,
+                |addr: SpecPAddr| allocator@.paddr_to_fid(addr),
+            );
+            assert(res.tables.view().dom().map(|addr: SpecPAddr| allocator@.paddr_to_fid(addr))
+                == Set::empty().insert(allocator@.paddr_to_fid(root@)));
+            assert(res.tables.view().dom().map(
+                |addr: SpecPAddr| allocator.state@.paddr_to_fid(addr),
+            ) == allocator.state@.clients[cid].dom());
+            assert(res.view(&allocator.state).contents.dom() == Set::empty().insert(root@));
+            assert(res.view(&allocator.state).wf());
+            assert(res.invariants(&allocator.state));
+
+            // Prove `init`
+            // New table is empty
+            assert(frame_is_empty(
+                &allocator.state.clients[cid][allocator.state.paddr_to_fid(root@)],
+            ));
+            assert(res.view(&allocator.state).contents[res.root@] == Seq::new(
+                arch@.entry_count(0),
+                |_i| 0u64,
+            ));
+            assert(res.view(&allocator.state).contents == Map::empty().insert(
                 res.root@,
                 Seq::new(arch@.entry_count(0), |_i| 0u64),
             ));
-            SpecPageTableMem::lemma_init_implies_wf(res.view());
-            assert(res.client@->Some_0.wf(res.inst_id()));
-            assert(res.allocator_base@.aligned(SPEC_FRAME_SIZE));
-            assert(res.client@->Some_0.owns(res.paddr_to_fid_spec(res.root@)));
-            assert(res.tables@.dom().map(|addr: SpecPAddr| res.paddr_to_fid_spec(addr))
-                == res.client@->Some_0.owned_frames());
-            assert(res.invariants());
         }
         res
     }
 
     /// Allocate a new table and returns the table base address and size.
-    pub fn alloc_table(&mut self, allocator: &ConcurrentAllocator<A>, level: usize) -> (res: PAddr)
+    pub fn alloc_table(&mut self, allocator: &mut GlobalAllocator<A>, level: usize) -> (res: PAddr)
         requires
-            allocator.wf(),
-            old(self).invariants(),
-            old(self).inst_id() == allocator.inst_id(),
+            old(allocator).invariants(),
+            old(self).invariants(&old(allocator).state),
+            !old(allocator).view().free.is_empty(),
             0 < level < old(self).arch.view().level_count(),
         ensures
-            SpecPageTableMem::alloc_table_spec(old(self).view(), self.view(), level as nat, res@),
-            allocator.wf(),
-            self.invariants(),
+            SpecPageTableMem::alloc_table_spec(
+                old(self).view(&old(allocator).state),
+                self.view(&allocator.state),
+                level as nat,
+                res@,
+            ),
+            allocator.invariants(),
+            self.invariants(&allocator.state),
     {
         broadcast use lemma_frame4k_to_u64_seq;
 
-        let tracked client = self.client.tracked_take();
-        // Alloc a new frame
-        let (new_base, Tracked(client)) = allocator.alloc(Tracked(client));
-        assert(new_base@.aligned(self.arch.view().table_size(level as nat)));
-
-        let ghost fid = self.paddr_to_fid_spec(new_base@);
-        let tracked frame_perm: &Frame4KPerm = client.frame_perms.tracked_borrow(fid);
-        self.client = Tracked(Some(client));
+        let new_base = allocator.alloc(Tracked(self.cid.borrow()));
         self.tables = Ghost(self.tables@.insert(new_base@, level as nat));
 
         proof {
-            let s1: SpecPageTableMem = old(self).view();
-            let s2: SpecPageTableMem = self.view();
+            let a1 = old(allocator).view();
+            let a2 = allocator.view();
+            let cid = self.cid@;
+            let fid = allocator@.paddr_to_fid(new_base@);
+            assert(GlobalAllocatorModel::alloc(a1, a2, cid, fid));
 
-            // Old client doesn't have the new table
-            assert(!old(self).client@->Some_0.owned_frames().contains(fid));
-            assert(!s1.contains_table(new_base@)) by {
-                if s1.contains_table(new_base@) {
-                    assert(old(self).tables@.dom().contains(new_base@));
-                    assert(old(self).tables@.dom().map(
-                        |addr: SpecPAddr| old(self).paddr_to_fid_spec(addr),
-                    ).contains(fid));
-                }
-            }
+            let s1: SpecPageTableMem = old(self).view(&old(allocator).state);
+            let s2: SpecPageTableMem = self.view(&allocator.state);
+
+            assert(new_base@.aligned(self.arch.view().table_size(level as nat)));
             // New table doesn't overlap with existing tables
             assert forall|base: SpecPAddr| #[trigger]
                 s1.tables.contains_key(base) implies !SpecPAddr::overlap(
@@ -550,36 +539,19 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
                 base,
                 s1.arch.table_size(s1.level(base)),
             ) by {
-                let fid2 = old(self).paddr_to_fid_spec(base);
-                assert(old(self).client@->Some_0.owned_frames().contains(fid2));
-                assert(fid2 != fid);
+                let fid2 = allocator@.paddr_to_fid(base);
+                assert(old(allocator).view().clients[cid].contains_key(fid2));
                 assert(base != new_base@);
             }
             // New table is added
             assert(s2.tables == s1.tables.insert(new_base@, level as nat));
+
             // New table is empty
-            assert(frame_is_empty(frame_perm));
+            assert(frame_is_empty(&allocator.state.clients[cid][fid]));
             assert(s2.contents[new_base@] == Seq::new(
                 s2.arch.entry_count(level as nat),
                 |_i| 0u64,
             ));
-
-            // Old tables are unchanged
-            assert forall|base2| #[trigger]
-                s1.contents.contains_key(base2) implies s2.contents[base2]
-                == s1.contents[base2] by {
-                let fid2 = old(self).paddr_to_fid_spec(base2);
-                assert(old(self).tables@.dom().contains(base2));
-                assert(old(self).tables@.dom().map(
-                    |addr: SpecPAddr| old(self).paddr_to_fid_spec(addr),
-                ).contains(fid2));
-                assert(old(self).client@->Some_0.owns(fid2));
-                assert(self.client@->Some_0.frame_perms[fid2] == old(
-                    self,
-                ).client@->Some_0.frame_perms[fid2]);
-                assert(s1.contents[base2] == s2.contents[base2]);
-            }
-            // Only the content of new table is updated
             assert(s2.contents == s1.contents.insert(
                 new_base@,
                 Seq::new(s2.arch.entry_count(level as nat), |_i| 0u64),
@@ -589,42 +561,43 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
 
             // Invariants preserved
             SpecPageTableMem::lemma_alloc_table_preserves_wf(s1, s2, level as nat, new_base@);
-            old(self).tables@.dom().lemma_set_map_insert_commute(
+            old(self).tables.view().dom().lemma_set_map_insert_commute(
                 new_base@,
-                |addr: SpecPAddr| self.paddr_to_fid_spec(addr),
+                |addr: SpecPAddr| allocator@.paddr_to_fid(addr),
             );
-            assert(self.tables@.dom().map(|addr: SpecPAddr| self.paddr_to_fid_spec(addr))
-                == self.client@->Some_0.owned_frames());
-            assert(self.invariants());
+            assert(self.tables.view().dom().map(|addr: SpecPAddr| allocator@.paddr_to_fid(addr))
+                == allocator.state@.clients[cid].dom());
+            assert(self.invariants(&allocator.state));
         }
         new_base
     }
 
     /// Deallocate a table.
-    pub fn dealloc_table(&mut self, allocator: &ConcurrentAllocator<A>, base: PAddr)
+    pub fn dealloc_table(&mut self, allocator: &mut GlobalAllocator<A>, base: PAddr)
         requires
-            allocator.wf(),
-            old(self).invariants(),
-            old(self).inst_id() == allocator.inst_id(),
+            old(allocator).invariants(),
+            old(self).invariants(&old(allocator).state),
             old(self).tables@.contains_key(base@),
             base != old(self).root,
         ensures
-            SpecPageTableMem::dealloc_table_spec(old(self).view(), self.view(), base@),
-            allocator.wf(),
-            self.invariants(),
+            SpecPageTableMem::dealloc_table_spec(
+                old(self).view(&old(allocator).state),
+                self.view(&allocator.state),
+                base@,
+            ),
+            allocator.invariants(),
+            self.invariants(&allocator.state),
     {
-        broadcast use BitmapAllocator::lemma_view_len_is_cap;
+        let ghost cid = self.cid@;
+        let ghost fid = allocator@.paddr_to_fid(base@);
 
-        let ghost fid = self.paddr_to_fid_spec(base@);
-        // Clear the table contents before returning the frame to the free pool.
-        let tracked mut client = self.client.tracked_take();
-        assert(client.frame_perms.contains_key(fid));
-        let tracked frame_perm: Frame4KPerm = client.frame_perms.tracked_remove(fid);
+        // Take permission from the allocator
+        let tracked mut client = allocator.state.clients.tracked_remove(cid);
+        assert(client.contains_key(fid));
+        let tracked frame_perm: Frame4KPerm = client.tracked_remove(fid);
 
         // Convert the permission to table permission
         let tracked table_perm: Table512Perm = frame4k_perm_to_table512_perm(frame_perm);
-        assert(table_perm.addr() == base.0);
-        assert(table_perm.is_init());
 
         // Use PPtr to clear the table contents before deallocating the frame
         let pptr = PPtr::<Table512>::from_addr(base.0);
@@ -634,81 +607,62 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
 
         let tracked frame_perm: Frame4KPerm = table512_perm_to_frame4k_perm(table_perm);
         proof {
-            // Put the frame permission back
-            client.frame_perms.tracked_insert(fid, frame_perm);
-
-            // The deallocated table is emptied
+            // Restore the permission to the allocator
+            client.tracked_insert(fid, frame_perm);
+            allocator.state.clients.tracked_insert(self.cid@, client);
+            assert(self.tables.view().dom().map(|addr: SpecPAddr| allocator@.paddr_to_fid(addr))
+                == allocator.state.clients[cid].dom());
+            assert(self.view(&allocator@).contents == self.view(&old(allocator)@).contents.insert(
+                base@,
+                frame4k_to_u64_seq(&frame_perm),
+            ));
             lemma_frame4k_to_u64_seq(&frame_perm);
-            assert(frame4k_to_u64_seq(&frame_perm) == table_perm.mem_contents().value()@);
             assert(table_perm.mem_contents().value().spec_is_empty());
-            assert forall|i: int| 0 <= i < 512 implies frame4k_to_u64_seq(&frame_perm)[i]
-                == 0u64 by {
-                assert(table_perm.mem_contents().value()@[i] == 0u64);
-            }
             assert(frame_is_empty(&frame_perm));
-
-            // Other tables are unchanged
-            assert forall|fid2| #[trigger]
-                old(self).client@->Some_0.frame_perms.contains_key(fid2) && fid2
-                    != fid implies client.frame_perms[fid2] == old(
-                self,
-            ).client@->Some_0.frame_perms[fid2] by {
-                assert(old(self).client@->Some_0.frame_perms.contains_key(fid2));
-            }
         }
 
-        // Dealloc the frame
-        let Tracked(client) = allocator.dealloc(Tracked(client), base);
-        self.client = Tracked(Some(client));
+        allocator.dealloc(Tracked(self.cid.borrow()), base);
         self.tables = Ghost(self.tables@.remove(base@));
 
         proof {
-            let s1: SpecPageTableMem = old(self).view();
-            let s2: SpecPageTableMem = self.view();
+            let s1: SpecPageTableMem = old(self).view(&old(allocator).state);
+            let s2: SpecPageTableMem = self.view(&allocator.state);
 
             assert(s2.tables == s1.tables.remove(base@));
-            // Other tables are unchanged
-            assert forall|base2: SpecPAddr| #[trigger]
-                s2.tables.contains_key(base2) implies s1.contents[base2] == s2.contents[base2] by {
-                assert(base2 != base@);
-                let fid2 = old(self).paddr_to_fid_spec(base2);
-                assert(s1.tables.contains_key(base2));
-                assert(old(self).tables@.dom().contains(base2));
-                assert(old(self).tables@.dom().map(
-                    |addr: SpecPAddr| old(self).paddr_to_fid_spec(addr),
-                ).contains(fid2));
-                assert(old(self).client@->Some_0.owns(fid2));
-                assert(self.client@->Some_0.frame_perms[fid2] == old(
-                    self,
-                ).client@->Some_0.frame_perms[fid2]);
-            }
             assert(s2.contents == s1.contents.remove(base@));
             // Consistent with model spec
             assert(SpecPageTableMem::dealloc_table_spec(s1, s2, base@));
 
             // Invariants preserved
             SpecPageTableMem::lemma_dealloc_table_preserves_wf(s1, s2, base@);
-            assert(self.tables@.dom().map(|addr: SpecPAddr| self.paddr_to_fid_spec(addr))
-                == self.client@->Some_0.owned_frames());
-            assert(self.invariants());
+            assert(self.tables.view().dom().map(|addr: SpecPAddr| allocator@.paddr_to_fid(addr))
+                == allocator.state@.clients[cid].dom());
+            assert(self.invariants(&allocator.state));
         }
     }
 
     /// Get the value at the given index in the given table.
-    pub fn read(&self, base: PAddr, index: usize) -> (res: u64)
+    pub fn read(
+        &self,
+        Tracked(allocator): Tracked<&GlobalAllocatorModel>,
+        base: PAddr,
+        index: usize,
+    ) -> (res: u64)
         requires
-            self.invariants(),
-            self.view().accessible(base@, index as nat),
+            self.invariants(allocator),
+            self.view(allocator).accessible(base@, index as nat),
+            allocator.wf(),
         ensures
-            #[trigger] self.view().read(base@, index as nat) == res,
+            #[trigger] self.view(allocator).read(base@, index as nat) == res,
     {
-        let ghost fid = self.paddr_to_fid_spec(base@);
-        assert(self.client->Some_0.owns(fid));
-        // Borrow the frame permission
-        let tracked frame_perm: &Frame4KPerm =
-            self.client.tracked_borrow().frame_perms.tracked_borrow(fid);
+        let ghost cid = self.cid@;
+        let ghost fid = allocator.paddr_to_fid(base@);
+        // Borrow permission from the allocator
+        let tracked frame_perm: &Frame4KPerm = allocator.clients.tracked_borrow(cid).tracked_borrow(
+            fid,
+        );
+        assert(allocator.clients.contains_key(cid) && allocator.clients[cid].contains_key(fid));
         assert(frame_perm.addr() == base.0);
-        assert(frame_perm.is_init());
 
         // Convert the permission to table permission
         let tracked table_perm: &Table512Perm = frame4k_perm_ref_to_table512_perm_ref(frame_perm);
@@ -722,24 +676,38 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
     }
 
     /// Write the value to the given index in the given table.
-    pub fn write(&mut self, base: PAddr, index: usize, value: u64)
+    pub fn write(
+        &mut self,
+        Tracked(allocator): Tracked<&mut GlobalAllocatorModel>,
+        base: PAddr,
+        index: usize,
+        value: u64,
+    )
         requires
-            old(self).invariants(),
-            old(self).view().accessible(base@, index as nat),
+            old(self).invariants(old(allocator)),
+            old(self).view(old(allocator)).accessible(base@, index as nat),
+            old(allocator).wf(),
         ensures
-            self.view() == old(self).view().write(base@, index as nat, value),
-            self.invariants(),
+            self.view(allocator) == old(self).view(old(allocator)).write(
+                base@,
+                index as nat,
+                value,
+            ),
+            GlobalAllocatorModel::write_frame(*old(allocator), *allocator),
+            self.invariants(allocator),
+            allocator.wf(),
     {
-        let ghost fid = self.paddr_to_fid_spec(base@);
-        // Take the client to get the permission for the frame
-        let tracked mut client = self.client.tracked_take();
-        assert(client.frame_perms.contains_key(fid));
-        let tracked frame_perm: Frame4KPerm = client.frame_perms.tracked_remove(fid);
+        let ghost cid = self.cid@;
+        let ghost fid = allocator.paddr_to_fid(base@);
+        assert(allocator.clients.contains_key(cid));
+
+        // Take permission from the allocator
+        let tracked mut client = allocator.clients.tracked_remove(cid);
+        assert(client.contains_key(fid));
+        let tracked frame_perm: Frame4KPerm = client.tracked_remove(fid);
 
         // Convert the permission to table permission
         let tracked table_perm: Table512Perm = frame4k_perm_to_table512_perm(frame_perm);
-        assert(table_perm.addr() == base.0);
-        assert(table_perm.is_init());
 
         // Use PPtr to write the entry
         let pptr = PPtr::<Table512>::from_addr(base.0);
@@ -749,19 +717,15 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
 
         let tracked frame_perm: Frame4KPerm = table512_perm_to_frame4k_perm(table_perm);
         proof {
-            // Put the frame permission back
-            client.frame_perms.tracked_insert(fid, frame_perm);
-        }
-        self.client = Tracked(Some(client));
-        proof {
-            assert(self.view().contents == old(self).view().contents.insert(
+            // Restore the permission to the allocator
+            client.tracked_insert(fid, frame_perm);
+            allocator.clients.tracked_insert(self.cid@, client);
+            assert(self.tables.view().dom().map(|addr: SpecPAddr| allocator.paddr_to_fid(addr))
+                == allocator.clients[cid].dom());
+            assert(self.view(allocator).contents == self.view(old(allocator)).contents.insert(
                 base@,
                 frame4k_to_u64_seq(&frame_perm),
             ));
-            // Invariants preserved
-            assert(self.tables@.dom().map(|addr: SpecPAddr| self.paddr_to_fid_spec(addr))
-                == self.client@->Some_0.owned_frames());
-            assert(self.invariants());
         }
     }
 }

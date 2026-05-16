@@ -2634,7 +2634,12 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         assert(!remain.is_zero()) by {
                             if remain.is_zero() {
                                 PTTreePath::lemma_from_vaddr_step(vbase, arch, level, end);
-                                PTTreePath::lemma_remain_zero_implies_aligned(vbase, arch, level, end);
+                                PTTreePath::lemma_remain_zero_implies_aligned(
+                                    vbase,
+                                    arch,
+                                    level,
+                                    end,
+                                );
                                 assert(vbase.aligned(
                                     self.constants.arch.frame_size(level).as_nat(),
                                 ));

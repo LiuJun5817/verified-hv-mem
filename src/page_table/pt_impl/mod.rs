@@ -11,9 +11,10 @@ use crate::{
         frame::Frame,
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
-    global_allocator::{GlobalAllocator, GlobalAllocatorModel},
+    global_allocator::GlobalAllocator,
 };
 use vstd::prelude::*;
+use vstd::tokens::InstanceId;
 
 mod path;
 mod pt;
@@ -27,29 +28,35 @@ verus! {
 pub struct ExPageTable<A, E>(pub pt::PageTable<A, E>) where A: BitmapAllocator, E: PageTableEntry;
 
 impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
-    open spec fn view(&self, allocator: &GlobalAllocatorModel) -> PageTableState {
-        self.0.view(allocator).view().view()
+    open spec fn view(&self) -> PageTableState {
+        self.0.view().view().view()
     }
 
-    open spec fn invariants(&self, allocator: &GlobalAllocatorModel) -> bool {
-        self.0.invariants(allocator)
+    open spec fn invariants(&self) -> bool {
+        self.0.invariants()
     }
 
-    fn new(allocator: &mut GlobalAllocator<A>, constants: PTConstants) -> (pt: Self) {
+    open spec fn inst_id(&self) -> InstanceId {
+        self.0.inst_id()
+    }
+
+    fn new(allocator: &GlobalAllocator<A>, constants: PTConstants) -> (pt: Self) {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
         let pt = pt::PageTable::<A, E>::new(allocator, constants);
         proof {
-            pt.view(&allocator@).construct_node_facts(pt.view(&allocator@).pt_mem.root, 0);
-            assert(pt.view(&allocator@).view().view().mappings === Map::empty());
+            pt.view().construct_node_facts(pt.view().pt_mem.root, 0);
+            assert(pt.view().view().view().mappings === Map::empty());
         }
         ExPageTable(pt)
     }
 
-    fn map(&mut self, allocator: &mut GlobalAllocator<A>, vbase: VAddr, frame: Frame) -> (res:
-        Result<(), ()>) {
+    fn map(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr, frame: Frame) -> (res: Result<
+        (),
+        (),
+    >) {
         proof {
-            let view = self.0.view(&allocator@);
+            let view = self.0.view();
             view.lemma_wf_implies_node_wf();
             view.construct_node_facts(view.pt_mem.root, 0);
             view.lemma_all_nonempty_above_root_implies();
@@ -63,9 +70,9 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
         self.0.map(allocator, vbase, frame)
     }
 
-    fn unmap(&mut self, allocator: &mut GlobalAllocator<A>, vbase: VAddr) -> (res: Result<(), ()>) {
+    fn unmap(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr) -> (res: Result<(), ()>) {
         proof {
-            let view = self.0.view(&allocator@);
+            let view = self.0.view();
             view.lemma_wf_implies_node_wf();
             view.construct_node_facts(view.pt_mem.root, 0);
             view.lemma_all_nonempty_above_root_implies();
@@ -79,10 +86,9 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
         self.0.unmap(allocator, vbase)
     }
 
-    fn query(&self, Tracked(allocator): Tracked<&GlobalAllocatorModel>, vaddr: VAddr) -> (res:
-        Result<(VAddr, Frame), ()>) {
+    fn query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>) {
         proof {
-            let view = self.0.view(allocator);
+            let view = self.0.view();
             view.lemma_wf_implies_node_wf();
             view.construct_node_facts(view.pt_mem.root, 0);
             view.lemma_all_nonempty_above_root_implies();
@@ -93,11 +99,11 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
             }
             view.view().query_refinement(vaddr@);
         }
-        self.0.query(Tracked(allocator), vaddr)
+        self.0.query(vaddr)
     }
 
-    proof fn lemma_invariants_implies_wf(&self, allocator: &GlobalAllocatorModel) {
-        let view = self.0.view(allocator);
+    proof fn lemma_invariants_implies_wf(&self) {
+        let view = self.0.view();
         view.lemma_wf_implies_node_wf();
         view.construct_node_facts(view.pt_mem.root, 0);
         view.lemma_all_nonempty_above_root_implies();
