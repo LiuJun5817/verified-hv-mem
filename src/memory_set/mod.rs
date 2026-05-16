@@ -6,69 +6,79 @@ use crate::{
         addr::{SpecVAddr, VAddr},
         frame::{self, Frame, FrameSize, MemoryRegion, SpecFrame, PAGE_SIZE},
     },
+    bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
     page_table::PageTable,
 };
 use std::marker::PhantomData;
-use vstd::{invariant, prelude::*};
+use vstd::tokens::InstanceId;
+use vstd::prelude::*;
 
 verus! {
 
 broadcast use crate::page_table::PageTable::lemma_invariants_implies_wf;
 
 /// Specification of a memory set viewed by higher-level components.
-pub trait MemorySet<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
+pub trait MemorySet<PT, A> where PT: PageTable<A>, A: BitmapAllocator {
     /// View the memory set as a list of memory regions.
-    spec fn view(&self, allocator: &A) -> Seq<MemoryRegion>;
+    spec fn view(&self) -> Seq<MemoryRegion>;
 
     /// Invariants that must be implied at initial state and preseved after each operation.
-    spec fn invariants(&self, allocator: &A) -> bool;
+    spec fn invariants(&self) -> bool;
+
+    /// Instance ID of the allocator this memory set is associated with.
+    spec fn inst_id(&self) -> InstanceId;
 
     /// Insert a new memory region into the memory set.
-    fn insert(&mut self, allocator: &mut A, region: MemoryRegion) -> (res: Result<(), ()>)
+    fn insert(&mut self, allocator: &GlobalAllocator<A>, region: MemoryRegion) -> (res: Result<
+        (),
+        (),
+    >)
         requires
-            old(self).invariants(old(allocator)),
-            !old(allocator).view().free.is_empty(),
+            old(self).invariants(),
+            allocator.invariants(),
+            old(self).inst_id() == allocator.inst_id(),
             region.spec_valid(),
         ensures
+            self.inst_id() == old(self).inst_id(),
             if exists|i: int|
-                0 <= i < old(self).view(old(allocator)).len() && #[trigger] old(self).view(
-                    old(allocator),
-                )[i].spec_overlaps(region) {
+                0 <= i < old(self).view().len() && #[trigger] old(self).view()[i].spec_overlaps(
+                    region,
+                ) {
                 &&& res is Err
-                &&& self.view(allocator) == old(self).view(old(allocator))
+                &&& self.view() == old(self).view()
             } else {
                 &&& res is Ok
-                &&& self.view(allocator) == old(self).view(old(allocator)).push(region)
-                &&& self.invariants(allocator)
+                &&& self.view() == old(self).view().push(region)
+                &&& self.invariants()
             },
     ;
 
     /// Remove a memory region from the memory set by its starting virtual address.
-    fn remove(&mut self, allocator: &mut A, start: VAddr) -> (res: Result<(), ()>)
+    fn remove(&mut self, allocator: &GlobalAllocator<A>, start: VAddr) -> (res: Result<(), ()>)
         requires
-            old(self).invariants(old(allocator)),
+            old(self).invariants(),
+            allocator.invariants(),
+            old(self).inst_id() == allocator.inst_id(),
         ensures
+            self.inst_id() == old(self).inst_id(),
             if exists|i: int|
-                0 <= i < old(self).view(old(allocator)).len() && #[trigger] old(self).view(
-                    old(allocator),
-                )[i].start@ == start@ {
+                0 <= i < old(self).view().len() && #[trigger] old(self).view()[i].start@ == start@ {
                 let i = choose|i: int|
-                    0 <= i < old(self).view(old(allocator)).len() && #[trigger] old(self).view(
-                        old(allocator),
-                    )[i].start@ == start@;
+                    0 <= i < old(self).view().len() && #[trigger] old(self).view()[i].start@
+                        == start@;
                 &&& res is Ok
-                &&& self.view(allocator) == old(self).view(old(allocator)).remove(i)
-                &&& self.invariants(allocator)
+                &&& self.view() == old(self).view().remove(i)
+                &&& self.invariants()
             } else {
                 &&& res is Err
-                &&& self.view(allocator) == old(self).view(old(allocator))
+                &&& self.view() == old(self).view()
             },
     ;
 }
 
 /// Memory set implementation using a vector of memory regions.
-pub struct VecMemorySet<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
+pub struct VecMemorySet<PT, A> where PT: PageTable<A>, A: BitmapAllocator {
     /// The list of memory regions in the memory set.
     pub regions: Vec<MemoryRegion>,
     /// Page table managing the mappings.
@@ -77,14 +87,14 @@ pub struct VecMemorySet<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
     pub phantom: PhantomData<A>,
 }
 
-impl<PT, A> VecMemorySet<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
+impl<PT, A> VecMemorySet<PT, A> where PT: PageTable<A>, A: BitmapAllocator {
     /// If a region is mapped in the page table.
     ///
     /// TODO: For now we only support 4KB pages, so we use `mappings.contains_key` to simplify the proof.
     /// In the future if we want to support huge pages, we may use `pt.has_mapping_for` instead.
-    pub open spec fn has_mapping_for(&self, region: MemoryRegion, allocator: &A) -> bool {
+    pub open spec fn has_mapping_for(&self, region: MemoryRegion) -> bool {
         forall|i: nat|
-            i < region.pages ==> #[trigger] self.pt.view(allocator).mappings.contains_key(
+            i < region.pages ==> #[trigger] self.pt.view().mappings.contains_key(
                 region.start@.offset(i * PAGE_SIZE as nat),
             )
     }
@@ -123,9 +133,9 @@ impl<PT, A> VecMemorySet<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
     }
 
     /// Check if a region overlaps with any existing region.
-    pub fn overlaps(&self, region: &MemoryRegion, allocator: &A) -> (res: bool)
+    pub fn overlaps(&self, region: &MemoryRegion) -> (res: bool)
         requires
-            self.invariants(allocator),
+            self.invariants(),
             region.spec_valid(),
         ensures
             res == self.spec_overlaps(*region),
@@ -134,7 +144,7 @@ impl<PT, A> VecMemorySet<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
             invariant
                 0 <= i <= self.regions.len(),
                 region.spec_valid(),
-                self.invariants(allocator),
+                self.invariants(),
                 forall|j: int| #![auto] 0 <= j < i ==> !self.regions[j].spec_overlaps(*region),
         {
             let r = &self.regions[i];
@@ -146,15 +156,13 @@ impl<PT, A> VecMemorySet<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
     }
 
     /// Lemma: overlaps in `vec` implies overlaps in spec view.
-    proof fn lemma_overlaps_equiv(self, region: MemoryRegion, allocator: &A)
+    proof fn lemma_overlaps_equiv(self, region: MemoryRegion)
         requires
-            self.invariants(allocator),
+            self.invariants(),
             region.spec_valid(),
         ensures
             self.spec_overlaps(region) == exists|i: int|
-                0 <= i < self.view(allocator).len() && #[trigger] self.view(
-                    allocator,
-                )[i].spec_overlaps(region),
+                0 <= i < self.view().len() && #[trigger] self.view()[i].spec_overlaps(region),
     {
         if self.spec_overlaps(region) {
             let i = choose|i: int|
@@ -162,14 +170,14 @@ impl<PT, A> VecMemorySet<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
                     &&& 0 <= i < self.regions.len()
                     &&& #[trigger] self.regions[i].spec_overlaps(region)
                 };
-            assert(self.view(allocator)[i] == self.regions[i]);
+            assert(self.view()[i] == self.regions[i]);
         }
     }
 
     /// Lemma: two regions cannot have the same starting virtual address.
-    proof fn lemma_region_start_unique(self, allocator: &A)
+    proof fn lemma_region_start_unique(self)
         requires
-            self.invariants(allocator),
+            self.invariants(),
         ensures
             forall|i: int, j: int|
                 #![auto]
@@ -191,18 +199,22 @@ impl<PT, A> VecMemorySet<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
     }
 }
 
-impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: GlobalAllocator {
-    open spec fn view(&self, allocator: &A) -> Seq<MemoryRegion> {
+impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: BitmapAllocator {
+    open spec fn view(&self) -> Seq<MemoryRegion> {
         Seq::new(self.regions.len() as nat, |i| self.regions[i])
     }
 
-    open spec fn invariants(&self, allocator: &A) -> bool {
-        &&& self.pt.view(allocator).constants.valid()
+    open spec fn inst_id(&self) -> InstanceId {
+        self.pt.inst_id()
+    }
+
+    open spec fn invariants(&self) -> bool {
+        &&& self.pt.view().constants.valid()
         // Frame size is 4K
-        &&& self.pt.view(allocator).constants.arch.leaf_frame_size()
+        &&& self.pt.view().constants.arch.leaf_frame_size()
             == FrameSize::Size4K
         // Page table invariants
-        &&& self.pt.invariants(allocator)
+        &&& self.pt.invariants()
         // Regions are valid
         &&& forall|i: int|
             0 <= i < self.regions.len()
@@ -215,24 +227,23 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
             )
             // Page table contains mappings only within these regions
         &&& forall|vbase: SpecVAddr, frame: SpecFrame| #[trigger]
-            self.pt.view(allocator).mappings.contains_pair(vbase, frame)
-                ==> self.has_region_for_frame(
+            self.pt.view().mappings.contains_pair(vbase, frame) ==> self.has_region_for_frame(
                 vbase,
                 frame,
             )
         // All regions are mapped in the page table
         &&& forall|i: int|
-            0 <= i < self.regions.len() ==> #[trigger] self.has_mapping_for(
-                self.regions[i],
-                allocator,
-            )
+            0 <= i < self.regions.len() ==> #[trigger] self.has_mapping_for(self.regions[i])
     }
 
-    fn insert(&mut self, allocator: &mut A, region: MemoryRegion) -> (res: Result<(), ()>) {
+    fn insert(&mut self, allocator: &GlobalAllocator<A>, region: MemoryRegion) -> (res: Result<
+        (),
+        (),
+    >) {
         proof {
-            self.lemma_overlaps_equiv(region, allocator);
+            self.lemma_overlaps_equiv(region);
         }
-        if self.overlaps(&region, allocator) {
+        if self.overlaps(&region) {
             return Err(());
         }
         assert(!self.spec_overlaps(region));
@@ -253,12 +264,14 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
             invariant
                 region.spec_valid(),
                 i <= region.pages,
-                self.pt.invariants(allocator),
-                self.pt.view(allocator).constants == old(self).pt.view(old(allocator)).constants,
-                self.pt.view(allocator).constants.valid(),
-                self.pt.view(allocator).constants.arch.leaf_frame_size() == FrameSize::Size4K,
+                self.pt.invariants(),
+                self.pt.inst_id() == allocator.inst_id(),
+                allocator.invariants(),
+                self.pt.view().constants == old(self).pt.view().constants,
+                self.pt.view().constants.valid(),
+                self.pt.view().constants.arch.leaf_frame_size() == FrameSize::Size4K,
                 self.regions == old(self).regions,
-                old(self).invariants(old(allocator)),
+                old(self).invariants(),
                 // Old regions do not overlap with each other
                 forall|j: int|
                     0 <= j < self.regions.len() ==> !region.spec_overlaps(
@@ -268,12 +281,12 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                 !self.spec_overlaps(region),
                 // The first `i` pages of the new region are mapped in the page table
                 forall|j: nat|
-                    j < i ==> #[trigger] self.pt.view(allocator).mappings.contains_key(
+                    j < i ==> #[trigger] self.pt.view().mappings.contains_key(
                         region.start@.offset(j * PAGE_SIZE as nat),
                     ),
                 // All mappings in the page table are within old regions or the first `i` pages of the new region
                 forall|vbase2: SpecVAddr, frame2: SpecFrame| #[trigger]
-                    self.pt.view(allocator).mappings.contains_pair(vbase2, frame2)
+                    self.pt.view().mappings.contains_pair(vbase2, frame2)
                         ==> self.has_region_for_frame(vbase2, frame2) || SpecVAddr::interval_subset(
                         vbase2,
                         frame2.size.as_nat(),
@@ -284,10 +297,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                 forall|j: int|
                     0 <= j < self.regions.len() ==> #[trigger] self.has_mapping_for(
                         self.regions[j],
-                        allocator,
                     ),
-                // Assumption to avoid OOM: there are enough free frames in the global allocator
-                !allocator.view().free.is_empty(),
             decreases region.pages - i,
         {
             let vaddr = VAddr(region.start.0 + i * PAGE_SIZE);
@@ -329,7 +339,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                         (i - 1) as nat * PAGE_SIZE as nat,
                     ));
                 }
-                let mappings = self.pt.view(allocator).mappings;
+                let mappings = self.pt.view().mappings;
                 // (vaddr, frame) does not overlap with any existing mapping
                 assert forall|vbase2: SpecVAddr| #[trigger]
                     mappings.contains_key(vbase2) implies !SpecVAddr::overlap(
@@ -339,7 +349,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     frame.size.as_nat(),
                 ) by {
                     assert(mappings.contains_pair(vbase2, mappings[vbase2]));
-                    assert(self.pt.view(allocator).has_mapping_for(vbase2));
+                    assert(self.pt.view().has_mapping_for(vbase2));
                     if i == 0 {
                         // (vbase2, frame2) is within some existing region
                         assert(self.has_region_for_frame(vbase2, mappings[vbase2]));
@@ -355,33 +365,32 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     }
                     assert(!SpecVAddr::overlap(
                         vbase2,
-                        self.pt.view(allocator).mappings[vbase2].size.as_nat(),
+                        self.pt.view().mappings[vbase2].size.as_nat(),
                         vaddr@,
                         frame.size.as_nat(),
                     ));
                 }
-                assert(!self.pt.view(allocator).overlaps_vmem(vaddr@, frame@));
+                assert(!self.pt.view().overlaps_vmem(vaddr@, frame@));
             }
             // TODO: edit precondition to require the new region is within the address space limit
-            assume(vaddr@.0 < self.pt.view(allocator).constants.arch.vspace_size());
+            assume(vaddr@.0 < self.pt.view().constants.arch.vspace_size());
 
             let ghost old_self = *self;
-            let ghost old_allocator = *allocator;
-            let ghost old_mappings = self.pt.view(allocator).mappings;
+            let ghost old_mappings = self.pt.view().mappings;
             let res = self.pt.map(allocator, vaddr, frame);
-            let ghost mappings = self.pt.view(allocator).mappings;
+            let ghost mappings = self.pt.view().mappings;
             i += 1;
 
             proof {
                 // Prove loop invariants
-                assert(self.pt.invariants(allocator));
+                assert(self.pt.invariants());
                 assert(res.is_ok());
                 assert(mappings == old_mappings.insert(vaddr@, frame@));
                 assert(mappings.contains_pair(vaddr@, frame@));
                 // The first `i` pages of the new region are mapped in the page table
-                assert forall|j: nat| j < i implies #[trigger] self.pt.view(
-                    allocator,
-                ).mappings.contains_key(region.start@.offset(j * PAGE_SIZE as nat)) by {
+                assert forall|j: nat| j < i implies #[trigger] self.pt.view().mappings.contains_key(
+                    region.start@.offset(j * PAGE_SIZE as nat),
+                ) by {
                     let vaddr2 = region.start@.offset(j * PAGE_SIZE as nat);
                     if j == i - 1 {
                         assert(vaddr2 == vaddr@);
@@ -422,30 +431,27 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                 assert forall|j: int|
                     0 <= j < self.regions.len() implies #[trigger] self.has_mapping_for(
                     self.regions[j],
-                    allocator,
                 ) by {
                     let region = self.regions[j];
-                    assert(old_self.has_mapping_for(region, &old_allocator));
+                    assert(old_self.has_mapping_for(region));
                 }
-                // Assumption to avoid OOM
-                assume(!allocator.view().free.is_empty());
             }
         }
 
         // After the loop, the whole region is mapped in the page table
-        assert(self.has_mapping_for(region, allocator));
+        assert(self.has_mapping_for(region));
         // Push the region into the list
         let ghost old_self = *self;
         self.regions.push(region);
 
         proof {
-            assert(self.view(allocator) == old(self).view(old(allocator)).push(region));
+            assert(self.view() == old(self).view().push(region));
             // Prove invariants
             // All regions are still valid
             assert forall|i: int|
                 0 <= i < self.regions.len() implies #[trigger] self.regions[i].spec_valid() by {
                 if i < self.regions.len() - 1 {
-                    assert(self.regions[i] == old(self).view(old(allocator))[i]);
+                    assert(self.regions[i] == old(self).view()[i]);
                 } else {
                     assert(self.regions[i] == region);
                 }
@@ -458,9 +464,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                 if i != self.regions.len() - 1 && j != self.regions.len() - 1 {
                     // Old regions
                     assert(!self.regions[i].spec_overlaps(self.regions[j])) by {
-                        assert(!old(self).view(old(allocator))[i].spec_overlaps(
-                            old(self).view(old(allocator))[j],
-                        ));
+                        assert(!old(self).view()[i].spec_overlaps(old(self).view()[j]));
                     };
                 }
             }
@@ -468,30 +472,31 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
             assert forall|i: int|
                 0 <= i < self.regions.len() implies #[trigger] self.has_mapping_for(
                 self.regions[i],
-                allocator,
             ) by {
                 if i == self.regions.len() - 1 {
                     assert(self.regions[i] == region);
                 } else {
-                    assert(old_self.has_mapping_for(self.regions[i], allocator));
+                    assert(old_self.has_mapping_for(self.regions[i]));
                 }
             }
             // All mappings in the page table are within these regions
             assert(forall|vbase2: SpecVAddr, frame2: SpecFrame| #[trigger]
-                self.pt.view(allocator).mappings.contains_pair(vbase2, frame2)
-                    ==> self.has_region_for_frame(vbase2, frame2)) by {
+                self.pt.view().mappings.contains_pair(vbase2, frame2) ==> self.has_region_for_frame(
+                    vbase2,
+                    frame2,
+                )) by {
                 assert(forall|j: int|
                     #![auto]
                     0 <= j < self.regions.len() - 1 ==> self.regions[j] == old_self.regions[j]);
                 assert(self.regions[self.regions.len() - 1] == region);
             }
-            assert(self.invariants(allocator));
+            assert(self.invariants());
         }
 
         Ok(())
     }
 
-    fn remove(&mut self, allocator: &mut A, start: VAddr) -> (res: Result<(), ()>) {
+    fn remove(&mut self, allocator: &GlobalAllocator<A>, start: VAddr) -> (res: Result<(), ()>) {
         let len = self.regions.len();
         let mut i = 0;
         // Find the region with the given start address
@@ -500,7 +505,6 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                 len == self.regions.len(),
                 0 <= i <= self.regions.len(),
                 *self == *old(self),
-                *allocator == *old(allocator),
                 forall|j: int| 0 <= j < i ==> #[trigger] self.regions[j].start@ != start@,
             ensures
                 i < len ==> self.regions[i as int].start@ == start@,
@@ -519,7 +523,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
             return Err(());
         }
         proof {
-            self.lemma_region_start_unique(allocator);
+            self.lemma_region_start_unique();
             assert(i == choose|i: int|
                 0 <= i < self.regions.len() && #[trigger] self.regions[i].start@ == start@);
         }
@@ -527,7 +531,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
         let ridx = i;
         let region = &self.regions[ridx];
         assert(region.start@ == start@);
-        assert(self.has_mapping_for(*region, allocator));
+        assert(self.has_mapping_for(*region));
 
         let mut i = 0;
         // Unmap the region from the page table
@@ -535,12 +539,14 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
             invariant
                 region.spec_valid(),
                 i <= region.pages,
-                self.pt.invariants(allocator),
-                self.pt.view(allocator).constants == old(self).pt.view(old(allocator)).constants,
-                self.pt.view(allocator).constants.valid(),
-                self.pt.view(allocator).constants.arch.leaf_frame_size() == FrameSize::Size4K,
+                self.pt.invariants(),
+                self.pt.inst_id() == allocator.inst_id(),
+                allocator.invariants(),
+                self.pt.view().constants == old(self).pt.view().constants,
+                self.pt.view().constants.valid(),
+                self.pt.view().constants.arch.leaf_frame_size() == FrameSize::Size4K,
                 self.regions == old(self).regions,
-                old(self).invariants(old(allocator)),
+                old(self).invariants(),
                 // Region do not overlap with other regions
                 forall|j: int|
                     0 <= j < self.regions.len() && j != ridx ==> !region.spec_overlaps(
@@ -548,12 +554,12 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     ),
                 // Pages [i, region.pages) of the removed region are mapped in the page table
                 forall|j: nat|
-                    i <= j < region.pages ==> #[trigger] self.pt.view(
-                        allocator,
-                    ).mappings.contains_key(region.start@.offset(j * PAGE_SIZE as nat)),
+                    i <= j < region.pages ==> #[trigger] self.pt.view().mappings.contains_key(
+                        region.start@.offset(j * PAGE_SIZE as nat),
+                    ),
                 // All mappings are within old regions or the pages [i, region.pages) of the removed region
                 forall|vbase2: SpecVAddr, frame2: SpecFrame| #[trigger]
-                    self.pt.view(allocator).mappings.contains_pair(vbase2, frame2)
+                    self.pt.view().mappings.contains_pair(vbase2, frame2)
                         ==> self.has_region_for_frame_except(vbase2, frame2, ridx as int)
                         || SpecVAddr::interval_subset(
                         vbase2,
@@ -565,31 +571,29 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                 forall|j: int|
                     0 <= j < self.regions.len() && j != ridx ==> #[trigger] self.has_mapping_for(
                         self.regions[j],
-                        allocator,
                     ),
             decreases region.pages - i,
         {
             let vaddr = VAddr(region.start.0 + i * PAGE_SIZE);
             proof {
                 assert(vaddr@.0 % PAGE_SIZE as nat == 0);
-                assert(self.pt.view(allocator).mappings.contains_key(
+                assert(self.pt.view().mappings.contains_key(
                     region.start@.offset((i * PAGE_SIZE) as nat),
                 ));
                 // TODO: edit precondition to require the new region is within the address space limit
-                assume(vaddr@.0 < self.pt.view(allocator).constants.arch.vspace_size());
+                assume(vaddr@.0 < self.pt.view().constants.arch.vspace_size());
             }
 
             let ghost old_self = *self;
-            let ghost old_allocator = *allocator;
-            let ghost old_mappings = self.pt.view(allocator).mappings;
+            let ghost old_mappings = self.pt.view().mappings;
             // Unmap the frame, always succeed
             let res = self.pt.unmap(allocator, vaddr);
-            let ghost mappings = self.pt.view(allocator).mappings;
+            let ghost mappings = self.pt.view().mappings;
             i += 1;
 
             proof {
                 // Prove loop invariants
-                assert(self.pt.invariants(allocator));
+                assert(self.pt.invariants());
                 assert(res.is_ok());
                 assert(mappings == old_mappings.remove(vaddr@));
                 // All mappings are within old regions or the pages [i, region.pages) of the removed region
@@ -626,12 +630,9 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                 // Other regions are still mapped in the page table
                 assert forall|j: int|
                     0 <= j < self.regions.len() && j
-                        != ridx implies #[trigger] self.has_mapping_for(
-                    self.regions[j],
-                    allocator,
-                ) by {
+                        != ridx implies #[trigger] self.has_mapping_for(self.regions[j]) by {
                     let region2 = self.regions[j];
-                    assert(old_self.has_mapping_for(region2, &old_allocator));
+                    assert(old_self.has_mapping_for(region2));
                     assert(!region.spec_overlaps(region2));
                 }
             }
@@ -642,15 +643,15 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
         self.regions.remove(ridx);
 
         proof {
-            assert(self.view(allocator) == old(self).view(old(allocator)).remove(ridx as int));
+            assert(self.view() == old(self).view().remove(ridx as int));
             // Prove invariants
             // All regions are still valid
             assert forall|i: int|
                 0 <= i < self.regions.len() implies #[trigger] self.regions[i].spec_valid() by {
                 if i < ridx {
-                    assert(self.regions[i] == old(self).view(old(allocator))[i]);
+                    assert(self.regions[i] == old(self).view()[i]);
                 } else {
-                    assert(self.regions[i] == old(self).view(old(allocator))[i + 1]);
+                    assert(self.regions[i] == old(self).view()[i + 1]);
                 }
             };
             // All regions are still non-overlapping
@@ -661,9 +662,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                 if i != self.regions.len() - 1 && j != self.regions.len() - 1 {
                     // Old regions
                     assert(!self.regions[i].spec_overlaps(self.regions[j])) by {
-                        assert(!old(self).view(old(allocator))[i].spec_overlaps(
-                            old(self).view(old(allocator))[j],
-                        ));
+                        assert(!old(self).view()[i].spec_overlaps(old(self).view()[j]));
                     };
                 }
             }
@@ -671,19 +670,18 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
             assert forall|i: int|
                 0 <= i < self.regions.len() implies #[trigger] self.has_mapping_for(
                 self.regions[i],
-                allocator,
             ) by {
                 if i < ridx {
-                    assert(self.regions[i] == old(self).view(old(allocator))[i]);
-                    assert(old_self.has_mapping_for(self.regions[i], allocator));
+                    assert(self.regions[i] == old(self).view()[i]);
+                    assert(old_self.has_mapping_for(self.regions[i]));
                 } else {
-                    assert(self.regions[i] == old(self).view(old(allocator))[i + 1]);
-                    assert(old_self.has_mapping_for(self.regions[i], allocator));
+                    assert(self.regions[i] == old(self).view()[i + 1]);
+                    assert(old_self.has_mapping_for(self.regions[i]));
                 }
             }
             // All mappings in the page table are within these regions
             assert forall|vbase2: SpecVAddr, frame2: SpecFrame| #[trigger]
-                self.pt.view(allocator).mappings.contains_pair(
+                self.pt.view().mappings.contains_pair(
                     vbase2,
                     frame2,
                 ) implies self.has_region_for_frame(vbase2, frame2) by {
@@ -701,7 +699,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     assert(old_self.regions[j] == self.regions[j - 1]);
                 }
             }
-            assert(self.invariants(allocator));
+            assert(self.invariants());
         }
 
         Ok(())
