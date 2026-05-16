@@ -1,13 +1,11 @@
 //! Page table trait with formal specification.
-use core::alloc;
-
-use vstd::prelude::*;
-
-// use super::pt_mem::PageTableMem;
 use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 use crate::address::frame::{Frame, MemAttr, SpecFrame};
-use crate::global_allocator::GlobalAllocator;
+use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
+use crate::global_allocator::{ClientID, GlobalAllocator};
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
+use vstd::prelude::*;
+use vstd::tokens::InstanceId;
 
 verus! {
 
@@ -322,73 +320,72 @@ impl PageTableState {
 /// Specification of a Page Table viewed by higher-level components.
 ///
 /// Concrete implementation must implement `PageTable` trait to satisfy the specification.
-pub trait PageTable<A> where Self: Sized, A: GlobalAllocator {
+pub trait PageTable<A> where Self: Sized, A: BitmapAllocator {
     /// View as a `SpecVAddr` to `Frame` mapping.
-    spec fn view(&self, allocator: &A) -> PageTableState;
+    spec fn view(&self) -> PageTableState;
 
     /// Invariants that must be implied at initial state and preseved after each operation.
-    spec fn invariants(&self, allocator: &A) -> bool;
+    spec fn invariants(&self) -> bool;
+
+    /// Instance id of the AllocSpec.
+    spec fn inst_id(&self) -> InstanceId;
 
     /// Create an empty page table
     ///
     /// TODO: we assume all tables in the hierarchical page table contain 512 8-byte entries, which is true
     /// for hvisor's aarch64 implementation. We can make it more general in the future.
-    fn new(allocator: &mut A, cid: usize, constants: PTConstants) -> (pt: Self)
+    fn new(allocator: &GlobalAllocator<A>, constants: PTConstants) -> (pt: Self)
         requires
-            old(allocator).invariants(),
-            old(allocator).view().clients.contains_key(cid as nat),
-            old(allocator).view().clients[cid as nat].is_empty(),
-            !old(allocator).view().free.is_empty(),
+            allocator.invariants(),
             constants@.valid(),
             forall|level: nat|
                 level < constants.arch@.level_count() ==> constants.arch@.entry_count(level) == 512,
-            A::frame_size() == 4096,
         ensures
-            pt.view(allocator).constants == constants@,
-            pt.view(allocator).init(),
-            pt.invariants(allocator),
+            pt@.constants == constants@,
+            pt@.init(),
+            pt.inst_id() == allocator.inst_id(),
+            pt.invariants(),
     ;
 
     /// Map a virtual address to a physical frame with given attributes.
-    fn map(&mut self, allocator: &mut A, vbase: VAddr, frame: Frame) -> (res: Result<(), ()>)
+    fn map(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr, frame: Frame) -> (res: Result<
+        (),
+        (),
+    >)
         requires
-            old(self).invariants(old(allocator)),
-            old(self).view(old(allocator)).map_pre(vbase@, frame@),
-            !old(allocator).view().free.is_empty(),
+            allocator.invariants(),
+            old(self).inst_id() == allocator.inst_id(),
+            old(self).invariants(),
+            old(self)@.map_pre(vbase@, frame@),
         ensures
-            self.invariants(allocator),
-            PageTableState::map(
-                old(self).view(old(allocator)),
-                self.view(allocator),
-                vbase@,
-                frame@,
-                res,
-            ),
+            allocator.invariants(),
+            self.inst_id() == old(self).inst_id(),
+            self.invariants(),
+            PageTableState::map(old(self)@, self@, vbase@, frame@, res),
     ;
 
     /// Unmap a virtual address.
-    fn unmap(&mut self, allocator: &mut A, vbase: VAddr) -> (res: Result<(), ()>)
+    fn unmap(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr) -> (res: Result<(), ()>)
         requires
-            old(self).invariants(old(allocator)),
-            old(self).view(old(allocator)).unmap_pre(vbase@),
+            allocator.invariants(),
+            old(self).inst_id() == allocator.inst_id(),
+            old(self).invariants(),
+            old(self)@.unmap_pre(vbase@),
         ensures
-            self.invariants(allocator),
-            PageTableState::unmap(
-                old(self).view(old(allocator)),
-                self.view(allocator),
-                vbase@,
-                res,
-            ),
+            allocator.invariants(),
+            self.inst_id() == old(self).inst_id(),
+            self.invariants(),
+            PageTableState::unmap(old(self)@, self@, vbase@, res),
     ;
 
     /// Query the physical frame mapped to a virtual address.
-    fn query(&self, allocator: &A, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+    fn query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
         requires
-            self.invariants(allocator),
-            self.view(allocator).query_pre(vaddr@),
+            self.invariants(),
+            self@.query_pre(vaddr@),
         ensures
-            self.invariants(allocator),
-            self.view(allocator).query(
+            self.invariants(),
+            self@.query(
                 vaddr@,
                 match res {
                     Ok((vaddr_exec, frame_exec)) => Ok((vaddr_exec@, frame_exec@)),
@@ -398,11 +395,11 @@ pub trait PageTable<A> where Self: Sized, A: GlobalAllocator {
     ;
 
     /// Lemma. Invariants implies well-formedness.
-    broadcast proof fn lemma_invariants_implies_wf(&self, allocator: &A)
+    broadcast proof fn lemma_invariants_implies_wf(&self)
         requires
-            #[trigger] self.invariants(allocator),
+            #[trigger] self.invariants(),
         ensures
-            self.view(allocator).wf(),
+            self@.wf(),
     ;
 }
 

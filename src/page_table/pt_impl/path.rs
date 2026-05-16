@@ -87,7 +87,7 @@ impl PTTreePath {
             arch.valid(),
             start <= end < arch.level_count(),
     {
-        Self(Seq::new((end - start) as nat + 1, |i: int| arch.pte_index(vaddr, i as nat + start)))
+        Self(Seq::new((end + 1 - start) as nat, |i: int| arch.pte_index(vaddr, i as nat + start)))
     }
 
     /// Get a `PTTreePath` from a virtual address, used to query the page table from root.
@@ -295,6 +295,8 @@ impl PTTreePath {
     }
 
     /// Lemma. The address computed by `to_vaddr` is aligned to the frame size of the last level.
+    ///
+    /// TODO: This lemma takes 20+s to verify. Optimize it.
     pub broadcast proof fn lemma_to_vaddr_frame_alignment(self, arch: SpecPTArch)
         by (nonlinear_arith)
         requires
@@ -756,6 +758,120 @@ impl PTTreePath {
         assert(pref.0[0] < arch.entry_count(0));
         assert(pref.to_vaddr(arch).0 + fsize <= arch.vspace_size());
     }
+
+    /// Lemma. If `vbase` is aligned to `frame_size(level)`, then all path indices from `level+1` to `end` are zero.
+    pub broadcast proof fn lemma_aligned_implies_remain_zero(
+        vbase: SpecVAddr,
+        arch: SpecPTArch,
+        level: nat,
+        end: nat,
+    )
+        requires
+            arch.valid(),
+            level <= end < arch.level_count(),
+            vbase.aligned(arch.frame_size(level).as_nat()),
+        ensures
+            #[trigger] Self::from_vaddr(vbase, arch, level + 1, end).is_zero(),
+        decreases end - level,
+    {
+        let remain = Self::from_vaddr(vbase, arch, level + 1, end);
+        if level == end {
+            assert(remain.0.len() == end + 1 - (level + 1));
+        } else {
+            let f = arch.frame_size(level + 1).as_nat();
+            let e = arch.entry_count(level + 1);
+            let v = vbase.0;
+            // arch.valid(): frame_size(level) = frame_size(level+1) * entry_count(level+1) = f * e
+            assert(arch.frame_size(level).as_nat() == f * e);
+            assert(f > 0);
+            assert(e > 0);
+            // v % (f * e) = 0 (aligned at level)
+            assert(v % (f * e) == 0);
+            // Use the arithmetic identity: v%f + (v/f)%e * f == v%(e*f)
+            lemma_mod_div_mod_mul_eq(v, f, e);
+            // e*f == f*e by commutativity
+            assert(e * f == f * e) by (nonlinear_arith);
+            assert(v % f + (v / f) % e * f == 0);
+            // Both terms are >= 0, so each is 0
+            assert(v % f == 0);
+            assert((v / f) % e == 0);
+            // vbase is aligned to frame_size(level+1) and pte_index(level+1) == 0
+            assert(vbase.aligned(arch.frame_size(level + 1).as_nat()));
+            assert(arch.pte_index(vbase, level + 1) == 0);
+            // Apply IH: remain2 = from_vaddr(vbase, arch, level+2, end) is zero
+            Self::lemma_aligned_implies_remain_zero(vbase, arch, level + 1, end);
+            let remain2 = PTTreePath::from_vaddr(vbase, arch, level + 2, end);
+            // remain.0[0] = pte_index(vbase, level+1) = 0
+            // remain.0[i] for i > 0 = pte_index(vbase, i + level + 1) = remain2.0[i-1] = 0
+            assert forall|i: int| 0 <= i < remain.len() implies remain.0[i] == 0 by {
+                assert(remain.0[i] == arch.pte_index(vbase, i as nat + level + 1));
+                if i == 0 {
+                    // pte_index(vbase, level+1) == 0 proved above
+                } else {
+                    assert(remain2.0[i - 1] == arch.pte_index(vbase, (i - 1) as nat + level + 2));
+                    // (i-1) + level + 2 = i + level + 1
+                    assert(i as nat + level + 1 == (i - 1) as nat + level + 2);
+                    assert(remain2.0[i - 1] == 0);
+                }
+            }
+        }
+    }
+
+    /// Lemma. If all path indices from `level+1` to `end` are zero AND `vbase` is aligned to `frame_size(end)`,
+    /// then `vbase` is aligned to `frame_size(level)`.
+    pub broadcast proof fn lemma_remain_zero_implies_aligned(
+        vbase: SpecVAddr,
+        arch: SpecPTArch,
+        level: nat,
+        end: nat,
+    )
+        requires
+            arch.valid(),
+            level <= end < arch.level_count(),
+            #[trigger] Self::from_vaddr(vbase, arch, level + 1, end).is_zero(),
+            vbase.aligned(arch.frame_size(end).as_nat()),
+        ensures
+            vbase.aligned(arch.frame_size(level).as_nat()),
+        decreases end - level,
+    {
+        if level == end {
+            assert(vbase.aligned(arch.frame_size(level).as_nat()));
+        } else {
+            let f = arch.frame_size(level + 1).as_nat();
+            let e = arch.entry_count(level + 1);
+            let v = vbase.0;
+            let remain = Self::from_vaddr(vbase, arch, level + 1, end);
+            let remain2 = Self::from_vaddr(vbase, arch, level + 2, end);
+            // remain.0[0] = pte_index(vbase, level+1)
+            assert(remain.0[0] == arch.pte_index(vbase, level + 1));
+            // remain.is_zero() => remain.0[0] == 0 => pte_index(vbase, level+1) == 0
+            assert(arch.pte_index(vbase, level + 1) == 0);
+            assert(arch.pte_index(vbase, level + 1) == (v / f) % e);
+            assert((v / f) % e == 0);
+            // remain2 is also zero (it's a sub-sequence of remain)
+            assert forall|i: int| 0 <= i < remain2.len() implies remain2.0[i] == 0 by {
+                // remain2.0[i] = pte_index(vbase, i + level + 2) = remain.0[i+1]
+                assert(remain2.0[i] == arch.pte_index(vbase, i as nat + level + 2));
+                assert(remain.0[i + 1] == arch.pte_index(vbase, (i + 1) as nat + level + 1));
+                assert(i as nat + level + 2 == (i + 1) as nat + level + 1);
+                assert(remain.0[i + 1] == 0);
+            };
+            assert(remain2.is_zero());
+            // By IH: vbase.aligned(frame_size(level+1))
+            Self::lemma_remain_zero_implies_aligned(vbase, arch, level + 1, end);
+            // Now: v % f == 0 and (v/f) % e == 0
+            assert(v % f == 0);
+            assert(arch.frame_size(level).as_nat() == f * e);
+            assert(f > 0);
+            assert(e > 0);
+            // Use arithmetic identity: v%f + (v/f)%e * f == v%(e*f)
+            lemma_mod_div_mod_mul_eq(v, f, e);
+            assert(e * f == f * e) by (nonlinear_arith);
+            assert(v % f + (v / f) % e * f == v % (f * e));
+            // v%f == 0 and (v/f)%e == 0 => v%f + (v/f)%e * f == 0 => v%(f*e) == 0
+            assert(v % (f * e) == 0);
+        }
+    }
 }
 
 /// Lemma. If a sequence is a zero sequence, then its sum is zero.
@@ -885,10 +1001,11 @@ proof fn lemma_mod_div_mod_mul_eq(v: nat, f: nat, e: nat)
     // Right side
     assert(v % (e * f) == (p * (e * f) + (q * f + b)) % (e * f));
     assert((p * e * f + q * f + b) % (e * f) == (b + q * f) % (e * f));
-    // Left side == Right side
     assert(b + q * f < e * f);
     lemma_mod_eq_self(b + q * f, e * f);
     assert((b + q * f) % (e * f) == b + q * f);
+    assert(v % (e * f) == b + q * f);
+    // Left side == Right side
 }
 
 proof fn lemma_mod_eq_self(v: nat, m: nat)
@@ -922,6 +1039,8 @@ pub broadcast group group_pt_tree_path_lemmas {
     PTTreePath::lemma_vaddr_within_path_range,
     PTTreePath::lemma_to_vaddr_inverts_from_vaddr,
     PTTreePath::lemma_to_vaddr_within_vspace_size,
+    PTTreePath::lemma_aligned_implies_remain_zero,
+    PTTreePath::lemma_remain_zero_implies_aligned,
 }
 
 } // verus!

@@ -6,7 +6,8 @@ pub mod bitmap_allocator;
 pub mod memory_set;
 pub mod page_table;
 pub mod global_allocator;
-pub mod hv_mem;
+// pub mod hv_mem;
+pub mod sync;
 
 verus! {
 
