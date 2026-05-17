@@ -177,6 +177,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> Mutex<K, V, Pred> {
         Mutex { locked, inst, k: Ghost(k) }
     }
 
+    /// Check if the mutex invariant holds for a given value.
     pub open spec fn inv(&self, val: V) -> bool {
         Pred::inv(self.k@, val)
     }
