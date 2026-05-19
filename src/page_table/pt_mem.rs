@@ -472,7 +472,7 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
         let (root, Tracked(client)) = allocator.alloc(Tracked(client));
 
         let tables = Ghost(Map::empty().insert(root@, 0));
-        let ghost fid = (root@.0 - allocator.base@.0) as nat / SPEC_FRAME_SIZE;
+        let ghost fid = allocator.paddr_to_fid_spec(root@);
         let tracked frame_perm: &Frame4KPerm = client.borrow_perm(fid, Ghost(allocator.inst_id()));
 
         let res = Self {

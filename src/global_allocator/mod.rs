@@ -50,21 +50,6 @@ pub proof fn lemma_exists_different_client_id(s: Set<ClientID>)
     }
 }
 
-/// Permission to access a 4K Frame
-pub type Frame4KPerm = vstd::simple_pptr::PointsTo<[u8; 4096]>;
-
-/// A marker spec funtion indicates a frame is empty.
-pub uninterp spec fn frame_is_empty(perm: &Frame4KPerm) -> bool;
-
-/// Frame Size: 4 KiB (4096 bytes).
-pub const FRAME_SIZE: usize = 4096;
-
-/// Frame size in spec mode.
-pub spec const SPEC_FRAME_SIZE: nat = 4096;
-
-/// Abstract function binding allocator instance id to its base address.
-pub uninterp spec fn inst_base(inst_id: InstanceId) -> SpecPAddr;
-
 tokenized_state_machine! {
     AllocSpec {
         fields {
@@ -368,9 +353,8 @@ tokenized_state_machine! {
         }
     }
 }
+
 // ── Type aliases ──────────────────────────────────────────────────────────────
-
-
 pub type AllocInstance = AllocSpec::Instance;
 
 pub type FreeSetToken = AllocSpec::free_set;
@@ -378,6 +362,21 @@ pub type FreeSetToken = AllocSpec::free_set;
 pub type RegisteredToken = AllocSpec::registered;
 
 pub type ClientToken = AllocSpec::client_sets;
+
+/// Frame Size: 4 KiB (4096 bytes).
+pub const FRAME_SIZE: usize = 4096;
+
+/// Frame size in spec mode.
+pub spec const SPEC_FRAME_SIZE: nat = 4096;
+
+/// Permission to access a 4K Frame
+pub type Frame4KPerm = vstd::simple_pptr::PointsTo<[u8; 4096]>;
+
+/// A marker spec funtion indicates a frame is empty.
+pub uninterp spec fn frame_is_empty(perm: &Frame4KPerm) -> bool;
+
+/// Abstract function binding allocator instance id to its base address.
+pub uninterp spec fn inst_base(inst_id: InstanceId) -> SpecPAddr;
 
 // ── Allocator-side ghost state ────────────────────────────────────────────────
 /// Ghost state held inside the allocator.
