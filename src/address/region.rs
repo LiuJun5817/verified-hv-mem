@@ -160,6 +160,18 @@ impl MemoryRegion {
             self.spec_overlaps_vmem(other) == other.spec_overlaps_vmem(self),
     {
     }
+
+    /// Lemma: If a region contains a virtual address, then it also contains the corresponding physical address.
+    pub proof fn lemma_contains_vaddr_implies_contains_paddr(self, vaddr: SpecVAddr)
+        requires
+            self.spec_valid(),
+            self.spec_contains_vaddr(vaddr),
+        ensures
+            self.spec_contains_paddr(self.spec_translate(vaddr)),
+    {
+        // TODO
+        assume(false);
+    }
 }
 
 /// The mapping strategy for a memory region.

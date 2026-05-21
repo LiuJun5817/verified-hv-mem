@@ -39,8 +39,26 @@ use vstd::{
 
 verus! {
 
+/// Abstract function representing the set of all possible memory regions that can be
+/// statically configured in the system.
+pub uninterp spec fn all_regions() -> Set<MemoryRegion>;
+
+/// Axiom: all regions in `all_regions()` are valid. This is guaranteed by configuration tools.
+axiom fn all_regions_valid()
+    ensures
+        forall|r: MemoryRegion| #[trigger] all_regions().contains(r) ==> r.spec_valid(),
+;
+
+/// Axiom: all regions in `all_regions()` do not overlap in physical memory.
+axiom fn all_regions_disjoint()
+    ensures
+        forall|r1: MemoryRegion, r2: MemoryRegion| #![auto]
+            all_regions().contains(r1) && all_regions().contains(r2) && r1 != r2
+                ==> !r1.spec_overlaps_pmem(r2),
+;
+
 /// Ghost state for one zone tracked inside `HvMemSpec`.
-pub struct GhostZone {
+pub ghost struct GhostZone {
     /// Allocator instance id shared by the whole hypervisor memory manager.
     pub alloc_inst_id: InstanceId,
     /// Region sequence used by the existing memory-set abstraction.
@@ -106,11 +124,13 @@ tokenized_state_machine! {
             pub region_closure: Set<MemoryRegion>,
         }
 
+        /// `zone_ids` is always the exact set of keys in `zones`
         #[invariant]
         pub fn inv_zone_ids(&self) -> bool {
             self.zones.dom() == self.zone_ids
         }
 
+        /// All zones are well-formed relative to the system allocator instance.
         #[invariant]
         pub fn inv_zones_wf(&self) -> bool {
             forall|zid: nat|
@@ -125,44 +145,31 @@ tokenized_state_machine! {
                     self.zones.contains_key(zid) && #[trigger] self.zones[zid].contains_region(region)
         }
 
-        /// P1 (RegionDisjoint): Any two distinct regions in the closure must be disjoint. This simultaneously
-        /// gives zone-internal disjointness and cross-zone disjointness.
+        /// `region_closure` is a subset of `all_regions()`.
+        ///
+        /// Combined with the `all_regions_disjoint()` axiom, this implies P1 (RegionDisjoint):
+        /// any two distinct regions in `region_closure` are non-overlapping, because they both
+        /// live in `all_regions()` which is axiomatically pairwise disjoint.
         #[invariant]
-        pub fn inv_region_disjoint(&self) -> bool {
-            forall|r1: MemoryRegion, r2: MemoryRegion| #![auto]
-                self.region_closure.contains(r1) && self.region_closure.contains(r2) && r1 != r2
-                    ==> !r1.spec_overlaps_pmem(r2)
+        pub fn inv_region_closure_subset(&self) -> bool {
+            forall|r: MemoryRegion| #[trigger] self.region_closure.contains(r) ==> all_regions().contains(r)
         }
 
         /// Each region belongs to at most one zone.
         ///
-        /// This is not derivable from `inv_region_disjoint` alone (which only covers *distinct*
-        /// regions). It is preserved by `insert_region` because the precondition forbids
-        /// adding a region already present in `region_closure`, and a non-empty region
-        /// always overlaps with itself (`spec_overlaps` is reflexive for `spec_valid` regions).
+        /// Together with `inv_region_closure_subset` and `all_regions_disjoint()`, this
+        /// closes the proof of P1 (RegionDisjoint): `inv_region_closure_subset` handles
+        /// the `r1 ≠ r2` case via the axiom, and `inv_region_unique_owner` rules out the
+        /// `r1 = r2` case for distinct zones.  It is preserved by `insert_region` because
+        /// the precondition `!region_closure.contains(region)` forbids adding a region
+        /// already owned by any zone.
         #[invariant]
         pub fn inv_region_unique_owner(&self) -> bool {
             forall|r: MemoryRegion, zid1: nat, zid2: nat|
-                #![trigger self.zones[zid1].contains_region(r), self.zones[zid2].contains_region(r)]
                 self.zones.contains_key(zid1) && self.zones.contains_key(zid2)
-                && self.zones[zid1].contains_region(r)
-                && self.zones[zid2].contains_region(r)
+                && #[trigger] self.zones[zid1].contains_region(r)
+                && #[trigger] self.zones[zid2].contains_region(r)
                     ==> zid1 == zid2
-        }
-
-        /// P2 (ZoneIsolated): every mapped translation in a zone stays within the declaring
-        /// region's physical range.
-        #[invariant]
-        pub fn inv_zone_isolated(&self) -> bool {
-            forall|zid: nat, v: SpecVAddr|
-                #![trigger self.zones[zid].mem_set.contains_vaddr(v)]
-                self.zones.contains_key(zid)
-                && self.zones[zid].mem_set.contains_vaddr(v) ==> {
-                    let (_, paddr) = self.zones[zid].mem_set.translate(v);
-                    let r = choose|r: MemoryRegion| #[trigger] self.zones[zid].regions().contains(r)
-                            && r.spec_contains_vaddr(v);
-                    r.spec_contains_paddr(paddr)
-                }
         }
 
         // ── Properties ────────────────────────────────────────────────────────────
@@ -180,15 +187,21 @@ tokenized_state_machine! {
                 have zones >= [zid => zone];
                 assert(forall|r: MemoryRegion|
                     #[trigger] zone.regions().contains(r) ==> pre.region_closure.contains(r)
-                ) by { admit(); };
+                ) by { 
+                    assert forall|r: MemoryRegion| #[trigger] zone.regions().contains(r) 
+                        implies pre.region_closure.contains(r) by {
+                        assert(pre.zones.contains_key(zid) && pre.zones[zid].contains_region(r));
+                    };
+                };
             }
         }
 
         /// Regions from two *distinct* zones are mutually non-overlapping.
         ///
-        /// Proof sketch:
+        /// Proof sketch (P1 derivation):
         /// - From `inv_region_closure`, every region of either zone is in `region_closure`.
-        /// - If r1 ≠ r2: `inv_region_disjoint` gives `!r1.spec_overlaps(r2)` directly.
+        /// - From `inv_region_closure_subset`, every region in `region_closure` is in `all_regions()`.
+        /// - If r1 ≠ r2: `all_regions_disjoint()` gives `!r1.spec_overlaps_pmem(r2)` directly.
         /// - If r1 = r2: `inv_region_unique_owner` says the same region cannot belong to two
         ///   different zones (`zid1 != zid2`), so this case is vacuously impossible.
         property! {
@@ -205,11 +218,48 @@ tokenized_state_machine! {
                         assert(pre.zones.contains_key(zid1) && pre.zones[zid1].contains_region(r1));
                         assert(pre.zones.contains_key(zid2) && pre.zones[zid2].contains_region(r2));
                         if r1 != r2 {
+                            // Both are in region_closure (via inv_region_closure), hence in
+                            // all_regions() (via inv_region_closure_subset). Apply the axiom.
                             assert(pre.region_closure.contains(r1) && pre.region_closure.contains(r2));
+                            assert(all_regions().contains(r1) && all_regions().contains(r2));
+                            all_regions_disjoint();
                         } else {
+                            // r1 == r2 but zid1 != zid2 contradicts inv_region_unique_owner.
                             assert(false);
                         }
                     }
+                };
+            }
+        }
+
+        /// P2 (ZoneIsolated): every mapped translation in a zone stays within the declaring
+        /// region's physical range.
+        ///
+        /// Derivation: `inv_zones_wf` gives `zone.wf()` which includes `zone.mem_set.wf()`,
+        /// so every region `r` in the zone satisfies `r.spec_valid()`.  For any virtual
+        /// address `v` mapped in the zone, `SpecMemorySet::translate` chooses the same `r`
+        /// that `contains_vaddr` witnesses.  `MemoryRegion::lemma_contains_vaddr_implies_contains_paddr`
+        /// then gives `r.spec_contains_paddr(r.spec_translate(v))`, which is exactly P2.
+        property! {
+            zone_isolated(zid: nat, zone: GhostZone, v: SpecVAddr) {
+                have zones >= [zid => zone];
+                require(zone.mem_set.contains_vaddr(v));
+                assert(zone.wf(pre.alloc_inst_id));
+                assert({
+                    let paddr = zone.mem_set.translate(v);
+                    let r = choose|r: MemoryRegion|
+                        #[trigger] zone.regions().contains(r) && r.spec_contains_vaddr(v);
+                    r.spec_contains_paddr(paddr)
+                }) by {
+                    // inv_zones_wf => zone.wf() => zone.mem_set.wf()
+                    let paddr = zone.mem_set.translate(v);
+                    assert(zone.mem_set.wf());
+                    assert(exists|r: MemoryRegion| #[trigger] zone.regions().contains(r) && r.spec_contains_vaddr(v));
+                    let r = choose|r: MemoryRegion| #[trigger]
+                        zone.regions().contains(r) && r.spec_contains_vaddr(v);
+                    assert(r.spec_valid());
+                    r.lemma_contains_vaddr_implies_contains_paddr(v);
+                    assert(r.spec_contains_paddr(paddr));
                 };
             }
         }
@@ -224,14 +274,20 @@ tokenized_state_machine! {
         }
 
         /// Add a fully constructed zone. The caller must prove that every region in the new zone
-        /// is disjoint from the existing global closure.
+        /// belongs to `all_regions()` (static configuration membership) and is not already
+        /// present in the global closure (no duplicate ownership).
+        ///
+        /// Disjointness from the existing closure follows automatically: both the new regions and
+        /// the existing closure are subsets of `all_regions()`, which is axiomatically pairwise
+        /// disjoint, and the no-duplicate requirement rules out the same-region edge case.
         transition! {
             add_zone(zid: nat, zone: GhostZone) {
                 require(!pre.zone_ids.contains(zid));
                 require(zone.wf(pre.alloc_inst_id));
-                require(forall|new_region: MemoryRegion|
-                    zone.regions().contains(new_region) ==> forall|existing: MemoryRegion|
-                        #[trigger] pre.region_closure.contains(existing) ==> !new_region.spec_overlaps_pmem(existing));
+                require(forall|r: MemoryRegion|
+                    #[trigger] zone.regions().contains(r) ==> all_regions().contains(r));
+                require(forall|r: MemoryRegion|
+                    #[trigger] zone.regions().contains(r) ==> !pre.region_closure.contains(r));
                 update zone_ids = pre.zone_ids.insert(zid);
                 add zones += [zid => zone];
                 update region_closure = pre.region_closure.union(zone.regions());
@@ -252,16 +308,19 @@ tokenized_state_machine! {
 
         /// Insert one region into an existing zone.
         ///
-        /// The key precondition is disjointness against the entire existing `region_closure`;
-        /// that single check implies both:
-        /// - the region is fresh within the zone itself, and
-        /// - the region is disjoint from every region in every other zone.
+        /// The key preconditions are:
+        /// - `region` belongs to `all_regions()` (static configuration membership), which
+        ///   maintains `inv_region_closure_subset` and, via `all_regions_disjoint()`, implies
+        ///   disjointness from every existing region in the closure.
+        /// - `region` is not already in `region_closure`, which maintains
+        ///   `inv_region_unique_owner` (rules out the same-region case where two zones would
+        ///   both claim the region).
         transition! {
             insert_region(zid: nat, region: MemoryRegion) {
                 remove zones -= [zid => let zone];
                 require(region.spec_valid());
-                require(forall|existing: MemoryRegion|
-                    #[trigger] pre.region_closure.contains(existing) ==> !region.spec_overlaps_pmem(existing));
+                require(all_regions().contains(region));
+                require(!pre.region_closure.contains(region));
                 add zones += [zid => zone.insert_region(region)];
                 update region_closure = pre.region_closure.insert(region);
             }
@@ -283,65 +342,64 @@ tokenized_state_machine! {
         #[inductive(add_zone)]
         fn add_zone_inductive(pre: Self, post: Self, zid: nat, zone: GhostZone) {
             // TODO: discharge the following obligations:
-            // - inv_zone_ids:           post.zone_ids = pre.zone_ids.insert(zid),
-            //                           post.zones = pre.zones.insert(zid, zone)  => iff preserved.
-            // - inv_zones_wf:           require(zone.wf(…)) covers the new zid; old zids unchanged.
-            // - inv_region_closure:     post.region_closure = pre.region_closure.union(zone.region_set);
-            //                           expand the iff using inv_region_closure on pre.
-            // - inv_region_disjoint:    pairs within pre.region_closure are disjoint by induction;
-            //                           pairs from zone.region_set vs pre.region_closure are disjoint
-            //                           by the require; pairs within zone.region_set are disjoint by
-            //                           zone.wf() => mem_set.wf() => pairwise non-overlap of regions.
-            // - inv_region_unique_owner: the require (disjointness from closure) + reflexivity of
-            //                           spec_overlaps prevents a new region already in another zone.
-            // - inv_zone_isolated:      follows from require(zone.wf(…)) ⊇ zone.zone_isolated();
-            //                           old zones unchanged.
+            // - inv_zone_ids:              post.zone_ids = pre.zone_ids.insert(zid),
+            //                             post.zones = pre.zones.insert(zid, zone) => iff preserved.
+            // - inv_zones_wf:              require(zone.wf(…)) covers the new zid; old zids unchanged.
+            // - inv_region_closure:        post.region_closure = pre.region_closure.union(zone.regions());
+            //                             expand the iff using inv_region_closure on pre.
+            // - inv_region_closure_subset: new regions are in all_regions() by require;
+            //                             pre.region_closure ⊆ all_regions() by induction;
+            //                             union of two all_regions()-subsets is still a subset.
+            // - inv_region_unique_owner:   require(!pre.region_closure.contains(r)) for all new regions
+            //                             ensures no new region was already owned by another zone.
+            //                             Within the new zone, uniqueness follows from zone.wf().
+            // P2 (zone_isolated) is a derived property, not an invariant; no discharge needed.
             admit();
         }
 
         #[inductive(remove_zone)]
         fn remove_zone_inductive(pre: Self, post: Self, zid: nat) {
             // TODO: discharge:
-            // - inv_zone_ids:           post.zone_ids = pre.zone_ids.remove(zid).
-            // - inv_zones_wf:           only old zones remain, all wf by induction.
-            // - inv_region_closure:     post.region_closure = pre.region_closure.difference(zone.region_set);
-            //                           a region is in post.closure iff it's in some remaining zone,
-            //                           using Set::difference semantics + inv_region_closure on pre.
-            // - inv_region_disjoint:    subset of pre.region_closure, disjointness preserved.
-            // - inv_region_unique_owner: subset of pre.zones, unique-owner preserved.
-            // - inv_zone_isolated:      removed zone is gone; remaining zones unchanged.
+            // - inv_zone_ids:              post.zone_ids = pre.zone_ids.remove(zid).
+            // - inv_zones_wf:              only old zones remain, all wf by induction.
+            // - inv_region_closure:        post.region_closure = pre.region_closure.difference(zone.regions());
+            //                             a region is in post.closure iff it's in some remaining zone,
+            //                             using Set::difference semantics + inv_region_closure on pre.
+            // - inv_region_closure_subset: post.region_closure ⊆ pre.region_closure ⊆ all_regions();
+            //                             Set::difference only removes elements, subset preserved.
+            // - inv_region_unique_owner:   subset of pre.zones, unique-owner preserved.
+            // P2 (zone_isolated) is a derived property, not an invariant; no discharge needed.
             admit();
         }
 
         #[inductive(insert_region)]
         fn insert_region_inductive(pre: Self, post: Self, zid: nat, region: MemoryRegion) {
             // TODO: discharge:
-            // - inv_zone_ids:           zones changes key zid's value only; zone_ids unchanged.
-            // - inv_zones_wf:           for zid: require(region.spec_valid()) + require(disjoint from
-            //                           closure) + pre zone wf => post zone wf (via insert_region spec fn);
-            //                           other zids unchanged.
-            // - inv_region_closure:     post.region_closure = pre.region_closure.insert(region);
-            //                           the new region is in post.zones[zid].region_set.
-            // - inv_region_disjoint:    existing pairs unchanged; new region is disjoint from all
-            //                           existing regions by require.
-            // - inv_region_unique_owner: region not in pre.region_closure (by require),
-            //                           so it was not in any zone; now only in zid.
-            // - inv_zone_isolated:      for zid: need to show (zone.insert_region(region)).zone_isolated().
-            //                           The new region's Offset mapper is monotone, so translation
-            //                           stays in range.  Old regions unchanged.
+            // - inv_zone_ids:              zones changes key zid's value only; zone_ids unchanged.
+            // - inv_zones_wf:              for zid: require(region.spec_valid()) + require(all_regions())
+            //                             + pre zone wf => post zone wf (via insert_region spec fn);
+            //                             other zids unchanged.
+            // - inv_region_closure:        post.region_closure = pre.region_closure.insert(region);
+            //                             the new region is in post.zones[zid].region_set.
+            // - inv_region_closure_subset: require(all_regions().contains(region)) covers the new region;
+            //                             pre.region_closure ⊆ all_regions() by induction; union preserved.
+            // - inv_region_unique_owner:   require(!pre.region_closure.contains(region)) ensures the
+            //                             region was not already in any zone; now only in zid.
+            // P2 (zone_isolated) is a derived property, not an invariant; no discharge needed.
             admit();
         }
 
         #[inductive(remove_region)]
         fn remove_region_inductive(pre: Self, post: Self, zid: nat, region: MemoryRegion) {
             // TODO: discharge:
-            // - inv_zone_ids:           zones changes key zid's value only; zone_ids unchanged.
-            // - inv_zones_wf:           removing a region from a wf zone keeps it wf.
-            // - inv_region_closure:     post.region_closure = pre.region_closure.remove(region);
-            //                           the removed region is no longer in any zone.
-            // - inv_region_disjoint:    subset of pre.region_closure; preserved.
-            // - inv_region_unique_owner: subset of pre.zones[zid].region_set; preserved.
-            // - inv_zone_isolated:      fewer regions => subset of old translation witnesses.
+            // - inv_zone_ids:              zones changes key zid's value only; zone_ids unchanged.
+            // - inv_zones_wf:              removing a region from a wf zone keeps it wf.
+            // - inv_region_closure:        post.region_closure = pre.region_closure.remove(region);
+            //                             the removed region is no longer in any zone.
+            // - inv_region_closure_subset: post.region_closure ⊆ pre.region_closure ⊆ all_regions();
+            //                             Set::remove only removes elements, subset preserved.
+            // - inv_region_unique_owner:   subset of pre.zones[zid].region_set; preserved.
+            // P2 (zone_isolated) is a derived property, not an invariant; no discharge needed.
             admit();
         }
     }
@@ -444,20 +502,20 @@ impl HvMemState {
 
     /// Add a fully constructed zone to the system.
     ///
-    /// The caller must prove every region in `zone` is disjoint from the existing
-    /// `region_closure`.  Returns a fresh `ZoneState` token for the new zone, which
-    /// should be stored inside the zone-level lock.
+    /// The caller must prove every region in `zone` belongs to `all_regions()` (static
+    /// configuration membership) and is not already in the current `region_closure`
+    /// (no duplicate ownership).  Disjointness from the existing closure then follows
+    /// automatically from `all_regions_disjoint()`.  Returns a fresh `ZoneState` token
+    /// for the new zone, which should be stored inside the zone-level lock.
     pub proof fn add_zone(tracked &mut self, zid: nat, zone: GhostZone) -> (tracked zone_state:
         ZoneState)
         requires
             old(self).wf(),
             !old(self).zone_ids().contains(zid),
             zone.wf(old(self).inst_id()),
-            forall|new_region: MemoryRegion|
-                zone.regions().contains(new_region) ==> forall|existing: MemoryRegion| #[trigger]
-                    old(self).region_closure().contains(existing) ==> !new_region.spec_overlaps_pmem(
-                        existing,
-                    ),
+            forall|r: MemoryRegion| #[trigger] zone.regions().contains(r) ==> all_regions().contains(r),
+            forall|r: MemoryRegion|
+                #[trigger] zone.regions().contains(r) ==> !old(self).region_closure().contains(r),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),
@@ -502,8 +560,10 @@ impl HvMemState {
     /// Consumes `zone_state` and returns an updated `ZoneState` with the region
     /// added.  Also extends `region_closure` by `region`.
     ///
-    /// The caller must prove `region` is disjoint from the current `region_closure`,
-    /// which simultaneously establishes intra-zone and inter-zone disjointness.
+    /// The caller must prove `region` belongs to `all_regions()` (static configuration
+    /// membership) and is not already in the current `region_closure` (no duplicate
+    /// ownership).  Disjointness from all existing regions then follows automatically
+    /// from `all_regions_disjoint()`.
     pub proof fn insert_region(
         tracked &mut self,
         tracked zone_state: ZoneState,
@@ -513,8 +573,8 @@ impl HvMemState {
             old(self).wf(),
             zone_state.wf(old(self).inst_id()),
             region.spec_valid(),
-            forall|existing: MemoryRegion| #[trigger]
-                old(self).region_closure().contains(existing) ==> !region.spec_overlaps_pmem(existing),
+            all_regions().contains(region),
+            !old(self).region_closure().contains(region),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),

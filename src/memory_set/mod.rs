@@ -31,11 +31,11 @@ impl SpecMemorySet {
     pub open spec fn wf(&self) -> bool {
         // Regions are valid
         &&& forall|r: MemoryRegion|
-            self.regions.contains(r)
-                ==> #[trigger] r.spec_valid()
+            #[trigger] self.regions.contains(r)
+                ==> r.spec_valid()
         // Regions do not overlap
         &&& forall|r1: MemoryRegion, r2: MemoryRegion|
-            self.regions.contains(r1) && self.regions.contains(r2) && r1 != r2
+            #[trigger] self.regions.contains(r1) && #[trigger] self.regions.contains(r2) && r1 != r2
                 ==> !r1.spec_overlaps_vmem(r2)
     }
 
@@ -55,13 +55,13 @@ impl SpecMemorySet {
     }
 
     /// Translate a virtual address in the memory set to a physical address, if it is mapped.
-    pub open spec fn translate(&self, v: SpecVAddr) -> (int, SpecPAddr)
+    pub open spec fn translate(&self, v: SpecVAddr) -> SpecPAddr
         recommends
             self.contains_vaddr(v),
     {
         let r = choose|r: MemoryRegion|
             self.regions.contains(r) && #[trigger] r.spec_contains_vaddr(v);
-        (0, r.spec_translate(v))
+        r.spec_translate(v)
     }
 }
 
