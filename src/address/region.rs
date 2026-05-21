@@ -40,20 +40,20 @@ impl MemoryRegion {
     {
         self.start@.offset(self.pages as nat * SPEC_PAGE_SIZE)
     }
+    
+    /// Spec-mode check if a virtual address is within the region.
+    pub open spec fn spec_contains_vaddr(self, vaddr: SpecVAddr) -> bool {
+        self.start@.0 <= vaddr.0 < self.start@.0 + (self.pages as nat) * SPEC_PAGE_SIZE
+    }
 
-    /// Spec-mode overlap check.
-    pub open spec fn spec_overlaps(self, other: MemoryRegion) -> bool {
+    /// Spec-mode check if two regions overlap in virtual address space.
+    pub open spec fn spec_overlaps_vmem(self, other: MemoryRegion) -> bool {
         SpecVAddr::overlap(
             self.start@,
             self.pages as nat * SPEC_PAGE_SIZE,
             other.start@,
             other.pages as nat * SPEC_PAGE_SIZE,
         )
-    }
-
-    /// Spec-mode check if a virtual address is within the region.
-    pub open spec fn spec_contains_vaddr(self, vaddr: SpecVAddr) -> bool {
-        self.start@.0 <= vaddr.0 < self.start@.0 + (self.pages as nat) * SPEC_PAGE_SIZE
     }
 
     /// Spec-mode translate a virtual address to physical address using the region's mapper.
@@ -70,6 +70,20 @@ impl MemoryRegion {
         let start = self.mapper.spec_map(self.start@);
         let end = self.mapper.spec_map(self.spec_end());
         start.0 <= paddr.0 < end.0
+    }
+
+    /// Spec-mode check if two regions overlap in physical address space.
+    pub open spec fn spec_overlaps_pmem(self, other: MemoryRegion) -> bool {
+        let self_start = self.mapper.spec_map(self.start@);
+        let self_end = self.mapper.spec_map(self.spec_end());
+        let other_start = other.mapper.spec_map(other.start@);
+        let other_end = other.mapper.spec_map(other.spec_end());
+        
+        if self_start.0 <= other_start.0 {
+            self_end.0 > other_start.0
+        } else {
+            other_end.0 > self_start.0
+        }
     }
 
     /// Check if the region is within valid virtual address space.
@@ -102,13 +116,13 @@ impl MemoryRegion {
         VAddr(self.start.0 + self.pages * PAGE_SIZE)
     }
 
-    /// If two regions overlap.
-    pub fn overlaps(&self, other: &MemoryRegion) -> (res: bool)
+    /// If two regions overlap in virtual address space.
+    pub fn overlaps_vmem(&self, other: &MemoryRegion) -> (res: bool)
         requires
             self.spec_valid(),
             other.spec_valid(),
         ensures
-            res == self.spec_overlaps(*other),
+            res == self.spec_overlaps_vmem(*other),
     {
         if self.start.0 <= other.start.0 {
             self.start.0 + self.pages * PAGE_SIZE > other.start.0
@@ -117,13 +131,33 @@ impl MemoryRegion {
         }
     }
 
-    /// Lemma: overlaps is symmetric.
-    pub proof fn lemma_overlaps_symmetric(self, other: MemoryRegion)
+    /// If two regions overlap in physical address space.
+    pub fn overlaps_pmem(&self, other: &MemoryRegion) -> (res: bool)
         requires
             self.spec_valid(),
             other.spec_valid(),
         ensures
-            self.spec_overlaps(other) == other.spec_overlaps(self),
+            res == self.spec_overlaps_pmem(*other),
+    {
+        let self_start = self.mapper.map(self.start);
+        let self_end = self.mapper.map(self.end());
+        let other_start = other.mapper.map(other.start);
+        let other_end = other.mapper.map(other.end());
+        
+        if self_start.0 <= other_start.0 {
+            self_end.0 > other_start.0
+        } else {
+            other_end.0 > self_start.0
+        }
+    }
+
+    /// Lemma: overlaps is symmetric.
+    pub proof fn lemma_overlaps_vmem_symmetric(self, other: MemoryRegion)
+        requires
+            self.spec_valid(),
+            other.spec_valid(),
+        ensures
+            self.spec_overlaps_vmem(other) == other.spec_overlaps_vmem(self),
     {
     }
 }

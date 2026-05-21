@@ -131,7 +131,7 @@ tokenized_state_machine! {
         pub fn inv_region_disjoint(&self) -> bool {
             forall|r1: MemoryRegion, r2: MemoryRegion| #![auto]
                 self.region_closure.contains(r1) && self.region_closure.contains(r2) && r1 != r2
-                    ==> !r1.spec_overlaps(r2)
+                    ==> !r1.spec_overlaps_pmem(r2)
         }
 
         /// Each region belongs to at most one zone.
@@ -198,10 +198,10 @@ tokenized_state_machine! {
                 require(zid1 != zid2);
                 assert(forall|r1: MemoryRegion, r2: MemoryRegion| #![auto]
                     zone1.regions().contains(r1) && zone2.regions().contains(r2)
-                        ==> !r1.spec_overlaps(r2)
+                        ==> !r1.spec_overlaps_pmem(r2)
                 ) by {
                     assert forall|r1: MemoryRegion, r2: MemoryRegion| #![auto]
-                        zone1.regions().contains(r1) && zone2.regions().contains(r2) implies !r1.spec_overlaps(r2) by {
+                        zone1.regions().contains(r1) && zone2.regions().contains(r2) implies !r1.spec_overlaps_pmem(r2) by {
                         assert(pre.zones.contains_key(zid1) && pre.zones[zid1].contains_region(r1));
                         assert(pre.zones.contains_key(zid2) && pre.zones[zid2].contains_region(r2));
                         if r1 != r2 {
@@ -231,7 +231,7 @@ tokenized_state_machine! {
                 require(zone.wf(pre.alloc_inst_id));
                 require(forall|new_region: MemoryRegion|
                     zone.regions().contains(new_region) ==> forall|existing: MemoryRegion|
-                        #[trigger] pre.region_closure.contains(existing) ==> !new_region.spec_overlaps(existing));
+                        #[trigger] pre.region_closure.contains(existing) ==> !new_region.spec_overlaps_pmem(existing));
                 update zone_ids = pre.zone_ids.insert(zid);
                 add zones += [zid => zone];
                 update region_closure = pre.region_closure.union(zone.regions());
@@ -261,7 +261,7 @@ tokenized_state_machine! {
                 remove zones -= [zid => let zone];
                 require(region.spec_valid());
                 require(forall|existing: MemoryRegion|
-                    #[trigger] pre.region_closure.contains(existing) ==> !region.spec_overlaps(existing));
+                    #[trigger] pre.region_closure.contains(existing) ==> !region.spec_overlaps_pmem(existing));
                 add zones += [zid => zone.insert_region(region)];
                 update region_closure = pre.region_closure.insert(region);
             }
@@ -455,7 +455,7 @@ impl HvMemState {
             zone.wf(old(self).inst_id()),
             forall|new_region: MemoryRegion|
                 zone.regions().contains(new_region) ==> forall|existing: MemoryRegion| #[trigger]
-                    old(self).region_closure().contains(existing) ==> !new_region.spec_overlaps(
+                    old(self).region_closure().contains(existing) ==> !new_region.spec_overlaps_pmem(
                         existing,
                     ),
         ensures
@@ -514,7 +514,7 @@ impl HvMemState {
             zone_state.wf(old(self).inst_id()),
             region.spec_valid(),
             forall|existing: MemoryRegion| #[trigger]
-                old(self).region_closure().contains(existing) ==> !region.spec_overlaps(existing),
+                old(self).region_closure().contains(existing) ==> !region.spec_overlaps_pmem(existing),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),
@@ -1001,10 +1001,10 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
         {
             assert(cfg_regions[j as int]@.valid());
             let region = cfg_regions[j].to_region();
-            let insert_res = mem_set.insert(&self.alloc, region);
-            if insert_res.is_err() {
+            if mem_set.overlaps_vmem(&region) {
                 return Err(());
             }
+            let insert_res = mem_set.insert(&self.alloc, region);
             j += 1;
         }
 
@@ -1026,7 +1026,7 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
             assume(forall|new_r: MemoryRegion|
                 ghost_zone.regions().contains(new_r) ==> forall|existing: MemoryRegion| #[trigger]
                     content.hv_mem_state.region_closure().contains(existing)
-                        ==> !new_r.spec_overlaps(existing));
+                        ==> !new_r.spec_overlaps_vmem(existing));
             zone_state = content.hv_mem_state.add_zone(zid as nat, ghost_zone);
         }
 
