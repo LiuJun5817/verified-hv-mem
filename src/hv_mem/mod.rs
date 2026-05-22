@@ -8,443 +8,47 @@
 //!
 //! Module layout:
 //!
+//! - `spec`: ghost state machines (`ClosureSpec` / `BudgetSpec`) and token type aliases.
+//! - `zone`: single-zone memory abstraction (`ZoneState`, `ZoneKey`, `ZoneRwContent`, `ZonePred`, `Zone`).
+//! - `policy`: region-assignment policy abstraction (placeholder for `DisjointEvidence`).
 //! - `config`: zone configuration types and conversion to `MemoryRegion`.
-//! - `zone`: single-zone memory abstraction and lock-based concurrent access wrapper.
-//! - `mod` (this file): system-level composition of zones plus allocator, and definitions/proofs for P1-P3.
-//!
-//! Concrete runtime code should refine these contracts.
+//! - `mod` (this file): `HvMemState`, `ZoneWriteGuard`, `HvMem` — the global orchestration layer.
 extern crate alloc;
 
 mod config;
+pub mod policy;
+pub mod spec;
+pub mod zone;
 
 use crate::{
+    address::frame::FrameSize,
     address::region::MemoryRegion,
-    address::{addr::SpecVAddr, frame::FrameSize},
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
-    memory_set::{MemorySet, SpecMemorySet},
+    memory_set::MemorySet,
     page_table::{PTConstants, PageTable},
     sync::rwlock::{RwLock, RwReadGuard, RwReaderToken, RwWriteGuard, RwWriterToken},
 };
 use alloc::sync::Arc;
 use config::HvConfigMemRegion;
 use core::marker::PhantomData;
-use verus_state_machines_macros::tokenized_state_machine;
+use spec::{
+    all_regions, ClosureRegionToken, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
+    GhostZone,
+};
 use vstd::invariant::InvariantPredicate;
 use vstd::{
     cell::{CellId, PCell, PointsTo},
     prelude::*,
     tokens::InstanceId,
 };
+use zone::{Zone, ZoneKey, ZonePred, ZoneRwContent, ZoneState};
 
 verus! {
 
-/// Abstract function representing the set of all possible memory regions that can be
-/// statically configured in the system.
-pub uninterp spec fn all_regions() -> Set<MemoryRegion>;
-
-/// Axiom: all regions in `all_regions()` are valid. This is guaranteed by configuration tools.
-axiom fn all_regions_valid()
-    ensures
-        forall|r: MemoryRegion| #[trigger] all_regions().contains(r) ==> r.spec_valid(),
-;
-
-/// Axiom: all regions in `all_regions()` do not overlap in physical memory.
-axiom fn all_regions_disjoint()
-    ensures
-        forall|r1: MemoryRegion, r2: MemoryRegion| #![auto]
-            all_regions().contains(r1) && all_regions().contains(r2) && r1 != r2
-                ==> !r1.spec_overlaps_pmem(r2),
-;
-
-/// Ghost state for one zone tracked inside `HvMemSpec`.
-pub ghost struct GhostZone {
-    /// Allocator instance id shared by the whole hypervisor memory manager.
-    pub alloc_inst_id: InstanceId,
-    /// Region sequence used by the existing memory-set abstraction.
-    pub mem_set: SpecMemorySet,
-}
-
-impl GhostZone {
-    /// Well-formedness relative to the system allocator instance.
-    pub open spec fn wf(&self, alloc_inst_id: InstanceId) -> bool {
-        &&& self.alloc_inst_id == alloc_inst_id
-        &&& self.mem_set.wf()
-    }
-
-    /// Region set of this zone.
-    pub open spec fn regions(&self) -> Set<MemoryRegion> {
-        self.mem_set.regions
-    }
-
-    /// Whether a region belongs to this zone.
-    pub open spec fn contains_region(&self, region: MemoryRegion) -> bool {
-        self.regions().contains(region)
-    }
-
-    /// Insert a region into this zone.
-    pub open spec fn insert_region(&self, region: MemoryRegion) -> Self {
-        Self {
-            alloc_inst_id: self.alloc_inst_id,
-            mem_set: SpecMemorySet { regions: self.regions().insert(region) },
-        }
-    }
-
-    /// Remove a region from this zone.
-    pub open spec fn remove_region(&self, region: MemoryRegion) -> Self
-        recommends
-            self.regions().contains(region),
-    {
-        Self {
-            alloc_inst_id: self.alloc_inst_id,
-            mem_set: SpecMemorySet { regions: self.regions().remove(region) },
-        }
-    }
-}
-
-// Top-level state machine for the hypervisor memory manager, tracking global properties of all zones.
-tokenized_state_machine! {
-    HvMemSpec {
-        fields {
-            /// Shared allocator instance for all zones in the hypervisor memory manager.
-            #[sharding(constant)]
-            pub alloc_inst_id: InstanceId,
-
-            /// Mirror of `zones.dom()`, kept as a variable field so zone creation can use
-            /// a simple absence check before `map` insertion.
-            #[sharding(variable)]
-            pub zone_ids: Set<nat>,
-
-            /// Per-zone memory state. One zone token can be placed in one zone-local `Mutex`.
-            #[sharding(map)]
-            pub zones: Map<nat, GhostZone>,
-
-            /// Union of all regions from all zones.
-            #[sharding(variable)]
-            pub region_closure: Set<MemoryRegion>,
-        }
-
-        /// `zone_ids` is always the exact set of keys in `zones`
-        #[invariant]
-        pub fn inv_zone_ids(&self) -> bool {
-            self.zones.dom() == self.zone_ids
-        }
-
-        /// All zones are well-formed relative to the system allocator instance.
-        #[invariant]
-        pub fn inv_zones_wf(&self) -> bool {
-            forall|zid: nat|
-                self.zones.contains_key(zid) ==> #[trigger] self.zones[zid].wf(self.alloc_inst_id)
-        }
-
-        /// `region_closure` is exactly the union of all zones' region sets.
-        #[invariant]
-        pub fn inv_region_closure(&self) -> bool {
-            forall|region: MemoryRegion|
-                self.region_closure.contains(region) <==> exists|zid: nat|
-                    self.zones.contains_key(zid) && #[trigger] self.zones[zid].contains_region(region)
-        }
-
-        /// `region_closure` is a subset of `all_regions()`.
-        ///
-        /// Combined with the `all_regions_disjoint()` axiom, this implies P1 (RegionDisjoint):
-        /// any two distinct regions in `region_closure` are non-overlapping, because they both
-        /// live in `all_regions()` which is axiomatically pairwise disjoint.
-        #[invariant]
-        pub fn inv_region_closure_subset(&self) -> bool {
-            forall|r: MemoryRegion| #[trigger] self.region_closure.contains(r) ==> all_regions().contains(r)
-        }
-
-        /// Each region belongs to at most one zone.
-        ///
-        /// Together with `inv_region_closure_subset` and `all_regions_disjoint()`, this
-        /// closes the proof of P1 (RegionDisjoint): `inv_region_closure_subset` handles
-        /// the `r1 ≠ r2` case via the axiom, and `inv_region_unique_owner` rules out the
-        /// `r1 = r2` case for distinct zones.  It is preserved by `insert_region` because
-        /// the precondition `!region_closure.contains(region)` forbids adding a region
-        /// already owned by any zone.
-        #[invariant]
-        pub fn inv_region_unique_owner(&self) -> bool {
-            forall|r: MemoryRegion, zid1: nat, zid2: nat|
-                self.zones.contains_key(zid1) && self.zones.contains_key(zid2)
-                && #[trigger] self.zones[zid1].contains_region(r)
-                && #[trigger] self.zones[zid2].contains_region(r)
-                    ==> zid1 == zid2
-        }
-
-        // ── Properties ────────────────────────────────────────────────────────────
-        // Properties are read-only lemmas that zone-token holders can invoke to learn
-        // facts about the global state, analogous to `free_client_disjoint` in `AllocSpec`.
-
-        /// Any region that belongs to zone `zid` is tracked in the global `region_closure`.
-        ///
-        /// Proof sketch: `have zones >= [zid => zone]` gives `pre.zones[zid] == zone` and
-        /// `pre.zones.contains_key(zid)`.  For any `r` in `zone.region_set`:
-        ///   `zone.contains_region(r)` = `pre.zones[zid].contains_region(r)`, so the
-        ///   existential in `inv_region_closure` is satisfied, hence `region_closure.contains(r)`.
-        property! {
-            zone_region_in_closure(zid: nat, zone: GhostZone) {
-                have zones >= [zid => zone];
-                assert(forall|r: MemoryRegion|
-                    #[trigger] zone.regions().contains(r) ==> pre.region_closure.contains(r)
-                ) by { 
-                    assert forall|r: MemoryRegion| #[trigger] zone.regions().contains(r) 
-                        implies pre.region_closure.contains(r) by {
-                        assert(pre.zones.contains_key(zid) && pre.zones[zid].contains_region(r));
-                    };
-                };
-            }
-        }
-
-        /// Regions from two *distinct* zones are mutually non-overlapping.
-        ///
-        /// Proof sketch (P1 derivation):
-        /// - From `inv_region_closure`, every region of either zone is in `region_closure`.
-        /// - From `inv_region_closure_subset`, every region in `region_closure` is in `all_regions()`.
-        /// - If r1 ≠ r2: `all_regions_disjoint()` gives `!r1.spec_overlaps_pmem(r2)` directly.
-        /// - If r1 = r2: `inv_region_unique_owner` says the same region cannot belong to two
-        ///   different zones (`zid1 != zid2`), so this case is vacuously impossible.
-        property! {
-            cross_zone_disjoint(zid1: nat, zone1: GhostZone, zid2: nat, zone2: GhostZone) {
-                have zones >= [zid1 => zone1];
-                have zones >= [zid2 => zone2];
-                require(zid1 != zid2);
-                assert(forall|r1: MemoryRegion, r2: MemoryRegion| #![auto]
-                    zone1.regions().contains(r1) && zone2.regions().contains(r2)
-                        ==> !r1.spec_overlaps_pmem(r2)
-                ) by {
-                    assert forall|r1: MemoryRegion, r2: MemoryRegion| #![auto]
-                        zone1.regions().contains(r1) && zone2.regions().contains(r2) implies !r1.spec_overlaps_pmem(r2) by {
-                        assert(pre.zones.contains_key(zid1) && pre.zones[zid1].contains_region(r1));
-                        assert(pre.zones.contains_key(zid2) && pre.zones[zid2].contains_region(r2));
-                        if r1 != r2 {
-                            // Both are in region_closure (via inv_region_closure), hence in
-                            // all_regions() (via inv_region_closure_subset). Apply the axiom.
-                            assert(pre.region_closure.contains(r1) && pre.region_closure.contains(r2));
-                            assert(all_regions().contains(r1) && all_regions().contains(r2));
-                            all_regions_disjoint();
-                        } else {
-                            // r1 == r2 but zid1 != zid2 contradicts inv_region_unique_owner.
-                            assert(false);
-                        }
-                    }
-                };
-            }
-        }
-
-        /// P2 (ZoneIsolated): every mapped translation in a zone stays within the declaring
-        /// region's physical range.
-        ///
-        /// Derivation: `inv_zones_wf` gives `zone.wf()` which includes `zone.mem_set.wf()`,
-        /// so every region `r` in the zone satisfies `r.spec_valid()`.  For any virtual
-        /// address `v` mapped in the zone, `SpecMemorySet::translate` chooses the same `r`
-        /// that `contains_vaddr` witnesses.  `MemoryRegion::lemma_contains_vaddr_implies_contains_paddr`
-        /// then gives `r.spec_contains_paddr(r.spec_translate(v))`, which is exactly P2.
-        property! {
-            zone_isolated(zid: nat, zone: GhostZone, v: SpecVAddr) {
-                have zones >= [zid => zone];
-                require(zone.mem_set.contains_vaddr(v));
-                assert(zone.wf(pre.alloc_inst_id));
-                assert({
-                    let paddr = zone.mem_set.translate(v);
-                    let r = choose|r: MemoryRegion|
-                        #[trigger] zone.regions().contains(r) && r.spec_contains_vaddr(v);
-                    r.spec_contains_paddr(paddr)
-                }) by {
-                    // inv_zones_wf => zone.wf() => zone.mem_set.wf()
-                    let paddr = zone.mem_set.translate(v);
-                    assert(zone.mem_set.wf());
-                    assert(exists|r: MemoryRegion| #[trigger] zone.regions().contains(r) && r.spec_contains_vaddr(v));
-                    let r = choose|r: MemoryRegion| #[trigger]
-                        zone.regions().contains(r) && r.spec_contains_vaddr(v);
-                    assert(r.spec_valid());
-                    r.lemma_contains_vaddr_implies_contains_paddr(v);
-                    assert(r.spec_contains_paddr(paddr));
-                };
-            }
-        }
-
-        init! {
-            initialize(alloc_inst_id: InstanceId) {
-                init alloc_inst_id = alloc_inst_id;
-                init zone_ids = Set::empty();
-                init zones = Map::empty();
-                init region_closure = Set::empty();
-            }
-        }
-
-        /// Add a fully constructed zone. The caller must prove that every region in the new zone
-        /// belongs to `all_regions()` (static configuration membership) and is not already
-        /// present in the global closure (no duplicate ownership).
-        ///
-        /// Disjointness from the existing closure follows automatically: both the new regions and
-        /// the existing closure are subsets of `all_regions()`, which is axiomatically pairwise
-        /// disjoint, and the no-duplicate requirement rules out the same-region edge case.
-        transition! {
-            add_zone(zid: nat, zone: GhostZone) {
-                require(!pre.zone_ids.contains(zid));
-                require(zone.wf(pre.alloc_inst_id));
-                require(forall|r: MemoryRegion|
-                    #[trigger] zone.regions().contains(r) ==> all_regions().contains(r));
-                require(forall|r: MemoryRegion|
-                    #[trigger] zone.regions().contains(r) ==> !pre.region_closure.contains(r));
-                update zone_ids = pre.zone_ids.insert(zid);
-                add zones += [zid => zone];
-                update region_closure = pre.region_closure.union(zone.regions());
-            }
-        }
-
-        /// Remove an entire zone and subtract its regions from the closure.
-        ///
-        /// Note: callers are responsible for draining all page-table frames and physical
-        /// memory before invoking this transition; the spec-level token is simply dropped.
-        transition! {
-            remove_zone(zid: nat) {
-                remove zones -= [zid => let zone];
-                update zone_ids = pre.zone_ids.remove(zid);
-                update region_closure = pre.region_closure.difference(zone.regions());
-            }
-        }
-
-        /// Insert one region into an existing zone.
-        ///
-        /// The key preconditions are:
-        /// - `region` belongs to `all_regions()` (static configuration membership), which
-        ///   maintains `inv_region_closure_subset` and, via `all_regions_disjoint()`, implies
-        ///   disjointness from every existing region in the closure.
-        /// - `region` is not already in `region_closure`, which maintains
-        ///   `inv_region_unique_owner` (rules out the same-region case where two zones would
-        ///   both claim the region).
-        transition! {
-            insert_region(zid: nat, region: MemoryRegion) {
-                remove zones -= [zid => let zone];
-                require(region.spec_valid());
-                require(all_regions().contains(region));
-                require(!pre.region_closure.contains(region));
-                add zones += [zid => zone.insert_region(region)];
-                update region_closure = pre.region_closure.insert(region);
-            }
-        }
-
-        /// Remove one region from an existing zone.
-        transition! {
-            remove_region(zid: nat, region: MemoryRegion) {
-                remove zones -= [zid => let zone];
-                require(zone.contains_region(region));
-                add zones += [zid => zone.remove_region(region)];
-                update region_closure = pre.region_closure.remove(region);
-            }
-        }
-
-        #[inductive(initialize)]
-        fn initialize_inductive(post: Self, alloc_inst_id: InstanceId) { }
-
-        #[inductive(add_zone)]
-        fn add_zone_inductive(pre: Self, post: Self, zid: nat, zone: GhostZone) {
-            // TODO: discharge the following obligations:
-            // - inv_zone_ids:              post.zone_ids = pre.zone_ids.insert(zid),
-            //                             post.zones = pre.zones.insert(zid, zone) => iff preserved.
-            // - inv_zones_wf:              require(zone.wf(…)) covers the new zid; old zids unchanged.
-            // - inv_region_closure:        post.region_closure = pre.region_closure.union(zone.regions());
-            //                             expand the iff using inv_region_closure on pre.
-            // - inv_region_closure_subset: new regions are in all_regions() by require;
-            //                             pre.region_closure ⊆ all_regions() by induction;
-            //                             union of two all_regions()-subsets is still a subset.
-            // - inv_region_unique_owner:   require(!pre.region_closure.contains(r)) for all new regions
-            //                             ensures no new region was already owned by another zone.
-            //                             Within the new zone, uniqueness follows from zone.wf().
-            // P2 (zone_isolated) is a derived property, not an invariant; no discharge needed.
-            admit();
-        }
-
-        #[inductive(remove_zone)]
-        fn remove_zone_inductive(pre: Self, post: Self, zid: nat) {
-            // TODO: discharge:
-            // - inv_zone_ids:              post.zone_ids = pre.zone_ids.remove(zid).
-            // - inv_zones_wf:              only old zones remain, all wf by induction.
-            // - inv_region_closure:        post.region_closure = pre.region_closure.difference(zone.regions());
-            //                             a region is in post.closure iff it's in some remaining zone,
-            //                             using Set::difference semantics + inv_region_closure on pre.
-            // - inv_region_closure_subset: post.region_closure ⊆ pre.region_closure ⊆ all_regions();
-            //                             Set::difference only removes elements, subset preserved.
-            // - inv_region_unique_owner:   subset of pre.zones, unique-owner preserved.
-            // P2 (zone_isolated) is a derived property, not an invariant; no discharge needed.
-            admit();
-        }
-
-        #[inductive(insert_region)]
-        fn insert_region_inductive(pre: Self, post: Self, zid: nat, region: MemoryRegion) {
-            // TODO: discharge:
-            // - inv_zone_ids:              zones changes key zid's value only; zone_ids unchanged.
-            // - inv_zones_wf:              for zid: require(region.spec_valid()) + require(all_regions())
-            //                             + pre zone wf => post zone wf (via insert_region spec fn);
-            //                             other zids unchanged.
-            // - inv_region_closure:        post.region_closure = pre.region_closure.insert(region);
-            //                             the new region is in post.zones[zid].region_set.
-            // - inv_region_closure_subset: require(all_regions().contains(region)) covers the new region;
-            //                             pre.region_closure ⊆ all_regions() by induction; union preserved.
-            // - inv_region_unique_owner:   require(!pre.region_closure.contains(region)) ensures the
-            //                             region was not already in any zone; now only in zid.
-            // P2 (zone_isolated) is a derived property, not an invariant; no discharge needed.
-            admit();
-        }
-
-        #[inductive(remove_region)]
-        fn remove_region_inductive(pre: Self, post: Self, zid: nat, region: MemoryRegion) {
-            // TODO: discharge:
-            // - inv_zone_ids:              zones changes key zid's value only; zone_ids unchanged.
-            // - inv_zones_wf:              removing a region from a wf zone keeps it wf.
-            // - inv_region_closure:        post.region_closure = pre.region_closure.remove(region);
-            //                             the removed region is no longer in any zone.
-            // - inv_region_closure_subset: post.region_closure ⊆ pre.region_closure ⊆ all_regions();
-            //                             Set::remove only removes elements, subset preserved.
-            // - inv_region_unique_owner:   subset of pre.zones[zid].region_set; preserved.
-            // P2 (zone_isolated) is a derived property, not an invariant; no discharge needed.
-            admit();
-        }
-    }
-}
-
-// ── Token type aliases ────────────────────────────────────────────────────────
-pub type HvMemInstance = HvMemSpec::Instance;
-
-pub type HvZoneIdsToken = HvMemSpec::zone_ids;
-
-pub type HvZoneToken = HvMemSpec::zones;
-
-pub type HvRegionClosureToken = HvMemSpec::region_closure;
-
-/// Per-zone tracked ghost state, holding the zone's entry in `HvMemSpec::zones`.
-///
-/// One `ZoneState` is created for each zone when it is added via `HvMemState::add_zone`,
-/// and consumed when the zone is removed via `HvMemState::remove_zone`.
-///
-/// `ZoneState` is typically stored inside the zone-level lock, so that only the thread
-/// holding the zone lock can invoke `insert_region`/`remove_region`.
-pub tracked struct ZoneState {
-    pub zone_tok: HvZoneToken,
-}
-
-impl ZoneState {
-    /// Well-formedness: the zone token belongs to the given `HvMemSpec` instance.
-    pub open spec fn wf(&self, alloc_inst_id: InstanceId) -> bool {
-        self.zone_tok.instance_id() == alloc_inst_id
-    }
-
-    /// The zone ID (key in the `zones` map sharding).
-    pub open spec fn zone_id(&self) -> nat {
-        self.zone_tok.key()
-    }
-
-    /// The ghost zone state (value in the `zones` map sharding).
-    pub open spec fn ghost_zone(&self) -> GhostZone {
-        self.zone_tok.value()
-    }
-}
-
 /// Global tracked ghost state held by the hypervisor memory manager.
 ///
-/// Wraps the `HvMemSpec` Instance and the variable-sharded tokens (`zone_ids`,
+/// Wraps the `ClosureSpec` Instance and the variable-sharded tokens (`zone_ids`,
 /// `region_closure`) that are not distributed to individual zones.
 ///
 /// Typically stored inside a `Mutex` so that `add_zone`/`remove_zone` are mutually
@@ -452,19 +56,19 @@ impl ZoneState {
 /// independently, mirroring the `AllocatorState` / `ClientState` split in
 /// `global_allocator`.
 pub tracked struct HvMemState {
-    pub inst: HvMemInstance,
-    pub zone_ids_tok: HvZoneIdsToken,
-    pub region_closure_tok: HvRegionClosureToken,
+    pub inst: ClosureSpecInstance,
+    pub zone_ids_tok: ClosureZoneIdsToken,
+    pub region_closure_tok: ClosureRegionToken,
 }
 
 impl HvMemState {
-    /// Core well-formedness: all tokens belong to the same `HvMemSpec` instance.
+    /// Core well-formedness: all tokens belong to the same `ClosureSpec` instance.
     pub open spec fn wf(&self) -> bool {
         &&& self.zone_ids_tok.instance_id() == self.inst.id()
         &&& self.region_closure_tok.instance_id() == self.inst.id()
     }
 
-    /// The `HvMemSpec` instance ID.
+    /// The `ClosureSpec` instance ID.
     pub open spec fn inst_id(&self) -> InstanceId {
         self.inst.id()
     }
@@ -479,12 +83,12 @@ impl HvMemState {
         self.region_closure_tok.value()
     }
 
-    /// Construct an initial (empty) `HvMemState` from a freshly-created `HvMemSpec`
-    /// instance. Callers obtain the tokens from `HvMemSpec::Instance::initialize`.
+    /// Construct an initial (empty) `HvMemState` from a freshly-created `ClosureSpec`
+    /// instance. Callers obtain the tokens from `ClosureSpec::Instance::initialize`.
     pub proof fn new(
-        tracked inst: HvMemInstance,
-        tracked zone_ids_tok: HvZoneIdsToken,
-        tracked region_closure_tok: HvRegionClosureToken,
+        tracked inst: ClosureSpecInstance,
+        tracked zone_ids_tok: ClosureZoneIdsToken,
+        tracked region_closure_tok: ClosureRegionToken,
     ) -> (tracked state: HvMemState)
         requires
             zone_ids_tok.instance_id() == inst.id(),
@@ -513,9 +117,10 @@ impl HvMemState {
             old(self).wf(),
             !old(self).zone_ids().contains(zid),
             zone.wf(old(self).inst_id()),
-            forall|r: MemoryRegion| #[trigger] zone.regions().contains(r) ==> all_regions().contains(r),
-            forall|r: MemoryRegion|
-                #[trigger] zone.regions().contains(r) ==> !old(self).region_closure().contains(r),
+            forall|r: MemoryRegion| #[trigger]
+                zone.regions().contains(r) ==> all_regions().contains(r),
+            forall|r: MemoryRegion| #[trigger]
+                zone.regions().contains(r) ==> !old(self).region_closure().contains(r),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),
@@ -627,228 +232,6 @@ impl HvMemState {
     }
 }
 
-/// Ghost key for a `Zone`'s `RwLock`.
-///
-/// Binds the lock to a specific `PCell<M>` (via `cell_id`) and to the
-/// `HvMemSpec` instance (via `inst_id`), so the predicate can express
-/// "the `PointsTo` inside the lock belongs to this cell, and the
-/// `ZoneState` token belongs to this instance".
-pub struct ZoneKey {
-    /// `PCell::id()` of the zone's `mem_set` cell.
-    pub cell_id: CellId,
-    /// `HvMemSpec` instance id shared by the whole hypervisor.
-    pub mem_inst_id: InstanceId,
-}
-
-/// Tracked content protected by a `Zone`'s `RwLock`.
-///
-/// This bundles the `PointsTo<M>` cell-permission (needed to access the exec
-/// `mem_set` via `PCell::take`/`put`/`borrow`) together with the per-zone
-/// `HvMemSpec` token (`ZoneState`).  Both are linear tracked resources that
-/// must travel together: whoever holds the write guard can mutate the memory
-/// set *and* update the ghost state atomically.
-pub tracked struct ZoneRwContent<M> {
-    /// Permission to read/write the zone's exec `mem_set` PCell.
-    pub mem_set_perm: PointsTo<M>,
-    /// Per-zone HvMemSpec token (map-sharded `zones[zid]`).
-    pub zone_state: ZoneState,
-}
-
-/// Phantom struct that carries the `Zone`-level `InvariantPredicate`.
-pub struct ZonePred<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator {
-    pub _phantom: PhantomData<(PT, M, A)>,
-}
-
-impl<PT, M, A> InvariantPredicate<ZoneKey, ZoneRwContent<M>> for ZonePred<PT, M, A> where
-    PT: PageTable<A>,
-    M: MemorySet<PT, A>,
-    A: BitmapAllocator,
-{
-    /// The content is well-formed when:
-    /// - `mem_set_perm` is initialised and points to the key's cell, and
-    /// - `zone_state` belongs to the key's `HvMemSpec` instance.
-    open spec fn inv(k: ZoneKey, v: ZoneRwContent<M>) -> bool {
-        &&& v.mem_set_perm.is_init()
-        &&& v.mem_set_perm@.pcell === k.cell_id
-        &&& v.zone_state.wf(k.mem_inst_id)
-    }
-}
-
-/// An exec struct representing one zone's memory, protected by an `RwLock`.
-///
-/// Layout (mirrors `GlobalAllocator`'s PCell + Mutex pattern, but with
-/// read-write instead of exclusive locking):
-///
-/// ```text
-///  RwLock<ZoneRwContent<M>>
-///      .mem_set_perm : PointsTo<M>   <- cell permission  ┐ protected by
-///      .zone_state   : ZoneState     <- ghost token       ┘ RwLock
-///
-///  PCell<M>   <- exec memory set, accessed only while lock is held
-/// ```
-///
-/// Multiple CPUs from the **same zone** can hold read guards concurrently
-/// (e.g., for page-table walks).  A write guard gives exclusive access for
-/// operations that mutate the memory set (insert/remove region).
-pub struct Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator {
-    /// Exec memory set — written only while the write guard is held.
-    pub mem_set: PCell<M>,
-    /// RwLock protecting `ZoneRwContent<M>` with `ZoneKey` predicate.
-    pub lock: RwLock<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>,
-    /// Zone identifier.
-    pub zone_id: usize,
-    /// Phantom data for unused type parameters.
-    pub _phantom: PhantomData<(PT, A)>,
-}
-
-impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator {
-    /// Structural well-formedness:
-    /// - the `RwLock` is internally consistent, and
-    /// - the lock's ghost key `cell_id` matches `self.mem_set.id()`.
-    ///
-    /// The stronger invariant that `PointsTo.pcell == cell_id` and
-    /// `ZoneState.inst_id == k.inst_id` is captured by `ZonePred` and
-    /// enforced every time the lock is acquired or released.
-    pub open spec fn wf(&self) -> bool {
-        &&& self.lock.wf()
-        &&& self.lock.k@.cell_id == self.mem_set.id()
-    }
-
-    /// Assemble a `Zone` from an already-built exec `mem_set` and its ghost token.
-    ///
-    /// This is intentionally infallible: all fallible work (validating
-    /// `cfg_regions`, constructing the `MemorySet`) must be done by the caller
-    /// before invoking this function, so the `HvMemSpec` state machine is only
-    /// advanced once success is guaranteed.
-    pub fn new(
-        mem_set: M,
-        zone_id: usize,
-        Ghost(inst_id): Ghost<InstanceId>,
-        Tracked(zone_state): Tracked<ZoneState>,
-    ) -> (res: Self)
-        requires
-            zone_state.wf(inst_id),
-        ensures
-            res.wf(),
-            res.lock.k@.mem_inst_id == inst_id,
-            res.zone_id == zone_id,
-    {
-        // Store the exec mem_set in a fresh PCell.
-        let (mem_set_cell, Tracked(mem_set_perm)) = PCell::new(mem_set);
-
-        // Bundle permission + ghost token into the lock content.
-        let tracked zone_rw_content = ZoneRwContent { mem_set_perm, zone_state };
-
-        // Build the ZoneKey (evaluated in spec mode via Ghost(…)).
-        let zone_key = Ghost(ZoneKey { cell_id: mem_set_cell.id(), mem_inst_id: inst_id });
-
-        // Admit ZonePred::inv; dischargeable from PCell::new postconditions and
-        // zone_state.wf(inst_id) from the precondition.
-        proof {
-            assume(ZonePred::<PT, M, A>::inv(zone_key@, zone_rw_content));
-        }
-
-        let zone_lock = RwLock::new(zone_key, Tracked(zone_rw_content));
-        Zone { mem_set: mem_set_cell, lock: zone_lock, zone_id, _phantom: PhantomData }
-    }
-
-    /// Acquire exclusive (write) access to this zone's memory set.
-    ///
-    /// Returns the exec `M` value and a write guard.  The caller must eventually
-    /// call `unlock_write` with the (possibly modified) `M` and the guard to
-    /// release the lock and restore the invariant.
-    pub fn lock_write(&self) -> (res: (
-        M,
-        RwWriteGuard<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>,
-    ))
-        requires
-            self.wf(),
-        ensures
-            res.1.wf(&self.lock),
-            res.1.token.mem_set_perm@.pcell == self.mem_set.id(),
-            !res.1.token.mem_set_perm.is_init(),
-    {
-        let RwWriteGuard { handle, token } = self.lock.lock_write();
-        let tracked mut content: ZoneRwContent<M> = token.get();
-        let mem_set = self.mem_set.take(Tracked(&mut content.mem_set_perm));
-        (mem_set, RwWriteGuard { handle, token: Tracked(content) })
-    }
-
-    /// Release the write lock and restore the zone invariant.
-    ///
-    /// Puts `mem_set` back into the zone's `PCell`, asserts (via `assume`) that
-    /// `ZonePred::inv` holds, and then releases the `RwLock`.
-    pub fn unlock_write(
-        &self,
-        mem_set: M,
-        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>,
-    )
-        requires
-            self.wf(),
-            guard.wf(&self.lock),
-            guard.token.mem_set_perm@.pcell == self.mem_set.id(),
-            !guard.token.mem_set_perm.is_init(),
-    {
-        let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M> = token.get();
-        self.mem_set.put(Tracked(&mut content.mem_set_perm), mem_set);
-        proof {
-            assume(ZonePred::<PT, M, A>::inv(self.lock.k@, content));
-        }
-        self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
-    }
-
-    /// Acquire shared (read) access to this zone's memory set.
-    ///
-    /// Multiple readers may hold a read guard concurrently.  Use
-    /// `RwReadGuard::borrow` + `PCell::borrow` to obtain a `&M` reference.
-    pub fn lock_read(&self) -> (res: RwReadGuard<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>)
-        requires
-            self.wf(),
-        ensures
-            res.wf(&self.lock),
-    {
-        self.lock.lock_read()
-    }
-
-    /// Release the read lock acquired by `lock_read`.
-    pub fn unlock_read(&self, guard: RwReadGuard<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>)
-        requires
-            self.wf(),
-            guard.wf(&self.lock),
-    {
-        self.lock.unlock_read(guard)
-    }
-
-    /// Borrow the zone's exec `mem_set` while a read guard is held.
-    ///
-    /// Both `self` and `guard` must be alive for lifetime `'a`, so the returned
-    /// `&'a M` is valid for exactly that duration.  Do not call `unlock_read`
-    /// until the `&M` reference is no longer in use.
-    pub fn borrow_mem_set<'a>(
-        &'a self,
-        guard: &'a RwReadGuard<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>,
-    ) -> (res: &'a M)
-        requires
-            self.wf(),
-            guard.wf(&self.lock),
-    {
-        // `self.lock.inst` is borrowed for `'a` (from `&'a self`).
-        // `guard.handle`   is borrowed for `'a` (from `&'a guard`).
-        // `read_guard` yields a ghost `&'a ZoneRwContent<M>`, so the field borrow
-        // `&mem_set_perm` also carries lifetime `'a`, which flows through
-        // `PCell::borrow` into the returned `&'a M`.
-        let tracked ZoneRwContent { mem_set_perm, .. } = self.lock.inst.borrow().read_guard(
-            guard.handle@.element(),
-            guard.handle.borrow(),
-        );
-        // TODO: how to prove this?
-        assume(mem_set_perm.is_init());
-        assume(mem_set_perm@.pcell == self.mem_set.id());
-        self.mem_set.borrow(Tracked(&mem_set_perm))
-    }
-}
-
 /// Compound guard returned by `HvMem::write_zone` / `HvMem::read_zone`.
 ///
 /// Bundles the HvMem write lock resources (handle + content with empty
@@ -901,7 +284,7 @@ pub struct HvMemKey {
 /// Tracked content protected by `HvMem`'s `RwLock`.
 ///
 /// Bundles the `PointsTo<Vec<Zone<...>>>` cell-permission for the zone list
-/// together with the global `HvMemState` (which holds the `HvMemSpec` instance
+/// together with the global `HvMemState` (which holds the `ClosureSpec` instance
 /// and the `zone_ids` / `region_closure` variable tokens).
 pub tracked struct HvMemRwContent<PT, M, A> where
     PT: PageTable<A>,
@@ -910,7 +293,7 @@ pub tracked struct HvMemRwContent<PT, M, A> where
  {
     /// Permission to read/write the zone-list PCell.
     pub zone_list_perm: PointsTo<Vec<Arc<Zone<PT, M, A>>>>,
-    /// Global HvMemSpec ghost state.
+    /// Global ClosureSpec ghost state.
     pub hv_mem_state: HvMemState,
 }
 
@@ -929,7 +312,7 @@ impl<PT, M, A> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A>> for HvMemP
     /// - `hv_mem_state` is internally well-formed, and
     /// - the exec zone list and the ghost state agree: every ghost zone ID has
     ///   exactly one corresponding exec `Zone`, all zones share the same
-    ///   `HvMemSpec` instance, and exec zone IDs are pairwise distinct.
+    ///   `ClosureSpec` instance, and exec zone IDs are pairwise distinct.
     open spec fn inv(k: HvMemKey, v: HvMemRwContent<PT, M, A>) -> bool {
         &&& v.zone_list_perm.is_init()
         &&& v.zone_list_perm@.pcell === k.cell_id
@@ -941,7 +324,7 @@ impl<PT, M, A> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A>> for HvMemP
                 v.hv_mem_state.zone_ids().contains(zid) == (exists|i: int|
                     0 <= i < zone_list.len() && #[trigger] zone_list[i].zone_id as nat
                         == zid))
-            // Each exec zone's lock is bound to the correct HvMemSpec instance.
+            // Each exec zone's lock is bound to the correct ClosureSpec instance.
             &&& (forall|i: int|
                 #![trigger zone_list[i]]
                 0 <= i < zone_list.len() ==> zone_list[i].lock.k@.mem_inst_id
@@ -1011,7 +394,7 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
     /// 2. Build an empty `MemorySet` from the allocator and insert the regions
     ///    one by one (each `insert` can fail if the allocator is exhausted).
     /// 3. Acquire the **HvMem write lock** to serialise zone-list mutations.
-    /// 4. Advance the `HvMemSpec` ghost state machine (`HvMemState::add_zone`)
+    /// 4. Advance the `ClosureSpec` ghost state machine (`HvMemState::add_zone`)
     ///    to obtain a fresh `ZoneState` token for the new zone.
     /// 5. Delegate Zone assembly to `Zone::new` (infallible at this point).
     /// 6. Push the new `Zone`, return the zone list to its `PCell`, and release
@@ -1074,7 +457,7 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
         let tracked mut content: HvMemRwContent<PT, M, A> = token.get();
         let mut zones = self.zone_mem_list.take(Tracked(&mut content.zone_list_perm));
 
-        // ── Step 4: advance HvMemSpec ghost state, obtain ZoneState token ─────
+        // ── Step 4: advance ClosureSpec ghost state, obtain ZoneState token ───
         let tracked zone_state: ZoneState;
         let ghost inst_id: InstanceId;
         proof {
