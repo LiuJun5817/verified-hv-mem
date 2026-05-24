@@ -2,17 +2,17 @@
 //!
 //! - [`weak_spec`]: assumption-1 (`ClosureSpec`, global `all_regions`) state machine and tokens.
 //! - [`strong_spec`]: assumption-2 (`BudgetSpec`, per-zone static budget) state machine and tokens.
-pub mod strong_spec;
-pub mod weak_spec;
+pub mod budget;
+pub mod closure;
 
 use crate::{
     address::{addr::SpecVAddr, region::MemoryRegion},
     memory_set::SpecMemorySet,
 };
-use vstd::prelude::*;
+use vstd::{prelude::*, tokens::InstanceId};
 
-pub use strong_spec::{BudgetSpec, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken};
-pub use weak_spec::{
+pub use budget::{BudgetSpec, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken};
+pub use closure::{
     all_regions, all_regions_disjoint, all_regions_valid, ClosureRegionToken, ClosureSpec,
     ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
 };
@@ -62,6 +62,22 @@ impl GhostZone {
             mem_set: SpecMemorySet { regions: self.regions().remove(region) },
         }
     }
+}
+
+/// Minimal spec interface shared by `ZoneState` (ClosureSpec) and `BudgetZoneState`
+/// (BudgetSpec). Defined here in the `spec` layer so that `zone.rs` can implement
+/// it without depending on the `policy` module, avoiding a circular dependency.
+///
+/// Used as the bound `P::ZoneToken: ZoneStateOps` in the `HvMemPolicy` trait.
+pub trait ZoneStateOps {
+    /// The zone ID (key in the `zones` map sharding).
+    spec fn zone_id(&self) -> nat;
+
+    /// The ghost zone state (value in the `zones` map sharding).
+    spec fn ghost_zone(&self) -> GhostZone;
+
+    /// Well-formedness relative to a spec-instance ID.
+    spec fn wf(&self, inst_id: InstanceId) -> bool;
 }
 
 } // verus!

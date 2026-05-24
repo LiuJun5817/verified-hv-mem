@@ -10,9 +10,11 @@
 //!
 //! - `spec`: ghost state machines (`ClosureSpec` / `BudgetSpec`) and token type aliases.
 //! - `zone`: single-zone memory abstraction (`ZoneState`, `ZoneKey`, `ZoneRwContent`, `ZonePred`, `Zone`).
-//! - `policy`: region-assignment policy abstraction (placeholder for `DisjointEvidence`).
+//! - `policy`: region-assignment policy layer.
+//!   - `policy::weak`:   assumption-1 ghost state (`ClosureGlobalState`) + `ClosurePolicy`.
+//!   - `policy::strong`: assumption-2 ghost state (`BudgetGlobalState`) + `BudgetPolicy`.
 //! - `config`: zone configuration types and conversion to `MemoryRegion`.
-//! - `mod` (this file): `HvMemState`, `ZoneWriteGuard`, `HvMem` — the global orchestration layer.
+//! - `mod` (this file): `ZoneWriteGuard`, `HvMem` — the global exec orchestration layer.
 extern crate alloc;
 
 mod config;
@@ -32,205 +34,17 @@ use crate::{
 use alloc::sync::Arc;
 use config::HvConfigMemRegion;
 use core::marker::PhantomData;
-use spec::{
-    all_regions, ClosureRegionToken, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
-    GhostZone,
-};
+use policy::{BudgetPolicy, ClosurePolicy, HvMemPolicy};
+use spec::GhostZone;
 use vstd::invariant::InvariantPredicate;
 use vstd::{
     cell::{CellId, PCell, PointsTo},
     prelude::*,
     tokens::InstanceId,
 };
-use zone::{Zone, ZoneKey, ZonePred, ZoneRwContent, ZoneState};
+use zone::{BudgetZoneState, Zone, ZoneKey, ZonePred, ZoneRwContent};
 
 verus! {
-
-/// Global tracked ghost state held by the hypervisor memory manager.
-///
-/// Wraps the `ClosureSpec` Instance and the variable-sharded tokens (`zone_ids`,
-/// `region_closure`) that are not distributed to individual zones.
-///
-/// Typically stored inside a `Mutex` so that `add_zone`/`remove_zone` are mutually
-/// exclusive.  Per-zone `ZoneState` tokens are distributed to zone-level locks
-/// independently, mirroring the `AllocatorState` / `ClientState` split in
-/// `global_allocator`.
-pub tracked struct HvMemState {
-    pub inst: ClosureSpecInstance,
-    pub zone_ids_tok: ClosureZoneIdsToken,
-    pub region_closure_tok: ClosureRegionToken,
-}
-
-impl HvMemState {
-    /// Core well-formedness: all tokens belong to the same `ClosureSpec` instance.
-    pub open spec fn wf(&self) -> bool {
-        &&& self.zone_ids_tok.instance_id() == self.inst.id()
-        &&& self.region_closure_tok.instance_id() == self.inst.id()
-    }
-
-    /// The `ClosureSpec` instance ID.
-    pub open spec fn inst_id(&self) -> InstanceId {
-        self.inst.id()
-    }
-
-    /// The current set of registered zone IDs.
-    pub open spec fn zone_ids(&self) -> Set<nat> {
-        self.zone_ids_tok.value()
-    }
-
-    /// The current global region closure.
-    pub open spec fn region_closure(&self) -> Set<MemoryRegion> {
-        self.region_closure_tok.value()
-    }
-
-    /// Construct an initial (empty) `HvMemState` from a freshly-created `ClosureSpec`
-    /// instance. Callers obtain the tokens from `ClosureSpec::Instance::initialize`.
-    pub proof fn new(
-        tracked inst: ClosureSpecInstance,
-        tracked zone_ids_tok: ClosureZoneIdsToken,
-        tracked region_closure_tok: ClosureRegionToken,
-    ) -> (tracked state: HvMemState)
-        requires
-            zone_ids_tok.instance_id() == inst.id(),
-            zone_ids_tok.value() =~= Set::empty(),
-            region_closure_tok.instance_id() == inst.id(),
-            region_closure_tok.value() =~= Set::empty(),
-        ensures
-            state.wf(),
-            state.inst_id() == inst.id(),
-            state.zone_ids() =~= Set::empty(),
-            state.region_closure() =~= Set::empty(),
-    {
-        HvMemState { inst, zone_ids_tok, region_closure_tok }
-    }
-
-    /// Add a fully constructed zone to the system.
-    ///
-    /// The caller must prove every region in `zone` belongs to `all_regions()` (static
-    /// configuration membership) and is not already in the current `region_closure`
-    /// (no duplicate ownership).  Disjointness from the existing closure then follows
-    /// automatically from `all_regions_disjoint()`.  Returns a fresh `ZoneState` token
-    /// for the new zone, which should be stored inside the zone-level lock.
-    pub proof fn add_zone(tracked &mut self, zid: nat, zone: GhostZone) -> (tracked zone_state:
-        ZoneState)
-        requires
-            old(self).wf(),
-            !old(self).zone_ids().contains(zid),
-            zone.wf(old(self).inst_id()),
-            forall|r: MemoryRegion| #[trigger]
-                zone.regions().contains(r) ==> all_regions().contains(r),
-            forall|r: MemoryRegion| #[trigger]
-                zone.regions().contains(r) ==> !old(self).region_closure().contains(r),
-        ensures
-            self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            self.zone_ids() =~= old(self).zone_ids().insert(zid),
-            self.region_closure() =~= old(self).region_closure().union(zone.regions()),
-            zone_state.wf(self.inst_id()),
-            zone_state.zone_id() == zid,
-            zone_state.ghost_zone() == zone,
-    {
-        let tracked zone_tok = self.inst.add_zone(
-            zid,
-            zone,
-            &mut self.zone_ids_tok,
-            &mut self.region_closure_tok,
-        );
-        ZoneState { zone_tok }
-    }
-
-    /// Remove an entire zone from the system, consuming its `ZoneState` token.
-    ///
-    /// The zone's regions are subtracted from `region_closure`.  Callers are
-    /// responsible for draining page-table frames before invoking this.
-    pub proof fn remove_zone(tracked &mut self, tracked zone_state: ZoneState)
-        requires
-            old(self).wf(),
-            zone_state.wf(old(self).inst_id()),
-        ensures
-            self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            self.zone_ids() =~= old(self).zone_ids().remove(zone_state.zone_id()),
-            self.region_closure() =~= old(self).region_closure().difference(
-                zone_state.ghost_zone().regions(),
-            ),
-    {
-        let tracked ZoneState { zone_tok } = zone_state;
-        let zid = zone_tok.key();
-        self.inst.remove_zone(zid, &mut self.zone_ids_tok, zone_tok, &mut self.region_closure_tok);
-    }
-
-    /// Insert one region into an existing zone.
-    ///
-    /// Consumes `zone_state` and returns an updated `ZoneState` with the region
-    /// added.  Also extends `region_closure` by `region`.
-    ///
-    /// The caller must prove `region` belongs to `all_regions()` (static configuration
-    /// membership) and is not already in the current `region_closure` (no duplicate
-    /// ownership).  Disjointness from all existing regions then follows automatically
-    /// from `all_regions_disjoint()`.
-    pub proof fn insert_region(
-        tracked &mut self,
-        tracked zone_state: ZoneState,
-        region: MemoryRegion,
-    ) -> (tracked new_zone_state: ZoneState)
-        requires
-            old(self).wf(),
-            zone_state.wf(old(self).inst_id()),
-            region.spec_valid(),
-            all_regions().contains(region),
-            !old(self).region_closure().contains(region),
-        ensures
-            self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            new_zone_state.wf(self.inst_id()),
-            new_zone_state.zone_id() == zone_state.zone_id(),
-            self.region_closure() =~= old(self).region_closure().insert(region),
-            new_zone_state.ghost_zone() == zone_state.ghost_zone().insert_region(region),
-    {
-        let tracked ZoneState { zone_tok } = zone_state;
-        let zid = zone_tok.key();
-        let tracked new_zone_tok = self.inst.insert_region(
-            zid,
-            region,
-            zone_tok,
-            &mut self.region_closure_tok,
-        );
-        ZoneState { zone_tok: new_zone_tok }
-    }
-
-    /// Remove one region from an existing zone.
-    ///
-    /// Consumes `zone_state` and returns an updated `ZoneState` with the region
-    /// removed.  Also shrinks `region_closure` by `region`.
-    pub proof fn remove_region(
-        tracked &mut self,
-        tracked zone_state: ZoneState,
-        region: MemoryRegion,
-    ) -> (tracked new_zone_state: ZoneState)
-        requires
-            old(self).wf(),
-            zone_state.wf(old(self).inst_id()),
-            zone_state.ghost_zone().contains_region(region),
-        ensures
-            self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            new_zone_state.wf(self.inst_id()),
-            new_zone_state.zone_id() == zone_state.zone_id(),
-            self.region_closure() =~= old(self).region_closure().remove(region),
-            new_zone_state.ghost_zone() == zone_state.ghost_zone().remove_region(region),
-    {
-        let tracked ZoneState { zone_tok } = zone_state;
-        let zid = zone_tok.key();
-        let tracked new_zone_tok = self.inst.remove_region(
-            zid,
-            region,
-            zone_tok,
-            &mut self.region_closure_tok,
-        );
-        ZoneState { zone_tok: new_zone_tok }
-    }
-}
 
 /// Compound guard returned by `HvMem::write_zone` / `HvMem::read_zone`.
 ///
@@ -241,23 +55,28 @@ impl HvMemState {
 ///
 /// Pass to `HvMem::unlock_write_zone` together with the (possibly modified)
 /// exec `M` to put everything back and release both locks.
-pub struct ZoneWriteGuard<PT, M, A> where
+pub struct ZoneWriteGuard<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
+    P: HvMemPolicy,
  {
     /// Zone list taken from HvMem's PCell (zone_list_perm is currently uninitialized).
-    pub zones: Vec<Arc<Zone<PT, M, A>>>,
+    pub zones: Vec<Arc<Zone<PT, M, A, P>>>,
     /// Index of the locked zone within `zones`.
     pub zone_idx: usize,
     /// Zone-level write-lock handle token.
-    pub zone_write_handle: Tracked<RwWriterToken<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>>,
+    pub zone_write_handle: Tracked<
+        RwWriterToken<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
+    >,
     /// Zone-level lock content (mem_set_perm is currently uninitialized — M was taken out).
-    pub zone_content: Tracked<ZoneRwContent<M>>,
+    pub zone_content: Tracked<ZoneRwContent<M, P>>,
     /// HvMem-level write-lock handle token.
-    pub hvm_handle: Tracked<RwWriterToken<HvMemKey, HvMemRwContent<PT, M, A>, HvMemPred<PT, M, A>>>,
+    pub hvm_handle: Tracked<
+        RwWriterToken<HvMemKey, HvMemRwContent<PT, M, A, P>, HvMemPred<PT, M, A, P>>,
+    >,
     /// HvMem-level lock content (zone_list_perm is currently uninitialized — zones was taken out).
-    pub hvm_content: Tracked<HvMemRwContent<PT, M, A>>,
+    pub hvm_content: Tracked<HvMemRwContent<PT, M, A, P>>,
 }
 
 /// Compound guard returned by `HvMem::read_zone`.
@@ -269,8 +88,13 @@ pub struct ZoneWriteGuard<PT, M, A> where
 ///
 /// Use the same pattern as `ZoneWriteGuard`: receive `M`, inspect it, then
 /// call `HvMem::unlock_read_zone(m, guard)`.
-pub struct ZoneReadGuard<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator {
-    pub inner: ZoneWriteGuard<PT, M, A>,
+pub struct ZoneReadGuard<PT, M, A, P> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+    P: HvMemPolicy,
+ {
+    pub inner: ZoneWriteGuard<PT, M, A, P>,
 }
 
 /// Ghost key for `HvMem`'s outer `RwLock`.
@@ -284,51 +108,58 @@ pub struct HvMemKey {
 /// Tracked content protected by `HvMem`'s `RwLock`.
 ///
 /// Bundles the `PointsTo<Vec<Zone<...>>>` cell-permission for the zone list
-/// together with the global `HvMemState` (which holds the `ClosureSpec` instance
-/// and the `zone_ids` / `region_closure` variable tokens).
-pub tracked struct HvMemRwContent<PT, M, A> where
+/// together with the policy-specific global ghost state (`P::GlobalState`).
+pub tracked struct HvMemRwContent<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
+    P: HvMemPolicy,
  {
     /// Permission to read/write the zone-list PCell.
-    pub zone_list_perm: PointsTo<Vec<Arc<Zone<PT, M, A>>>>,
-    /// Global ClosureSpec ghost state.
-    pub hv_mem_state: HvMemState,
+    pub zone_list_perm: PointsTo<Vec<Arc<Zone<PT, M, A, P>>>>,
+    /// Policy-specific global ghost state (e.g. `ClosureGlobalState` for ClosurePolicy).
+    pub global_state: P::GlobalState,
 }
 
 /// Phantom struct that carries the `HvMem`-level `InvariantPredicate`.
-pub struct HvMemPred<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator {
-    pub _phantom: PhantomData<(PT, M, A)>,
-}
-
-impl<PT, M, A> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A>> for HvMemPred<PT, M, A> where
+pub struct HvMemPred<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
+    P: HvMemPolicy,
  {
+    pub _phantom: PhantomData<(PT, M, A, P)>,
+}
+
+impl<PT, M, A, P> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P>> for HvMemPred<
+    PT,
+    M,
+    A,
+    P,
+> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator, P: HvMemPolicy {
     /// The content is well-formed when:
     /// - `zone_list_perm` is initialised and points to the key's cell,
-    /// - `hv_mem_state` is internally well-formed, and
+    /// - `global_state` is internally well-formed (`P::global_wf`), and
     /// - the exec zone list and the ghost state agree: every ghost zone ID has
     ///   exactly one corresponding exec `Zone`, all zones share the same
-    ///   `ClosureSpec` instance, and exec zone IDs are pairwise distinct.
-    open spec fn inv(k: HvMemKey, v: HvMemRwContent<PT, M, A>) -> bool {
+    ///   spec instance, and exec zone IDs are pairwise distinct.
+    open spec fn inv(k: HvMemKey, v: HvMemRwContent<PT, M, A, P>) -> bool {
         &&& v.zone_list_perm.is_init()
         &&& v.zone_list_perm@.pcell === k.cell_id
-        &&& v.hv_mem_state.wf()
+        &&& P::global_wf(&v.global_state)
         &&& {
             let zone_list = v.zone_list_perm@.mem_contents->Init_0;
             // The ghost zone_ids set is exactly the set of exec zone IDs.
             &&& (forall|zid: nat| #[trigger]
-                v.hv_mem_state.zone_ids().contains(zid) == (exists|i: int|
+                P::zone_ids(&v.global_state).contains(zid) == (exists|i: int|
                     0 <= i < zone_list.len() && #[trigger] zone_list[i].zone_id as nat
                         == zid))
-            // Each exec zone's lock is bound to the correct ClosureSpec instance.
+            // Each exec zone's lock is bound to the correct spec instance.
             &&& (forall|i: int|
                 #![trigger zone_list[i]]
-                0 <= i < zone_list.len() ==> zone_list[i].lock.k@.mem_inst_id
-                    == v.hv_mem_state.inst_id())
+                0 <= i < zone_list.len() ==> zone_list[i].lock.k@.mem_inst_id == P::inst_id(
+                    &v.global_state,
+                ))
             // Exec zone IDs are pairwise distinct (ensures the bijection above is well-defined).
             &&& (forall|i: int, j: int|
                 0 <= i < zone_list.len() && 0 <= j < zone_list.len() && i != j
@@ -345,7 +176,7 @@ impl<PT, M, A> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A>> for HvMemP
 /// ```text
 ///  RwLock<HvMemRwContent<PT,M,A>>
 ///      .zone_list_perm : PointsTo<Vec<Zone<...>>>   <- cell permission  ┐ protected by
-///      .hv_mem_state   : HvMemState                 <- ghost tokens     ┘ RwLock
+///      .hv_mem_state   : ClosureGlobalState                 <- ghost tokens     ┘ RwLock
 ///
 ///  PCell<Vec<Zone<...>>>   <- zone list, accessed only while lock is held
 ///
@@ -356,18 +187,28 @@ impl<PT, M, A> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A>> for HvMemP
 /// the same time (e.g., to look up their zone).  The outer `RwLock` allows
 /// concurrent reads of the list while serialising structural changes
 /// (`add_zone` / `remove_zone`).
-pub struct HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator {
+pub struct HvMem<PT, M, A, P> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+    P: HvMemPolicy,
+ {
     /// Zone list — written only while the HvMem write guard is held.
-    pub zone_mem_list: PCell<Vec<Arc<Zone<PT, M, A>>>>,
-    /// RwLock protecting `HvMemRwContent<PT,M,A>` with `HvMemKey` predicate.
-    pub lock: RwLock<HvMemKey, HvMemRwContent<PT, M, A>, HvMemPred<PT, M, A>>,
+    pub zone_mem_list: PCell<Vec<Arc<Zone<PT, M, A, P>>>>,
+    /// RwLock protecting `HvMemRwContent<PT,M,A,P>` with `HvMemKey` predicate.
+    pub lock: RwLock<HvMemKey, HvMemRwContent<PT, M, A, P>, HvMemPred<PT, M, A, P>>,
     /// Ghost record of `zone_mem_list.id()`.
     pub cell_id: Ghost<CellId>,
     /// Global allocator — already protected by its own `Mutex`.
     pub alloc: GlobalAllocator<A>,
 }
 
-impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator {
+impl<PT, M, A, P> HvMem<PT, M, A, P> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+    P: HvMemPolicy,
+ {
     /// Structural well-formedness:
     /// - the outer `RwLock` is internally consistent,
     /// - the lock's ghost key `cell_id` matches `self.zone_mem_list.id()`, and
@@ -375,7 +216,7 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
     ///
     /// `HvMemPred::inv` (checked on every write-lock release) additionally
     /// guarantees that the `PointsTo` inside the lock points to the same cell
-    /// and that `HvMemState` is well-formed.
+    /// and that `ClosureGlobalState` is well-formed.
     pub open spec fn wf(&self) -> bool {
         &&& self.lock.wf()
         &&& self.lock.k@.cell_id == self.cell_id@
@@ -394,7 +235,7 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
     /// 2. Build an empty `MemorySet` from the allocator and insert the regions
     ///    one by one (each `insert` can fail if the allocator is exhausted).
     /// 3. Acquire the **HvMem write lock** to serialise zone-list mutations.
-    /// 4. Advance the `ClosureSpec` ghost state machine (`HvMemState::add_zone`)
+    /// 4. Advance the `ClosureSpec` ghost state machine (`ClosureGlobalState::add_zone`)
     ///    to obtain a fresh `ZoneState` token for the new zone.
     /// 5. Delegate Zone assembly to `Zone::new` (infallible at this point).
     /// 6. Push the new `Zone`, return the zone list to its `PCell`, and release
@@ -454,35 +295,30 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
         // ── Step 3: acquire HvMem write lock ──────────────────────────────────
         let guard = self.lock.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: HvMemRwContent<PT, M, A> = token.get();
+        let tracked mut content: HvMemRwContent<PT, M, A, P> = token.get();
         let mut zones = self.zone_mem_list.take(Tracked(&mut content.zone_list_perm));
 
-        // ── Step 4: advance ClosureSpec ghost state, obtain ZoneState token ───
-        let tracked zone_state: ZoneState;
+        // ── Step 4: advance policy ghost state, obtain zone token ─────────────
+        let tracked zone_state: P::ZoneToken;
         let ghost inst_id: InstanceId;
         proof {
-            inst_id = content.hv_mem_state.inst_id();
-            // Precondition admits — dischargeable from ghost_zone + HvMemState invariants
+            inst_id = P::inst_id(&content.global_state);
+            // Precondition admits — dischargeable from ghost_zone + policy invariants
             // in a fully verified version.
-            assume(!content.hv_mem_state.zone_ids().contains(zid as nat));
-            assume(ghost_zone.wf(content.hv_mem_state.inst_id()));
-            assume(forall|new_r: MemoryRegion|
-                ghost_zone.regions().contains(new_r) ==> forall|existing: MemoryRegion| #[trigger]
-                    content.hv_mem_state.region_closure().contains(existing)
-                        ==> !new_r.spec_overlaps_vmem(existing));
-            zone_state = content.hv_mem_state.add_zone(zid as nat, ghost_zone);
+            assume(!P::zone_ids(&content.global_state).contains(zid as nat));
+            zone_state = P::add_zone(&mut content.global_state, zid as nat, ghost_zone);
         }
 
         // ── Step 5: assemble the new Zone (infallible) ────────────────────────
         let new_zone = Arc::new(
-            Zone::<PT, M, A>::new(mem_set, zid, Ghost(inst_id), Tracked(zone_state)),
+            Zone::<PT, M, A, P>::new(mem_set, zid, Ghost(inst_id), Tracked(zone_state)),
         );
 
         // ── Step 6: push zone, restore PCell, release write lock ─────────────
         zones.push(new_zone);
         self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
-            assume(HvMemPred::<PT, M, A>::inv(self.lock.k@, content));
+            assume(HvMemPred::<PT, M, A, P>::inv(self.lock.k@, content));
         }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
 
@@ -498,7 +334,7 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
     /// 3. Swap-remove the zone from the list.
     /// 4. Acquire the zone write lock to extract the `ZoneState` token, and
     ///    take `M` (so that both tracked resources are properly consumed).
-    /// 5. Advance `HvMemState::remove_zone` to drop the `ZoneState` token.
+    /// 5. Advance `ClosureGlobalState::remove_zone` to drop the `ZoneState` token.
     /// 6. Restore the zone list and release the HvMem write lock.
     ///
     /// Returns `Err(())` if no zone with the given `zid` is found.
@@ -511,7 +347,7 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
         // ── Step 1: acquire HvMem write lock ─────────────────────────────────
         let guard = self.lock.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: HvMemRwContent<PT, M, A> = token.get();
+        let tracked mut content: HvMemRwContent<PT, M, A, P> = token.get();
         let mut zones = self.zone_mem_list.take(Tracked(&mut content.zone_list_perm));
 
         // ── Step 2: find zone by ID ───────────────────────────────────────────
@@ -533,7 +369,7 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
             // Zone not found — restore and return error.
             self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
             proof {
-                assume(HvMemPred::<PT, M, A>::inv(self.lock.k@, content));
+                assume(HvMemPred::<PT, M, A, P>::inv(self.lock.k@, content));
             }
             self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
@@ -543,18 +379,18 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
         let idx = idx_opt.unwrap();
         let zone = zones.swap_remove(idx);
 
-        // ── Step 4: extract ZoneState and M from the zone ─────────────────────
+        // ── Step 4: extract zone token and M from the zone ────────────────────
         let zone_guard = zone.lock.lock_write();
         let RwWriteGuard { handle: zone_handle, token: zone_token } = zone_guard;
-        let tracked mut zone_content: ZoneRwContent<M> = zone_token.get();
+        let tracked mut zone_content: ZoneRwContent<M, P> = zone_token.get();
         // Take M out of the zone's PCell so it is properly dropped below.
         let _mem_set: M = zone.mem_set.take(Tracked(&mut zone_content.mem_set_perm));
         // _mem_set is dropped at end of scope.
 
-        // ── Step 5: advance ghost state ───────────────────────────────────────
+        // ── Step 5: advance policy ghost state ───────────────────────────────
         proof {
-            let tracked ZoneRwContent { mem_set_perm: _, zone_state } = zone_content;
-            content.hv_mem_state.remove_zone(zone_state);
+            let tracked ZoneRwContent::<M, P> { mem_set_perm: _, zone_state } = zone_content;
+            P::remove_zone(&mut content.global_state, zone_state);
             // zone_handle (writer token) is consumed here via assume — the zone is
             // being destroyed so there is no need to formally unlock it.
             assume(false);  // FIXME: zone_handle (RwWriterToken) needs explicit disposal
@@ -563,7 +399,7 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
         // ── Step 6: restore zone list and release HvMem write lock ───────────
         self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
-            assume(HvMemPred::<PT, M, A>::inv(self.lock.k@, content));
+            assume(HvMemPred::<PT, M, A, P>::inv(self.lock.k@, content));
         }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
 
@@ -571,19 +407,85 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
     }
 
     /// Look up the zone with the given `zid` and return an `Arc` clone if found.
-    pub fn find_zone(&self, zid: usize) -> (res: Option<Arc<Zone<PT, M, A>>>)
+    ///
+    /// Acquires only a **read lock**, allowing concurrent lookups from multiple CPUs.
+    pub fn find_zone(&self, zid: usize) -> (res: Option<Arc<Zone<PT, M, A, P>>>)
         requires
             self.wf(),
         ensures
             res.is_some() ==> res.unwrap().wf() && res.unwrap().zone_id == zid,
     {
-        // ── Step 1: acquire HvMem write lock ─────────────────────────────────
-        let guard = self.lock.lock_write();
-        let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: HvMemRwContent<PT, M, A> = token.get();
-        let mut zones = self.zone_mem_list.take(Tracked(&mut content.zone_list_perm));
+        // ── Acquire HvMem read lock (allows concurrent lookups) ───────────────
+        let guard = self.lock.lock_read();
 
-        // ── Step 2: find zone by ID ───────────────────────────────────────────
+        // ── Borrow the zone list via the lock's ghost predicate ───────────────
+        let tracked HvMemRwContent::<PT, M, A, P> { zone_list_perm, .. } =
+            self.lock.inst.borrow().read_guard(guard.handle@.element(), guard.handle.borrow());
+        assume(zone_list_perm.is_init());
+        assume(zone_list_perm@.pcell == self.zone_mem_list.id());
+        let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
+
+        // ── Scan for matching zone ID ─────────────────────────────────────────
+        let mut idx_opt: Option<usize> = None;
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant
+                i <= zones.len(),
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                idx_opt = Some(i);
+                break ;
+            }
+            i += 1;
+        }
+
+        let result = if let Some(idx) = idx_opt {
+            Some(zones[idx].clone())
+        } else {
+            None
+        };
+
+        self.lock.unlock_read(guard);
+        result
+    }
+}
+
+/// Concrete `ClosurePolicy` implementation: `insert_region` and `remove_region`
+/// require the HvMem **write** lock because `ClosurePolicy::insert_region` and
+/// `::remove_region` extend / shrink the global `region_closure_tok`, which is
+/// stored in `HvMemRwContent::global_state` and therefore needs exclusive access.
+impl<PT, M, A> HvMem<PT, M, A, ClosurePolicy> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+ {
+    /// Insert a physical memory region into the zone identified by `zid`.
+    ///
+    /// Acquires the HvMem **write** lock so that `ClosurePolicy::insert_region`
+    /// has exclusive access to `global_state` (it extends the global
+    /// `region_closure_tok`).
+    ///
+    /// Returns `Err(())` if `region` is invalid, the zone is not found, or
+    /// `region` overlaps an existing mapping in that zone.
+    pub fn insert_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+        requires
+            self.wf(),
+        ensures
+            res is Ok ==> self.wf(),
+    {
+        // ── Step 1: validate region ────────────────────────────────────────────
+        if !region.valid() {
+            return Err(());
+        }
+        // ── Step 2: acquire HvMem write lock ──────────────────────────────────
+
+        let guard = self.lock.lock_write();
+        let RwWriteGuard { handle: hvm_handle, token: hvm_token } = guard;
+        let tracked mut hvm_content: HvMemRwContent<PT, M, A, ClosurePolicy> = hvm_token.get();
+        let mut zones = self.zone_mem_list.take(Tracked(&mut hvm_content.zone_list_perm));
+
+        // ── Step 3: find zone by ID ────────────────────────────────────────────
         let mut idx_opt: Option<usize> = None;
         let mut i: usize = 0;
         while i < zones.len()
@@ -599,24 +501,230 @@ impl<PT, M, A> HvMem<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: B
         }
 
         if idx_opt.is_none() {
-            // Zone not found — restore and return error.
-            self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
+            self.zone_mem_list.put(Tracked(&mut hvm_content.zone_list_perm), zones);
             proof {
-                assume(HvMemPred::<PT, M, A>::inv(self.lock.k@, content));
+                assume(HvMemPred::<PT, M, A, ClosurePolicy>::inv(self.lock.k@, hvm_content));
             }
-            self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
-            None
-        } else {
-            // Zone found — clone Arc, restore, and return.
-            let idx = idx_opt.unwrap();
-            let zone = zones[idx].clone();
-            self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
-            proof {
-                assume(HvMemPred::<PT, M, A>::inv(self.lock.k@, content));
-            }
-            self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
-            Some(zone)
+            self.lock.unlock_write(
+                RwWriteGuard { handle: hvm_handle, token: Tracked(hvm_content) },
+            );
+            return Err(());
         }
+        let idx = idx_opt.unwrap();
+
+        // ── Step 4: delegate to Zone::insert_region ───────────────────────────
+        // Zone::insert_region acquires the zone write lock, runs the exec insert,
+        // and calls ClosurePolicy::insert_region to advance the ghost state.
+        // We hold the HvMem write lock throughout, supplying
+        // &mut hvm_content.global_state as required by ClosurePolicy.
+        let res = zones[idx].insert_region(
+            &self.alloc,
+            Tracked(&mut hvm_content.global_state),
+            region,
+        );
+
+        // ── Step 5: restore zone list and release HvMem write lock ────────────
+        self.zone_mem_list.put(Tracked(&mut hvm_content.zone_list_perm), zones);
+        proof {
+            assume(HvMemPred::<PT, M, A, ClosurePolicy>::inv(self.lock.k@, hvm_content));
+        }
+        self.lock.unlock_write(RwWriteGuard { handle: hvm_handle, token: Tracked(hvm_content) });
+        res
+    }
+
+    /// Remove a physical memory region from the zone identified by `zid`.
+    ///
+    /// `region.start` locates the region in the exec memory set; the full
+    /// `MemoryRegion` is forwarded to `ClosurePolicy::remove_region` for the
+    /// ghost update.
+    ///
+    /// Returns `Err(())` if `region` is invalid, the zone is not found, or no
+    /// region starts at `region.start`.
+    pub fn remove_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+        requires
+            self.wf(),
+        ensures
+            res is Ok ==> self.wf(),
+    {
+        // ── Step 1: validate region ────────────────────────────────────────────
+        if !region.valid() {
+            return Err(());
+        }
+        // ── Step 2: acquire HvMem write lock ──────────────────────────────────
+
+        let guard = self.lock.lock_write();
+        let RwWriteGuard { handle: hvm_handle, token: hvm_token } = guard;
+        let tracked mut hvm_content: HvMemRwContent<PT, M, A, ClosurePolicy> = hvm_token.get();
+        let mut zones = self.zone_mem_list.take(Tracked(&mut hvm_content.zone_list_perm));
+
+        // ── Step 3: find zone by ID ────────────────────────────────────────────
+        let mut idx_opt: Option<usize> = None;
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant
+                i <= zones.len(),
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                idx_opt = Some(i);
+                break ;
+            }
+            i += 1;
+        }
+
+        if idx_opt.is_none() {
+            self.zone_mem_list.put(Tracked(&mut hvm_content.zone_list_perm), zones);
+            proof {
+                assume(HvMemPred::<PT, M, A, ClosurePolicy>::inv(self.lock.k@, hvm_content));
+            }
+            self.lock.unlock_write(
+                RwWriteGuard { handle: hvm_handle, token: Tracked(hvm_content) },
+            );
+            return Err(());
+        }
+        let idx = idx_opt.unwrap();
+
+        // ── Step 4: delegate to Zone::remove_region ───────────────────────────
+        let res = zones[idx].remove_region(
+            &self.alloc,
+            Tracked(&mut hvm_content.global_state),
+            region,
+        );
+
+        // ── Step 5: restore zone list and release HvMem write lock ────────────
+        self.zone_mem_list.put(Tracked(&mut hvm_content.zone_list_perm), zones);
+        proof {
+            assume(HvMemPred::<PT, M, A, ClosurePolicy>::inv(self.lock.k@, hvm_content));
+        }
+        self.lock.unlock_write(RwWriteGuard { handle: hvm_handle, token: Tracked(hvm_content) });
+        res
+    }
+}
+
+/// Concrete `BudgetPolicy` specialisation: both `insert_region` and
+/// `remove_region` acquire only the HvMem **read** lock.
+///
+/// `BudgetSpec::insert_region` / `remove_region` are zone-local transitions:
+/// they only touch the per-zone `zones[zid]` map-sharded token and access the
+/// `BudgetSpecInstance` (constant-sharded) as a shared reference.  The global
+/// `zone_ids_tok` is never modified, so no HvMem write lock is required.
+///
+/// Locking order: HvMem read lock → zone write lock.
+impl<PT, M, A> HvMem<PT, M, A, BudgetPolicy> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+ {
+    /// Insert `region` into zone `zid` using only the HvMem **read** lock.
+    ///
+    /// Holding only the read lock lets multiple CPUs insert into **different**
+    /// zones simultaneously, as opposed to the generic `insert_region` which
+    /// serialises all callers with a write lock.
+    ///
+    /// Returns `Err(())` if `region` is invalid, the zone is not found, or
+    /// `region` overlaps an existing mapping in that zone.
+    pub fn insert_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+        requires
+            self.wf(),
+        ensures
+            res is Ok ==> self.wf(),
+    {
+        // ── Step 1: validate region ────────────────────────────────────────────
+        if !region.valid() {
+            return Err(());
+        }
+        // ── Step 2: acquire HvMem read lock ───────────────────────────────────
+
+        let guard = self.lock.lock_read();
+        let tracked HvMemRwContent::<PT, M, A, BudgetPolicy> { zone_list_perm, global_state } =
+            self.lock.inst.borrow().read_guard(guard.handle@.element(), guard.handle.borrow());
+        assume(zone_list_perm.is_init());
+        assume(zone_list_perm@.pcell == self.zone_mem_list.id());
+        let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
+
+        // ── Step 3: find zone by ID ────────────────────────────────────────────
+        let mut idx_opt: Option<usize> = None;
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant
+                i <= zones.len(),
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                idx_opt = Some(i);
+                break ;
+            }
+            i += 1;
+        }
+
+        if idx_opt.is_none() {
+            self.lock.unlock_read(guard);
+            return Err(());
+        }
+        let idx = idx_opt.unwrap();
+
+        // ── Step 4: delegate to Zone::insert_region ────────────────
+        // Zone::insert_region acquires the zone write lock internally
+        // and advances the BudgetSpec ghost state via a shared &BudgetGlobalState,
+        // so the HvMem read lock is sufficient.
+        let res = zones[idx].insert_region(&self.alloc, Tracked(&global_state), region);
+
+        self.lock.unlock_read(guard);
+        res
+    }
+
+    /// Remove `region` from zone `zid` using only the HvMem **read** lock.
+    ///
+    /// See `insert_region` for details on why only a read lock is
+    /// needed.
+    ///
+    /// Returns `Err(())` if `region` is invalid, the zone is not found, or no
+    /// region starting at `region.start` exists in that zone.
+    pub fn remove_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+        requires
+            self.wf(),
+        ensures
+            res is Ok ==> self.wf(),
+    {
+        // ── Step 1: validate region ────────────────────────────────────────────
+        if !region.valid() {
+            return Err(());
+        }
+        // ── Step 2: acquire HvMem read lock ───────────────────────────────────
+
+        let guard = self.lock.lock_read();
+        let tracked HvMemRwContent::<PT, M, A, BudgetPolicy> { zone_list_perm, global_state } =
+            self.lock.inst.borrow().read_guard(guard.handle@.element(), guard.handle.borrow());
+        assume(zone_list_perm.is_init());
+        assume(zone_list_perm@.pcell == self.zone_mem_list.id());
+        let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
+
+        // ── Step 3: find zone by ID ────────────────────────────────────────────
+        let mut idx_opt: Option<usize> = None;
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant
+                i <= zones.len(),
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                idx_opt = Some(i);
+                break ;
+            }
+            i += 1;
+        }
+
+        if idx_opt.is_none() {
+            self.lock.unlock_read(guard);
+            return Err(());
+        }
+        let idx = idx_opt.unwrap();
+
+        // ── Step 4: delegate to Zone::remove_region ────────────────
+        let res = zones[idx].remove_region(&self.alloc, Tracked(&global_state), region);
+
+        self.lock.unlock_read(guard);
+        res
     }
 }
 

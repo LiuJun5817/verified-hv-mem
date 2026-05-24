@@ -1,11 +1,19 @@
 //! Per-zone exec/ghost structures.
 //!
 //! - [`ZoneState`]: linear ghost token holding one zone's entry in `ClosureSpec::zones`.
+//! - [`BudgetZoneState`]: linear ghost token for `BudgetSpec::zones`.
 //! - [`ZoneKey`] / [`ZoneRwContent`] / [`ZonePred`]: lock-predicate types for a zone's `RwLock`.
 //! - [`Zone`]: exec struct holding a zone's `PCell<M>` memory set and its protecting `RwLock`.
-use super::spec::{ClosureZoneToken, GhostZone};
+//!   Generic over `P: HvMemPolicy` — use `Zone<PT, M, A, ClosurePolicy>` or
+//!   `Zone<PT, M, A, BudgetPolicy>` for the two concrete assumptions.
+use super::policy::{
+    BudgetGlobalState, BudgetPolicy, ClosureGlobalState, ClosurePolicy, HvMemPolicy,
+};
+use super::spec::{BudgetZoneToken, ClosureZoneToken, GhostZone, ZoneStateOps};
 use crate::{
+    address::region::MemoryRegion,
     bitmap_allocator::bitmap_trait::BitmapAllocator,
+    global_allocator::GlobalAllocator,
     memory_set::MemorySet,
     page_table::PageTable,
     sync::rwlock::{RwLock, RwReadGuard, RwWriteGuard},
@@ -22,16 +30,16 @@ verus! {
 
 /// Per-zone tracked ghost state, holding the zone's entry in `ClosureSpec::zones`.
 ///
-/// One `ZoneState` is created for each zone when it is added via `HvMemState::add_zone`,
-/// and consumed when the zone is removed via `HvMemState::remove_zone`.
+/// One `ClosureZoneState` is created for each zone when it is added via `ClosureGlobalState::add_zone`,
+/// and consumed when the zone is removed via `ClosureGlobalState::remove_zone`.
 ///
-/// `ZoneState` is typically stored inside the zone-level lock, so that only the thread
+/// `ClosureZoneState` is typically stored inside the zone-level lock, so that only the thread
 /// holding the zone lock can invoke `insert_region`/`remove_region`.
-pub tracked struct ZoneState {
+pub tracked struct ClosureZoneState {
     pub zone_tok: ClosureZoneToken,
 }
 
-impl ZoneState {
+impl ClosureZoneState {
     /// Well-formedness: the zone token belongs to the given `ClosureSpec` instance.
     pub open spec fn wf(&self, alloc_inst_id: InstanceId) -> bool {
         self.zone_tok.instance_id() == alloc_inst_id
@@ -45,6 +53,61 @@ impl ZoneState {
     /// The ghost zone state (value in the `zones` map sharding).
     pub open spec fn ghost_zone(&self) -> GhostZone {
         self.zone_tok.value()
+    }
+}
+
+impl ZoneStateOps for ClosureZoneState {
+    open spec fn zone_id(&self) -> nat {
+        self.zone_tok.key()
+    }
+
+    open spec fn ghost_zone(&self) -> GhostZone {
+        self.zone_tok.value()
+    }
+
+    open spec fn wf(&self, inst_id: InstanceId) -> bool {
+        self.zone_tok.instance_id() == inst_id
+    }
+}
+
+/// Per-zone tracked ghost state for `BudgetSpec` (assumption 2).
+///
+/// Parallel to `ZoneState` for `ClosureSpec`, but wraps a `BudgetZoneToken`
+/// (map-sharded `BudgetSpec::zones` entry) instead of a `ClosureZoneToken`.
+/// Stored in the zone-level lock alongside no budget token — the budget is
+/// accessed as the pure spec function `zone_budget(zid)` instead.
+pub tracked struct BudgetZoneState {
+    pub zone_tok: BudgetZoneToken,
+}
+
+impl BudgetZoneState {
+    /// Well-formedness: the zone token belongs to the given `BudgetSpec` instance.
+    pub open spec fn wf(&self, inst_id: InstanceId) -> bool {
+        self.zone_tok.instance_id() == inst_id
+    }
+
+    /// The zone ID (key in the `zones` map sharding).
+    pub open spec fn zone_id(&self) -> nat {
+        self.zone_tok.key()
+    }
+
+    /// The ghost zone state (value in the `zones` map sharding).
+    pub open spec fn ghost_zone(&self) -> GhostZone {
+        self.zone_tok.value()
+    }
+}
+
+impl ZoneStateOps for BudgetZoneState {
+    open spec fn zone_id(&self) -> nat {
+        self.zone_tok.key()
+    }
+
+    open spec fn ghost_zone(&self) -> GhostZone {
+        self.zone_tok.value()
+    }
+
+    open spec fn wf(&self, inst_id: InstanceId) -> bool {
+        self.zone_tok.instance_id() == inst_id
     }
 }
 
@@ -63,32 +126,36 @@ pub struct ZoneKey {
 
 /// Tracked content protected by a `Zone`'s `RwLock`.
 ///
-/// This bundles the `PointsTo<M>` cell-permission (needed to access the exec
-/// `mem_set` via `PCell::take`/`put`/`borrow`) together with the per-zone
-/// `ClosureSpec` token (`ZoneState`).  Both are linear tracked resources that
-/// must travel together: whoever holds the write guard can mutate the memory
-/// set *and* update the ghost state atomically.
-pub tracked struct ZoneRwContent<M> {
+/// Generic over `P: HvMemPolicy`: the concrete `ZoneToken` type depends on
+/// which spec assumption is in use (`ZoneState` for ClosurePolicy,
+/// `BudgetZoneState` for BudgetPolicy).
+pub tracked struct ZoneRwContent<M, P> where P: HvMemPolicy {
     /// Permission to read/write the zone's exec `mem_set` PCell.
     pub mem_set_perm: PointsTo<M>,
-    /// Per-zone ClosureSpec token (map-sharded `zones[zid]`).
-    pub zone_state: ZoneState,
+    /// Per-zone ghost token (map-sharded `zones[zid]` for the active spec).
+    pub zone_state: P::ZoneToken,
 }
 
 /// Phantom struct that carries the `Zone`-level `InvariantPredicate`.
-pub struct ZonePred<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator {
-    pub _phantom: PhantomData<(PT, M, A)>,
-}
-
-impl<PT, M, A> InvariantPredicate<ZoneKey, ZoneRwContent<M>> for ZonePred<PT, M, A> where
+pub struct ZonePred<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
+    P: HvMemPolicy,
+ {
+    pub _phantom: PhantomData<(PT, M, A, P)>,
+}
+
+impl<PT, M, A, P> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePred<PT, M, A, P> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+    P: HvMemPolicy,
  {
     /// The content is well-formed when:
     /// - `mem_set_perm` is initialised and points to the key's cell, and
-    /// - `zone_state` belongs to the key's `ClosureSpec` instance.
-    open spec fn inv(k: ZoneKey, v: ZoneRwContent<M>) -> bool {
+    /// - `zone_state` belongs to the key's spec instance.
+    open spec fn inv(k: ZoneKey, v: ZoneRwContent<M, P>) -> bool {
         &&& v.mem_set_perm.is_init()
         &&& v.mem_set_perm@.pcell === k.cell_id
         &&& v.zone_state.wf(k.mem_inst_id)
@@ -101,9 +168,9 @@ impl<PT, M, A> InvariantPredicate<ZoneKey, ZoneRwContent<M>> for ZonePred<PT, M,
 /// read-write instead of exclusive locking):
 ///
 /// ```text
-///  RwLock<ZoneRwContent<M>>
+///  RwLock<ZoneRwContent<M, P>>
 ///      .mem_set_perm : PointsTo<M>   <- cell permission  ┐ protected by
-///      .zone_state   : ZoneState     <- ghost token       ┘ RwLock
+///      .zone_state   : P::ZoneToken  <- ghost token       ┘ RwLock
 ///
 ///  PCell<M>   <- exec memory set, accessed only while lock is held
 /// ```
@@ -111,18 +178,28 @@ impl<PT, M, A> InvariantPredicate<ZoneKey, ZoneRwContent<M>> for ZonePred<PT, M,
 /// Multiple CPUs from the **same zone** can hold read guards concurrently
 /// (e.g., for page-table walks).  A write guard gives exclusive access for
 /// operations that mutate the memory set (insert/remove region).
-pub struct Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator {
+pub struct Zone<PT, M, A, P> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+    P: HvMemPolicy,
+ {
     /// Exec memory set — written only while the write guard is held.
     pub mem_set: PCell<M>,
-    /// RwLock protecting `ZoneRwContent<M>` with `ZoneKey` predicate.
-    pub lock: RwLock<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>,
+    /// RwLock protecting `ZoneRwContent<M, P>` with `ZoneKey` predicate.
+    pub lock: RwLock<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
     /// Zone identifier.
     pub zone_id: usize,
     /// Phantom data for unused type parameters.
-    pub _phantom: PhantomData<(PT, A)>,
+    pub _phantom: PhantomData<(PT, A, P)>,
 }
 
-impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator {
+impl<PT, M, A, P> Zone<PT, M, A, P> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+    P: HvMemPolicy,
+ {
     /// Structural well-formedness:
     /// - the `RwLock` is internally consistent, and
     /// - the lock's ghost key `cell_id` matches `self.mem_set.id()`.
@@ -145,7 +222,7 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
         mem_set: M,
         zone_id: usize,
         Ghost(inst_id): Ghost<InstanceId>,
-        Tracked(zone_state): Tracked<ZoneState>,
+        Tracked(zone_state): Tracked<P::ZoneToken>,
     ) -> (res: Self)
         requires
             zone_state.wf(inst_id),
@@ -158,7 +235,7 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
         let (mem_set_cell, Tracked(mem_set_perm)) = PCell::new(mem_set);
 
         // Bundle permission + ghost token into the lock content.
-        let tracked zone_rw_content = ZoneRwContent { mem_set_perm, zone_state };
+        let tracked zone_rw_content = ZoneRwContent::<M, P> { mem_set_perm, zone_state };
 
         // Build the ZoneKey (evaluated in spec mode via Ghost(…)).
         let zone_key = Ghost(ZoneKey { cell_id: mem_set_cell.id(), mem_inst_id: inst_id });
@@ -166,7 +243,7 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
         // Admit ZonePred::inv; dischargeable from PCell::new postconditions and
         // zone_state.wf(inst_id) from the precondition.
         proof {
-            assume(ZonePred::<PT, M, A>::inv(zone_key@, zone_rw_content));
+            assume(ZonePred::<PT, M, A, P>::inv(zone_key@, zone_rw_content));
         }
 
         let zone_lock = RwLock::new(zone_key, Tracked(zone_rw_content));
@@ -180,7 +257,7 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
     /// release the lock and restore the invariant.
     pub fn lock_write(&self) -> (res: (
         M,
-        RwWriteGuard<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>,
+        RwWriteGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
     ))
         requires
             self.wf(),
@@ -190,7 +267,7 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
             !res.1.token.mem_set_perm.is_init(),
     {
         let RwWriteGuard { handle, token } = self.lock.lock_write();
-        let tracked mut content: ZoneRwContent<M> = token.get();
+        let tracked mut content: ZoneRwContent<M, P> = token.get();
         let mem_set = self.mem_set.take(Tracked(&mut content.mem_set_perm));
         (mem_set, RwWriteGuard { handle, token: Tracked(content) })
     }
@@ -202,7 +279,7 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
     pub fn unlock_write(
         &self,
         mem_set: M,
-        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>,
+        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
     )
         requires
             self.wf(),
@@ -211,10 +288,10 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
             !guard.token.mem_set_perm.is_init(),
     {
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M> = token.get();
+        let tracked mut content: ZoneRwContent<M, P> = token.get();
         self.mem_set.put(Tracked(&mut content.mem_set_perm), mem_set);
         proof {
-            assume(ZonePred::<PT, M, A>::inv(self.lock.k@, content));
+            assume(ZonePred::<PT, M, A, P>::inv(self.lock.k@, content));
         }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
     }
@@ -223,7 +300,11 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
     ///
     /// Multiple readers may hold a read guard concurrently.  Use
     /// `RwReadGuard::borrow` + `PCell::borrow` to obtain a `&M` reference.
-    pub fn lock_read(&self) -> (res: RwReadGuard<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>)
+    pub fn lock_read(&self) -> (res: RwReadGuard<
+        ZoneKey,
+        ZoneRwContent<M, P>,
+        ZonePred<PT, M, A, P>,
+    >)
         requires
             self.wf(),
         ensures
@@ -233,7 +314,10 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
     }
 
     /// Release the read lock acquired by `lock_read`.
-    pub fn unlock_read(&self, guard: RwReadGuard<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>)
+    pub fn unlock_read(
+        &self,
+        guard: RwReadGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
+    )
         requires
             self.wf(),
             guard.wf(&self.lock),
@@ -248,7 +332,7 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
     /// until the `&M` reference is no longer in use.
     pub fn borrow_mem_set<'a>(
         &'a self,
-        guard: &'a RwReadGuard<ZoneKey, ZoneRwContent<M>, ZonePred<PT, M, A>>,
+        guard: &'a RwReadGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
     ) -> (res: &'a M)
         requires
             self.wf(),
@@ -256,10 +340,10 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
     {
         // `self.lock.inst` is borrowed for `'a` (from `&'a self`).
         // `guard.handle`   is borrowed for `'a` (from `&'a guard`).
-        // `read_guard` yields a ghost `&'a ZoneRwContent<M>`, so the field borrow
+        // `read_guard` yields a ghost `&'a ZoneRwContent<M, P>`, so the field borrow
         // `&mem_set_perm` also carries lifetime `'a`, which flows through
         // `PCell::borrow` into the returned `&'a M`.
-        let tracked ZoneRwContent { mem_set_perm, .. } = self.lock.inst.borrow().read_guard(
+        let tracked ZoneRwContent::<M, P> { mem_set_perm, .. } = self.lock.inst.borrow().read_guard(
             guard.handle@.element(),
             guard.handle.borrow(),
         );
@@ -267,6 +351,188 @@ impl<PT, M, A> Zone<PT, M, A> where PT: PageTable<A>, M: MemorySet<PT, A>, A: Bi
         assume(mem_set_perm.is_init());
         assume(mem_set_perm@.pcell == self.mem_set.id());
         self.mem_set.borrow(Tracked(&mem_set_perm))
+    }
+}
+
+/// `ClosurePolicy` implementation for `Zone`: `insert_region` and `remove_region`.
+///
+/// `ClosurePolicy::insert_region` modifies `gs.region_closure_tok` globally, so
+/// callers need an exclusive `&mut ClosureGlobalState` — which requires holding the
+/// HvMem **write** lock.
+impl<PT, M, A> Zone<PT, M, A, ClosurePolicy> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+ {
+    /// Insert `region` into this zone under `ClosurePolicy`.
+    ///
+    /// The caller must hold the HvMem write lock to supply `&mut ClosureGlobalState`.
+    ///
+    /// Returns `Err(())` if `region` is invalid or overlaps an existing mapping.
+    pub fn insert_region(
+        &self,
+        alloc: &GlobalAllocator<A>,
+        Tracked(gs): Tracked<&mut ClosureGlobalState>,
+        region: MemoryRegion,
+    ) -> (res: Result<(), ()>)
+        requires
+            self.wf(),
+        ensures
+            res is Ok ==> self.wf(),
+    {
+        if !region.valid() {
+            return Err(());
+        }
+        let (mut mem_set, guard) = self.lock_write();
+        let RwWriteGuard { handle, token } = guard;
+        let tracked mut content: ZoneRwContent<M, ClosurePolicy> = token.get();
+        if mem_set.overlaps_vmem(&region) {
+            self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+            return Err(());
+        }
+        mem_set.insert(alloc, region);
+        proof {
+            let tracked ZoneRwContent::<M, ClosurePolicy> { mem_set_perm, zone_state } = content;
+            let tracked new_zone_state = ClosurePolicy::insert_region(gs, zone_state, region);
+            content =
+            ZoneRwContent::<M, ClosurePolicy> { mem_set_perm, zone_state: new_zone_state };
+        }
+        self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+        Ok(())
+    }
+
+    /// Remove `region` from this zone under `ClosurePolicy`.
+    ///
+    /// Returns `Err(())` if `region` is invalid or no region starts at `region.start`.
+    pub fn remove_region(
+        &self,
+        alloc: &GlobalAllocator<A>,
+        Tracked(gs): Tracked<&mut ClosureGlobalState>,
+        region: MemoryRegion,
+    ) -> (res: Result<(), ()>)
+        requires
+            self.wf(),
+        ensures
+            res is Ok ==> self.wf(),
+    {
+        if !region.valid() {
+            return Err(());
+        }
+        let (mut mem_set, guard) = self.lock_write();
+        let RwWriteGuard { handle, token } = guard;
+        let tracked mut content: ZoneRwContent<M, ClosurePolicy> = token.get();
+        if !mem_set.has_region_starting_at(region.start) {
+            self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+            return Err(());
+        }
+        mem_set.remove(alloc, region.start);
+        proof {
+            let tracked ZoneRwContent::<M, ClosurePolicy> { mem_set_perm, zone_state } = content;
+            let tracked new_zone_state = ClosurePolicy::remove_region(gs, zone_state, region);
+            content =
+            ZoneRwContent::<M, ClosurePolicy> { mem_set_perm, zone_state: new_zone_state };
+        }
+        self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+        Ok(())
+    }
+}
+
+/// Concrete `BudgetPolicy` implementation for `Zone`.
+///
+/// These methods take a shared `Tracked<&BudgetGlobalState>` instead of
+/// `Tracked<&mut P::GlobalState>`, because `BudgetSpec::insert_region` /
+/// `remove_region` are zone-local transitions: they only consume/produce the
+/// per-zone `zones[zid]` map-sharded token and access `BudgetSpecInstance`
+/// (constant-sharded) as a shared reference.
+///
+/// This lets callers hold only the HvMem **read** lock rather than the write lock.
+impl<PT, M, A> Zone<PT, M, A, BudgetPolicy> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+ {
+    /// Insert `region` into this zone using only a shared borrow of the global state.
+    ///
+    /// Returns `Err(())` if `region` is invalid or overlaps an existing mapping.
+    pub fn insert_region(
+        &self,
+        alloc: &GlobalAllocator<A>,
+        Tracked(gs): Tracked<&BudgetGlobalState>,
+        region: MemoryRegion,
+    ) -> (res: Result<(), ()>)
+        requires
+            self.wf(),
+        ensures
+            res is Ok ==> self.wf(),
+    {
+        if !region.valid() {
+            return Err(());
+        }
+        let (mut mem_set, guard) = self.lock_write();
+        let RwWriteGuard { handle, token } = guard;
+        let tracked mut content: ZoneRwContent<M, BudgetPolicy> = token.get();
+
+        if mem_set.overlaps_vmem(&region) {
+            self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+            return Err(());
+        }
+        mem_set.insert(alloc, region);
+
+        proof {
+            let tracked ZoneRwContent::<M, BudgetPolicy> { mem_set_perm, zone_state } = content;
+            let tracked BudgetZoneState { zone_tok } = zone_state;
+            let tracked new_zone_tok = gs.inst.insert_region(zone_tok.key(), region, zone_tok);
+            content =
+            ZoneRwContent::<M, BudgetPolicy> {
+                mem_set_perm,
+                zone_state: BudgetZoneState { zone_tok: new_zone_tok },
+            };
+        }
+
+        self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+        Ok(())
+    }
+
+    /// Remove `region` from this zone using only a shared borrow of the global state.
+    ///
+    /// Returns `Err(())` if `region` is invalid or no region starts at `region.start`.
+    pub fn remove_region(
+        &self,
+        alloc: &GlobalAllocator<A>,
+        Tracked(gs): Tracked<&BudgetGlobalState>,
+        region: MemoryRegion,
+    ) -> (res: Result<(), ()>)
+        requires
+            self.wf(),
+        ensures
+            res is Ok ==> self.wf(),
+    {
+        if !region.valid() {
+            return Err(());
+        }
+        let (mut mem_set, guard) = self.lock_write();
+        let RwWriteGuard { handle, token } = guard;
+        let tracked mut content: ZoneRwContent<M, BudgetPolicy> = token.get();
+
+        if !mem_set.has_region_starting_at(region.start) {
+            self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+            return Err(());
+        }
+        mem_set.remove(alloc, region.start);
+
+        proof {
+            let tracked ZoneRwContent::<M, BudgetPolicy> { mem_set_perm, zone_state } = content;
+            let tracked BudgetZoneState { zone_tok } = zone_state;
+            let tracked new_zone_tok = gs.inst.remove_region(zone_tok.key(), region, zone_tok);
+            content =
+            ZoneRwContent::<M, BudgetPolicy> {
+                mem_set_perm,
+                zone_state: BudgetZoneState { zone_tok: new_zone_tok },
+            };
+        }
+
+        self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+        Ok(())
     }
 }
 
