@@ -9,10 +9,10 @@
 pub mod budget;
 pub mod closure;
 
-pub use budget::{BudgetGlobalState, BudgetZoneState, BudgetProtocol};
-pub use closure::{ClosureGlobalState, ClosureZoneState, ClosureProtocol};
+pub use budget::{BudgetGlobalState, BudgetProtocol, BudgetZoneState};
+pub use closure::{ClosureGlobalState, ClosureProtocol, ClosureZoneState};
 
-use super::spec::{GhostZone, ZoneStateOps};
+use super::spec::ZoneStateOps;
 use crate::address::region::MemoryRegion;
 use vstd::prelude::*;
 
@@ -55,33 +55,29 @@ pub trait HvMemProtocol: Sized {
     /// constructed for this allocator instance.
     spec fn alloc_inst_id(gs: &Self::GlobalState) -> InstanceId;
 
-    /// Policy-specific authorization predicate for adding a zone.
-    ///
-    /// `ClosureProtocol`: every region in `zone` belongs to `all_regions()` and is
-    ///   not yet in the global region closure.
-    /// `BudgetProtocol`: every region in `zone` lies within `zone_budget(zid)`.
-    spec fn zone_authorized(gs: &Self::GlobalState, zid: nat, zone: GhostZone) -> bool;
-
     /// Policy-specific authorization predicate for inserting a region.
     ///
     /// `ClosureProtocol`: `region` is in `all_regions()` and not yet in the closure.
     /// `BudgetProtocol`: `region` is in `zone_budget(zt.zone_id())`.
-    spec fn region_authorized(gs: &Self::GlobalState, zt: &Self::ZoneToken, region: MemoryRegion) -> bool;
+    spec fn region_authorized(
+        gs: &Self::GlobalState,
+        zt: &Self::ZoneToken,
+        region: MemoryRegion,
+    ) -> bool;
 
     // ─── Proof transitions ────────────────────────────────────────────────────
-    /// Register a new zone; returns a fresh zone token.
-    proof fn add_zone(tracked gs: &mut Self::GlobalState, zid: nat, zone: GhostZone) -> (tracked zt:
-        Self::ZoneToken)
+    /// Register a new empty zone; returns a fresh zone token.
+    ///
+    /// The zone starts with no regions; use `insert_region` to populate it.
+    proof fn add_zone(tracked gs: &mut Self::GlobalState, zid: nat) -> (tracked zt: Self::ZoneToken)
         requires
             Self::global_wf(old(gs)),
             !Self::zone_ids(old(gs)).contains(zid),
-            zone.wf(Self::alloc_inst_id(old(gs))),
-            Self::zone_authorized(old(gs), zid, zone),
         ensures
             Self::global_wf(gs),
             Self::inst_id(gs) == Self::inst_id(old(gs)),
             zt.zone_id() == zid,
-            zt.ghost_zone() == zone,
+            zt.ghost_zone().regions() =~= Set::empty(),
             zt.wf(Self::inst_id(gs)),
             Self::zone_ids(gs) =~= Self::zone_ids(old(gs)).insert(zid),
     ;

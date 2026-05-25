@@ -116,19 +116,17 @@ impl HvMemProtocol for BudgetProtocol {
         gs.inst.alloc_inst_id()
     }
 
-    open spec fn zone_authorized(gs: &BudgetGlobalState, zid: nat, zone: GhostZone) -> bool {
-        forall|r: MemoryRegion| #[trigger] zone.regions().contains(r) ==> zone_budget(zid).contains(r)
-    }
-
-    open spec fn region_authorized(gs: &BudgetGlobalState, zt: &BudgetZoneState, region: MemoryRegion) -> bool {
+    open spec fn region_authorized(
+        gs: &BudgetGlobalState,
+        zt: &BudgetZoneState,
+        region: MemoryRegion,
+    ) -> bool {
         zone_budget(zt.zone_id()).contains(region)
     }
 
-    proof fn add_zone(tracked gs: &mut BudgetGlobalState, zid: nat, zone: GhostZone) -> (tracked zt:
+    proof fn add_zone(tracked gs: &mut BudgetGlobalState, zid: nat) -> (tracked zt:
         BudgetZoneState) {
-        // All BudgetSpec::add_zone preconditions are satisfied:
-        // !zone_ids.contains(zid), zone.wf(alloc_inst_id), zone_authorized (budget membership).
-        let tracked zone_tok = gs.inst.add_zone(zid, zone, &mut gs.zone_ids_tok);
+        let tracked zone_tok = gs.inst.add_zone(zid, &mut gs.zone_ids_tok);
         BudgetZoneState { zone_tok }
     }
 

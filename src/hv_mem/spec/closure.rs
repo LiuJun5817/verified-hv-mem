@@ -211,24 +211,20 @@ tokenized_state_machine! {
             }
         }
 
-        /// Add a fully constructed zone. The caller must prove that every region in the new zone
-        /// belongs to `all_regions()` (static configuration membership) and is not already
-        /// present in the global closure (no duplicate ownership).
+        /// Add an empty zone. Regions are inserted afterwards via `insert_region`.
         ///
-        /// Disjointness from the existing closure follows automatically: both the new regions and
-        /// the existing closure are subsets of `all_regions()`, which is axiomatically pairwise
-        /// disjoint, and the no-duplicate requirement rules out the same-region edge case.
+        /// Because the new zone is always empty, no region-membership or
+        /// disjointness conditions are needed at zone-creation time.
+        /// `region_closure` is left unchanged.
         transition! {
-            add_zone(zid: nat, zone: GhostZone) {
+            add_zone(zid: nat) {
                 require(!pre.zone_ids.contains(zid));
-                require(zone.wf(pre.alloc_inst_id));
-                require(forall|r: MemoryRegion|
-                    #[trigger] zone.regions().contains(r) ==> all_regions().contains(r));
-                require(forall|r: MemoryRegion|
-                    #[trigger] zone.regions().contains(r) ==> !pre.region_closure.contains(r));
                 update zone_ids = pre.zone_ids.insert(zid);
-                add zones += [zid => zone];
-                update region_closure = pre.region_closure.union(zone.regions());
+                add zones += [zid => GhostZone {
+                    alloc_inst_id: pre.alloc_inst_id,
+                    mem_set: SpecMemorySet { regions: Set::empty() },
+                }];
+                // region_closure is unchanged — empty zone contributes no regions.
             }
         }
 
@@ -279,74 +275,45 @@ tokenized_state_machine! {
         fn initialize_inductive(post: Self, alloc_inst_id: InstanceId) { }
 
         #[inductive(add_zone)]
-        fn add_zone_inductive(pre: Self, post: Self, zid: nat, zone: GhostZone) {
-            // - inv_zone_ids:              post.zone_ids = pre.zone_ids.insert(zid),
-            //                             post.zones = pre.zones.insert(zid, zone) => iff preserved.
+        fn add_zone_inductive(pre: Self, post: Self, zid: nat) {
+            // - inv_zone_ids: trivially preserved (dom update matches zone_ids update).
             assert(post.zones.dom() == post.zone_ids);
-            // - inv_zones_wf:              require(zone.wf(…)) covers the new zid; old zids unchanged.
+            // - inv_zones_wf: empty zone has alloc_inst_id == pre.alloc_inst_id and
+            //                 SpecMemorySet::wf() is vacuously true for an empty region set.
             assert(forall|zid2: nat| post.zones.contains_key(zid2) ==> #[trigger] post.zones[zid2].wf(pre.alloc_inst_id));
-            // - inv_region_closure:        post.region_closure = pre.region_closure.union(zone.regions());
-            //                             expand the iff using inv_region_closure on pre.
+            // - inv_region_closure: region_closure is unchanged; new zone is empty so
+            //                       it contributes no regions to either side of the iff.
             assert forall|region: MemoryRegion| post.region_closure.contains(region) <==>
                 (exists|zid2: nat| post.zones.contains_key(zid2)
                     && #[trigger] post.zones[zid2].contains_region(region)) by {
-                // ── forward: post.region_closure => exists zid2 in post.zones ───────
+                // ── forward: post.region_closure == pre.region_closure => use pre invariant ──
                 if post.region_closure.contains(region) {
-                    // post.region_closure = pre.region_closure.union(zone.regions())
-                    if pre.region_closure.contains(region) {
-                        // pre.inv_region_closure gives us a witness in pre.zones
-                        assert(exists|z: nat|
-                            pre.zones.contains_key(z) && #[trigger] pre.zones[z].contains_region(region));
-                        let zid2 = choose|z: nat|
-                            pre.zones.contains_key(z) && #[trigger] pre.zones[z].contains_region(region);
-                        // zid2 != zid since zid was absent from pre.zones
-                        assert(zid2 != zid);
-                        // post.zones agrees with pre.zones on all keys != zid
-                        assert(post.zones[zid2] == pre.zones[zid2]);
-                        assert(post.zones[zid2].contains_region(region));
-                    } else {
-                        // region must be in zone.regions() (the other part of the union)
-                        assert(zone.regions().contains(region));
-                        // post.zones[zid] = zone
-                        assert(post.zones.contains_key(zid) && post.zones[zid] == zone);
-                        assert(post.zones[zid].contains_region(region));
-                    }
+                    assert(exists|z: nat|
+                        pre.zones.contains_key(z) && #[trigger] pre.zones[z].contains_region(region));
+                    let zid2 = choose|z: nat|
+                        pre.zones.contains_key(z) && #[trigger] pre.zones[z].contains_region(region);
+                    // zid was absent from pre.zones, so zid2 != zid
+                    assert(zid2 != zid);
+                    assert(post.zones[zid2] == pre.zones[zid2]);
                 }
-                // ── backward: exists zid2 in post.zones => post.region_closure ───────
+                // ── backward: new zone is empty, so only pre zones contribute ─────────────
                 if exists|z: nat| post.zones.contains_key(z) &&
                     #[trigger] post.zones[z].contains_region(region) {
                     let zid2 = choose|z: nat| post.zones.contains_key(z) &&
                         #[trigger] post.zones[z].contains_region(region);
                     if zid2 == zid {
-                        // post.zones[zid] = zone, so region is in zone.regions()
-                        assert(post.zones[zid] == zone);
-                        assert(zone.regions().contains(region));
-                        // zone.regions() ⊆ post.region_closure (by Set::union)
-                        assert(post.region_closure.contains(region));
+                        // empty zone — region cannot be contained; contradiction
+                        assert(post.zones[zid].regions() =~= Set::empty());
+                        assert(false);
                     } else {
-                        // zid2 was already in pre.zones; pre.inv_region_closure gives containment
                         assert(pre.zones.contains_key(zid2));
                         assert(pre.zones[zid2].contains_region(region));
-                        assert(pre.region_closure.contains(region));
                         assert(post.zones[zid2] == pre.zones[zid2]);
-                        // pre.region_closure ⊆ post.region_closure (union includes it)
-                        assert(post.region_closure.contains(region));
                     }
                 }
             };
-            // - inv_region_closure_subset: new regions are in all_regions() by require;
-            //                             pre.region_closure ⊆ all_regions() by induction;
-            //                             union of two all_regions()-subsets is still a subset.
-            assert(forall|r: MemoryRegion| #[trigger] post.region_closure.contains(r) ==> all_regions().contains(r));
-            // - inv_region_unique_owner:   require(!pre.region_closure.contains(r)) for all new regions
-            //                             ensures no new region was already owned by another zone.
-            //                             Within the new zone, uniqueness follows from zone.wf().
-            assert(forall|r: MemoryRegion, zid1: nat, zid2: nat|
-                post.zones.contains_key(zid1) && post.zones.contains_key(zid2)
-                && #[trigger] post.zones[zid1].contains_region(r)
-                && #[trigger] post.zones[zid2].contains_region(r)
-                    ==> zid1 == zid2
-            );
+            // - inv_region_closure_subset: region_closure unchanged; subset preserved.
+            // - inv_region_unique_owner: new zone is empty, no new region ownership.
         }
 
         #[inductive(remove_zone)]

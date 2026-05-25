@@ -115,38 +115,24 @@ impl ClosureGlobalState {
         ClosureGlobalState { inst, zone_ids_tok, region_closure_tok }
     }
 
-    /// Add a fully constructed zone to the system.
+    /// Add an empty zone to the system.
     ///
-    /// The caller must prove every region in `zone` belongs to `all_regions()` (static
-    /// configuration membership) and is not already in the current `region_closure`
-    /// (no duplicate ownership).  Disjointness from the existing closure then follows
-    /// automatically from `all_regions_disjoint()`.  Returns a fresh `ZoneState` token
-    /// for the new zone, which should be stored inside the zone-level lock.
-    pub proof fn add_zone(tracked &mut self, zid: nat, zone: GhostZone) -> (tracked zone_state:
-        ClosureZoneState)
+    /// Returns a fresh `ClosureZoneState` token for the new zone.
+    /// The zone starts with no regions; use `insert_region` to populate it.
+    pub proof fn add_zone(tracked &mut self, zid: nat) -> (tracked zone_state: ClosureZoneState)
         requires
             old(self).wf(),
             !old(self).zone_ids().contains(zid),
-            zone.wf(old(self).inst.alloc_inst_id()),
-            forall|r: MemoryRegion| #[trigger]
-                zone.regions().contains(r) ==> all_regions().contains(r),
-            forall|r: MemoryRegion| #[trigger]
-                zone.regions().contains(r) ==> !old(self).region_closure().contains(r),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),
             self.zone_ids() =~= old(self).zone_ids().insert(zid),
-            self.region_closure() =~= old(self).region_closure().union(zone.regions()),
+            self.region_closure() == old(self).region_closure(),
             zone_state.wf(self.inst_id()),
             zone_state.zone_id() == zid,
-            zone_state.ghost_zone() == zone,
+            zone_state.ghost_zone().regions() =~= Set::empty(),
     {
-        let tracked zone_tok = self.inst.add_zone(
-            zid,
-            zone,
-            &mut self.zone_ids_tok,
-            &mut self.region_closure_tok,
-        );
+        let tracked zone_tok = self.inst.add_zone(zid, &mut self.zone_ids_tok);
         ClosureZoneState { zone_tok }
     }
 
@@ -275,26 +261,19 @@ impl HvMemProtocol for ClosureProtocol {
         gs.inst.alloc_inst_id()
     }
 
-    open spec fn zone_authorized(gs: &ClosureGlobalState, zid: nat, zone: GhostZone) -> bool {
-        &&& (forall|r: MemoryRegion| #[trigger] zone.regions().contains(r) ==> all_regions().contains(r))
-        &&& (forall|r: MemoryRegion| #[trigger] zone.regions().contains(r) ==> !gs.region_closure().contains(r))
-    }
-
-    open spec fn region_authorized(gs: &ClosureGlobalState, zt: &ClosureZoneState, region: MemoryRegion) -> bool {
+    open spec fn region_authorized(
+        gs: &ClosureGlobalState,
+        zt: &ClosureZoneState,
+        region: MemoryRegion,
+    ) -> bool {
         &&& region.spec_valid()
         &&& all_regions().contains(region)
         &&& !gs.region_closure().contains(region)
     }
 
-    proof fn add_zone(
-        tracked gs: &mut ClosureGlobalState,
-        zid: nat,
-        zone: GhostZone,
-    ) -> (tracked zt: ClosureZoneState) {
-        // All ClosureGlobalState::add_zone preconditions are satisfied by the
-        // trait requires: global_wf, !zone_ids.contains, zone.wf(alloc_inst_id),
-        // zone_authorized (covers all_regions + !region_closure conditions).
-        gs.add_zone(zid, zone)
+    proof fn add_zone(tracked gs: &mut ClosureGlobalState, zid: nat) -> (tracked zt:
+        ClosureZoneState) {
+        gs.add_zone(zid)
     }
 
     proof fn remove_zone(tracked gs: &mut ClosureGlobalState, tracked zt: ClosureZoneState) {

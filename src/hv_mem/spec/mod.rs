@@ -5,10 +5,7 @@
 pub mod budget;
 pub mod closure;
 
-use crate::{
-    address::{addr::SpecVAddr, region::MemoryRegion},
-    memory_set::SpecMemorySet,
-};
+use crate::{address::region::MemoryRegion, memory_set::SpecMemorySet};
 use vstd::{prelude::*, tokens::InstanceId};
 
 pub use budget::{BudgetSpec, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken};

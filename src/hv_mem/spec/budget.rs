@@ -15,6 +15,7 @@
 //! + `all_regions_disjoint()` give cross-zone disjointness without any global token.
 use super::{all_regions, all_regions_disjoint, all_regions_valid, GhostZone};
 use crate::address::region::MemoryRegion;
+use crate::memory_set::SpecMemorySet;
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::{prelude::*, tokens::InstanceId};
 
@@ -161,18 +162,18 @@ tokenized_state_machine! {
             }
         }
 
-        /// Add a zone with a fixed static budget `zone_budget(zid)`.
+        /// Add an empty zone. Regions are inserted afterwards via `insert_region`.
         ///
-        /// Preconditions:
-        /// - `zone.regions()` ⊆ `zone_budget(zid)`: initial assignment is within budget.
+        /// Because the new zone is always empty, no budget-membership conditions
+        /// are needed at zone-creation time.
         transition! {
-            add_zone(zid: nat, zone: GhostZone) {
+            add_zone(zid: nat) {
                 require(!pre.zone_ids.contains(zid));
-                require(zone.wf(pre.alloc_inst_id));
-                require(forall|r: MemoryRegion|
-                    #[trigger] zone.regions().contains(r) ==> zone_budget(zid).contains(r));
                 update zone_ids = pre.zone_ids.insert(zid);
-                add zones += [zid => zone];
+                add zones += [zid => GhostZone {
+                    alloc_inst_id: pre.alloc_inst_id,
+                    mem_set: SpecMemorySet { regions: Set::empty() },
+                }];
             }
         }
 
@@ -222,30 +223,30 @@ tokenized_state_machine! {
         fn initialize_inductive(post: Self, alloc_inst_id: InstanceId) { }
 
         #[inductive(add_zone)]
-        fn add_zone_inductive(pre: Self, post: Self, zid: nat, zone: GhostZone) {
-            // inv_zone_ids: dom(pre.zones.insert(zid, zone)) == pre.zone_ids.insert(zid)
+        fn add_zone_inductive(pre: Self, post: Self, zid: nat) {
+            // The new zone is always empty; all invariants are trivially preserved.
             assert(post.zones.dom() == post.zone_ids);
-            // inv_zones_wf: new zone uses require(zone.wf(…)); existing zones unchanged
+            // inv_zones_wf: empty zone has alloc_inst_id == pre.alloc_inst_id and
+            // SpecMemorySet::wf() is vacuously true for an empty region set.
             assert forall|zid2: nat| post.zones.contains_key(zid2)
                 implies #[trigger] post.zones[zid2].wf(post.alloc_inst_id) by {
                 if zid2 == zid {
-                    assert(post.zones[zid] == zone);
+                    // constructed as GhostZone { alloc_inst_id: pre.alloc_inst_id, mem_set: empty }
                 } else {
                     assert(post.zones[zid2] == pre.zones[zid2]);
                 }
             };
-            // inv_zone_within_budget: new zone by require; existing zones from pre invariant
+            // inv_zone_within_budget: new zone is empty so the forall is vacuously true.
             assert forall|zid2: nat, r: MemoryRegion|
                 post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].contains_region(r)
                 implies #[trigger] zone_budget(zid2).contains(r) by {
                 if zid2 == zid {
-                    assert(post.zones[zid] == zone);
+                    assert(post.zones[zid].regions() =~= Set::empty());
                 } else {
                     assert(post.zones[zid2] == pre.zones[zid2]);
                     assert(pre.zones.contains_key(zid2));
                 }
             };
-            // inv_budgets_in_all_regions & inv_budgets_disjoint: direct from axioms
             zone_budget_in_all_regions();
             zone_budget_pairwise_disjoint();
         }

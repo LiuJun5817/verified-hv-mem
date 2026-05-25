@@ -32,10 +32,8 @@ use crate::{
     sync::rwlock::{RwLock, RwReadGuard, RwReaderToken, RwWriteGuard, RwWriterToken},
 };
 use alloc::sync::Arc;
-use config::HvConfigMemRegion;
 use core::marker::PhantomData;
 use protocol::{BudgetProtocol, ClosureProtocol, HvMemProtocol};
-use spec::GhostZone;
 use vstd::invariant::InvariantPredicate;
 use vstd::{
     cell::{CellId, PCell, PointsTo},
@@ -146,8 +144,6 @@ pub struct HvMem<PT, M, A, P> where
     pub zone_mem_list: PCell<Vec<Arc<Zone<PT, M, A, P>>>>,
     /// RwLock protecting `HvMemRwContent<PT,M,A,P>` with `HvMemKey` predicate.
     pub lock: RwLock<HvMemKey, HvMemRwContent<PT, M, A, P>, HvMemPred<PT, M, A, P>>,
-    /// Ghost record of `zone_mem_list.id()`.
-    pub cell_id: Ghost<CellId>,
     /// Global allocator — already protected by its own `Mutex`.
     pub alloc: GlobalAllocator<A>,
 }
@@ -160,112 +156,64 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
  {
     /// Structural well-formedness:
     /// - the outer `RwLock` is internally consistent,
-    /// - the lock's ghost key `cell_id` matches `self.zone_mem_list.id()`, and
     /// - the global allocator is valid.
     ///
     /// `HvMemPred::inv` (checked on every write-lock release) additionally
     /// guarantees that the `PointsTo` inside the lock points to the same cell
     /// and that `ClosureGlobalState` is well-formed.
-    pub open spec fn wf(&self) -> bool {
+    pub open spec fn invariants(&self) -> bool {
         &&& self.lock.wf()
-        &&& self.lock.k@.cell_id == self.cell_id@
         &&& self.alloc.invariants()
     }
 
-    /// Add a new zone to the hypervisor memory manager.
+    /// Add a new empty zone to the hypervisor memory manager.
     ///
-    /// # Protocol
+    /// The zone is created with no regions; use `insert_region` to populate it
+    /// after creation.
     ///
-    /// All **fallible** work happens before the lock is acquired, so there is
-    /// only one lock-acquisition site and no need to release the lock on an
-    /// error path:
-    ///
-    /// 1. Validate every entry in `cfg_regions`.
-    /// 2. Build an empty `MemorySet` from the allocator and insert the regions
-    ///    one by one (each `insert` can fail if the allocator is exhausted).
-    /// 3. Acquire the **HvMem write lock** to serialise zone-list mutations.
-    /// 4. Advance the `ClosureSpec` ghost state machine (`ClosureGlobalState::add_zone`)
-    ///    to obtain a fresh `ZoneState` token for the new zone.
-    /// 5. Delegate Zone assembly to `Zone::new` (infallible at this point).
-    /// 6. Push the new `Zone`, return the zone list to its `PCell`, and release
+    /// 1. Acquire the **HvMem write lock** to serialise zone-list mutations.
+    /// 2. Advance the protocol ghost state machine (`add_zone`) to obtain a
+    ///    fresh `ZoneToken` for the new zone.
+    /// 3. Delegate Zone assembly to `Zone::new` (infallible).
+    /// 4. Push the new `Zone`, return the zone list to its `PCell`, and release
     ///    the write lock.
     pub fn add_zone(
         &self,
         zid: usize,
         pt_constants: PTConstants,
-        cfg_regions: Vec<HvConfigMemRegion>,
-        Ghost(ghost_zone): Ghost<GhostZone>,
     ) -> (res: Result<(), ()>)
         requires
-            self.wf(),
+            self.invariants(),
             pt_constants@.valid(),
             forall|level: nat|
                 level < pt_constants.arch@.level_count() ==> pt_constants.arch@.entry_count(level)
                     == 512,
             pt_constants.arch@.leaf_frame_size() == FrameSize::Size4K,
         ensures
-            res is Ok ==> self.wf(),
+            res is Ok ==> self.invariants(),
     {
-        // ── Step 1: validate cfg_regions (no lock needed) ─────────────────────
-        let mut i: usize = 0;
-        while i < cfg_regions.len()
-            invariant
-                i <= cfg_regions.len(),
-                forall|j: int| 0 <= j < i ==> #[trigger] cfg_regions[j]@.valid(),
-            decreases cfg_regions.len() - i,
-        {
-            if !cfg_regions[i].valid() {
-                return Err(());
-            }
-            i += 1;
-        }
-
-        // ── Step 2: build mem_set (no lock needed — alloc has its own lock) ───
-        let mut mem_set = M::new(&self.alloc, pt_constants);
-        let mut j: usize = 0;
-        while j < cfg_regions.len()
-            invariant
-                j <= cfg_regions.len(),
-                forall|k: int| 0 <= k < cfg_regions.len() ==> #[trigger] cfg_regions[k]@.valid(),
-                mem_set.invariants(),
-                mem_set.inst_id() == self.alloc.inst_id(),
-                self.alloc.invariants(),
-            decreases cfg_regions.len() - j,
-        {
-            assert(cfg_regions[j as int]@.valid());
-            let region = cfg_regions[j].to_region();
-            if mem_set.overlaps_vmem(&region) {
-                return Err(());
-            }
-            let insert_res = mem_set.insert(&self.alloc, region);
-            j += 1;
-        }
-
-        // ── Step 3: acquire HvMem write lock ──────────────────────────────────
+        // ── Step 1: acquire HvMem write lock ──────────────────────────────────
         let guard = self.lock.lock_write();
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: HvMemRwContent<PT, M, A, P> = token.get();
         let mut zones = self.zone_mem_list.take(Tracked(&mut content.zone_list_perm));
 
-        // ── Step 4: advance protocol ghost state, obtain zone token ─────────────
+        // ── Step 2: advance protocol ghost state, obtain zone token ───────────
         let tracked zone_state: P::ZoneToken;
         let ghost inst_id: InstanceId;
         proof {
             inst_id = P::inst_id(&content.global_state);
-            // Precondition assumes — dischargeable from ghost_zone + protocol invariants
-            // in a fully verified version.
             assume(!P::zone_ids(&content.global_state).contains(zid as nat));
-            assume(ghost_zone.wf(P::alloc_inst_id(&content.global_state)));
-            assume(P::zone_authorized(&content.global_state, zid as nat, ghost_zone));
-            zone_state = P::add_zone(&mut content.global_state, zid as nat, ghost_zone);
+            zone_state = P::add_zone(&mut content.global_state, zid as nat);
         }
 
-        // ── Step 5: assemble the new Zone (infallible) ────────────────────────
+        // ── Step 3: assemble the new Zone with an empty MemorySet ─────────────
+        let mem_set = M::new(&self.alloc, pt_constants);
         let new_zone = Arc::new(
             Zone::<PT, M, A, P>::new(mem_set, zid, Ghost(inst_id), Tracked(zone_state)),
         );
 
-        // ── Step 6: push zone, restore PCell, release write lock ─────────────
+        // ── Step 4: push zone, restore PCell, release write lock ─────────────
         zones.push(new_zone);
         self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
@@ -278,8 +226,6 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
 
     /// Remove the zone identified by `zid` from the hypervisor memory manager.
     ///
-    /// # Protocol
-    ///
     /// 1. Acquire the HvMem write lock and take the zone list.
     /// 2. Find the zone by `zone_id` field.
     /// 3. Swap-remove the zone from the list.
@@ -291,9 +237,9 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
     /// Returns `Err(())` if no zone with the given `zid` is found.
     pub fn remove_zone(&self, zid: usize) -> (res: Result<(), ()>)
         requires
-            self.wf(),
+            self.invariants(),
         ensures
-            res is Ok ==> self.wf(),
+            res is Ok ==> self.invariants(),
     {
         // ── Step 1: acquire HvMem write lock ─────────────────────────────────
         let guard = self.lock.lock_write();
@@ -362,7 +308,7 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
     /// Acquires only a **read lock**, allowing concurrent lookups from multiple CPUs.
     pub fn find_zone(&self, zid: usize) -> (res: Option<Arc<Zone<PT, M, A, P>>>)
         requires
-            self.wf(),
+            self.invariants(),
         ensures
             res.is_some() ==> res.unwrap().wf() && res.unwrap().zone_id == zid,
     {
@@ -402,6 +348,133 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
     }
 }
 
+/// Concrete `BudgetProtocol` specialisation: both `insert_region` and
+/// `remove_region` acquire only the HvMem **read** lock.
+///
+/// `BudgetSpec::insert_region` / `remove_region` are zone-local transitions:
+/// they only touch the per-zone `zones[zid]` map-sharded token and access the
+/// `BudgetSpecInstance` (constant-sharded) as a shared reference.  The global
+/// `zone_ids_tok` is never modified, so no HvMem write lock is required.
+///
+/// Locking order: HvMem read lock → zone write lock.
+impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+ {
+    /// Insert `region` into zone `zid` using only the HvMem **read** lock.
+    ///
+    /// Holding only the read lock lets multiple CPUs insert into **different**
+    /// zones simultaneously, as opposed to the generic `insert_region` which
+    /// serialises all callers with a write lock.
+    ///
+    /// Returns `Err(())` if `region` is invalid, the zone is not found, or
+    /// `region` overlaps an existing mapping in that zone.
+    pub fn insert_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+        requires
+            self.invariants(),
+        ensures
+            res is Ok ==> self.invariants(),
+    {
+        // ── Step 1: validate region ────────────────────────────────────────────
+        if !region.valid() {
+            return Err(());
+        }
+        // ── Step 2: acquire HvMem read lock ───────────────────────────────────
+
+        let guard = self.lock.lock_read();
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } =
+            self.lock.inst.borrow().read_guard(guard.handle@.element(), guard.handle.borrow());
+        assume(zone_list_perm.is_init());
+        assume(zone_list_perm@.pcell == self.zone_mem_list.id());
+        let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
+
+        // ── Step 3: find zone by ID ────────────────────────────────────────────
+        let mut idx_opt: Option<usize> = None;
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant
+                i <= zones.len(),
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                idx_opt = Some(i);
+                break ;
+            }
+            i += 1;
+        }
+
+        if idx_opt.is_none() {
+            self.lock.unlock_read(guard);
+            return Err(());
+        }
+        let idx = idx_opt.unwrap();
+
+        // ── Step 4: delegate to Zone::insert_region ────────────────
+        // Zone::insert_region acquires the zone write lock internally
+        // and advances the BudgetSpec ghost state via a shared &BudgetGlobalState,
+        // so the HvMem read lock is sufficient.
+        let res = zones[idx].insert_region(&self.alloc, Tracked(&global_state), region);
+
+        self.lock.unlock_read(guard);
+        res
+    }
+
+    /// Remove `region` from zone `zid` using only the HvMem **read** lock.
+    ///
+    /// See `insert_region` for details on why only a read lock is
+    /// needed.
+    ///
+    /// Returns `Err(())` if `region` is invalid, the zone is not found, or no
+    /// region starting at `region.start` exists in that zone.
+    pub fn remove_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+        requires
+            self.invariants(),
+        ensures
+            res is Ok ==> self.invariants(),
+    {
+        // ── Step 1: validate region ────────────────────────────────────────────
+        if !region.valid() {
+            return Err(());
+        }
+        // ── Step 2: acquire HvMem read lock ───────────────────────────────────
+
+        let guard = self.lock.lock_read();
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } =
+            self.lock.inst.borrow().read_guard(guard.handle@.element(), guard.handle.borrow());
+        assume(zone_list_perm.is_init());
+        assume(zone_list_perm@.pcell == self.zone_mem_list.id());
+        let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
+
+        // ── Step 3: find zone by ID ────────────────────────────────────────────
+        let mut idx_opt: Option<usize> = None;
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant
+                i <= zones.len(),
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                idx_opt = Some(i);
+                break ;
+            }
+            i += 1;
+        }
+
+        if idx_opt.is_none() {
+            self.lock.unlock_read(guard);
+            return Err(());
+        }
+        let idx = idx_opt.unwrap();
+
+        // ── Step 4: delegate to Zone::remove_region ────────────────
+        let res = zones[idx].remove_region(&self.alloc, Tracked(&global_state), region);
+
+        self.lock.unlock_read(guard);
+        res
+    }
+}
+
 /// Concrete `ClosureProtocol` implementation: `insert_region` and `remove_region`
 /// require the HvMem **write** lock because `ClosureProtocol::insert_region` and
 /// `::remove_region` extend / shrink the global `region_closure_tok`, which is
@@ -421,9 +494,9 @@ impl<PT, M, A> HvMem<PT, M, A, ClosureProtocol> where
     /// `region` overlaps an existing mapping in that zone.
     pub fn insert_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
         requires
-            self.wf(),
+            self.invariants(),
         ensures
-            res is Ok ==> self.wf(),
+            res is Ok ==> self.invariants(),
     {
         // ── Step 1: validate region ────────────────────────────────────────────
         if !region.valid() {
@@ -493,9 +566,9 @@ impl<PT, M, A> HvMem<PT, M, A, ClosureProtocol> where
     /// region starts at `region.start`.
     pub fn remove_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
         requires
-            self.wf(),
+            self.invariants(),
         ensures
-            res is Ok ==> self.wf(),
+            res is Ok ==> self.invariants(),
     {
         // ── Step 1: validate region ────────────────────────────────────────────
         if !region.valid() {
@@ -548,133 +621,6 @@ impl<PT, M, A> HvMem<PT, M, A, ClosureProtocol> where
             assume(HvMemPred::<PT, M, A, ClosureProtocol>::inv(self.lock.k@, hvm_content));
         }
         self.lock.unlock_write(RwWriteGuard { handle: hvm_handle, token: Tracked(hvm_content) });
-        res
-    }
-}
-
-/// Concrete `BudgetProtocol` specialisation: both `insert_region` and
-/// `remove_region` acquire only the HvMem **read** lock.
-///
-/// `BudgetSpec::insert_region` / `remove_region` are zone-local transitions:
-/// they only touch the per-zone `zones[zid]` map-sharded token and access the
-/// `BudgetSpecInstance` (constant-sharded) as a shared reference.  The global
-/// `zone_ids_tok` is never modified, so no HvMem write lock is required.
-///
-/// Locking order: HvMem read lock → zone write lock.
-impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
-    PT: PageTable<A>,
-    M: MemorySet<PT, A>,
-    A: BitmapAllocator,
- {
-    /// Insert `region` into zone `zid` using only the HvMem **read** lock.
-    ///
-    /// Holding only the read lock lets multiple CPUs insert into **different**
-    /// zones simultaneously, as opposed to the generic `insert_region` which
-    /// serialises all callers with a write lock.
-    ///
-    /// Returns `Err(())` if `region` is invalid, the zone is not found, or
-    /// `region` overlaps an existing mapping in that zone.
-    pub fn insert_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
-        requires
-            self.wf(),
-        ensures
-            res is Ok ==> self.wf(),
-    {
-        // ── Step 1: validate region ────────────────────────────────────────────
-        if !region.valid() {
-            return Err(());
-        }
-        // ── Step 2: acquire HvMem read lock ───────────────────────────────────
-
-        let guard = self.lock.lock_read();
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } =
-            self.lock.inst.borrow().read_guard(guard.handle@.element(), guard.handle.borrow());
-        assume(zone_list_perm.is_init());
-        assume(zone_list_perm@.pcell == self.zone_mem_list.id());
-        let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
-
-        // ── Step 3: find zone by ID ────────────────────────────────────────────
-        let mut idx_opt: Option<usize> = None;
-        let mut i: usize = 0;
-        while i < zones.len()
-            invariant
-                i <= zones.len(),
-            decreases zones.len() - i,
-        {
-            if zones[i].zone_id == zid {
-                idx_opt = Some(i);
-                break ;
-            }
-            i += 1;
-        }
-
-        if idx_opt.is_none() {
-            self.lock.unlock_read(guard);
-            return Err(());
-        }
-        let idx = idx_opt.unwrap();
-
-        // ── Step 4: delegate to Zone::insert_region ────────────────
-        // Zone::insert_region acquires the zone write lock internally
-        // and advances the BudgetSpec ghost state via a shared &BudgetGlobalState,
-        // so the HvMem read lock is sufficient.
-        let res = zones[idx].insert_region(&self.alloc, Tracked(&global_state), region);
-
-        self.lock.unlock_read(guard);
-        res
-    }
-
-    /// Remove `region` from zone `zid` using only the HvMem **read** lock.
-    ///
-    /// See `insert_region` for details on why only a read lock is
-    /// needed.
-    ///
-    /// Returns `Err(())` if `region` is invalid, the zone is not found, or no
-    /// region starting at `region.start` exists in that zone.
-    pub fn remove_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
-        requires
-            self.wf(),
-        ensures
-            res is Ok ==> self.wf(),
-    {
-        // ── Step 1: validate region ────────────────────────────────────────────
-        if !region.valid() {
-            return Err(());
-        }
-        // ── Step 2: acquire HvMem read lock ───────────────────────────────────
-
-        let guard = self.lock.lock_read();
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } =
-            self.lock.inst.borrow().read_guard(guard.handle@.element(), guard.handle.borrow());
-        assume(zone_list_perm.is_init());
-        assume(zone_list_perm@.pcell == self.zone_mem_list.id());
-        let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
-
-        // ── Step 3: find zone by ID ────────────────────────────────────────────
-        let mut idx_opt: Option<usize> = None;
-        let mut i: usize = 0;
-        while i < zones.len()
-            invariant
-                i <= zones.len(),
-            decreases zones.len() - i,
-        {
-            if zones[i].zone_id == zid {
-                idx_opt = Some(i);
-                break ;
-            }
-            i += 1;
-        }
-
-        if idx_opt.is_none() {
-            self.lock.unlock_read(guard);
-            return Err(());
-        }
-        let idx = idx_opt.unwrap();
-
-        // ── Step 4: delegate to Zone::remove_region ────────────────
-        let res = zones[idx].remove_region(&self.alloc, Tracked(&global_state), region);
-
-        self.lock.unlock_read(guard);
         res
     }
 }

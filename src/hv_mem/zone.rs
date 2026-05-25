@@ -273,97 +273,6 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     }
 }
 
-/// `ClosureProtocol` implementation for `Zone`: `insert_region` and `remove_region`.
-///
-/// `ClosureProtocol::insert_region` modifies `gs.region_closure_tok` globally, so
-/// callers need an exclusive `&mut ClosureGlobalState` — which requires holding the
-/// HvMem **write** lock.
-impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
-    PT: PageTable<A>,
-    M: MemorySet<PT, A>,
-    A: BitmapAllocator,
- {
-    /// Insert `region` into this zone under `ClosureProtocol`.
-    ///
-    /// The caller must hold the HvMem write lock to supply `&mut ClosureGlobalState`.
-    ///
-    /// Returns `Err(())` if `region` is invalid or overlaps an existing mapping.
-    pub fn insert_region(
-        &self,
-        alloc: &GlobalAllocator<A>,
-        Tracked(gs): Tracked<&mut ClosureGlobalState>,
-        region: MemoryRegion,
-    ) -> (res: Result<(), ()>)
-        requires
-            self.wf(),
-        ensures
-            res is Ok ==> self.wf(),
-    {
-        if !region.valid() {
-            return Err(());
-        }
-        let (mut mem_set, guard) = self.lock_write();
-        let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, ClosureProtocol> = token.get();
-        if mem_set.overlaps_vmem(&region) {
-            self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
-            return Err(());
-        }
-        mem_set.insert(alloc, region);
-        proof {
-            let tracked ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state } = content;
-            // Targeted assumptions for the new ClosureProtocol::insert_region preconditions.
-            // These conditions are checked exec-side (valid/overlaps) or are trusted
-            // configuration properties (all_regions membership, !region_closure).
-            assume(!zone_state.ghost_zone().contains_region(region));
-            assume(!zone_state.ghost_zone().mem_set.overlaps_vmem(region));
-            assume(region.spec_valid());
-            assume(all_regions().contains(region));
-            assume(!gs.region_closure().contains(region));
-            let tracked new_zone_state = ClosureProtocol::insert_region(gs, zone_state, region);
-            content =
-            ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state: new_zone_state };
-        }
-        self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
-        Ok(())
-    }
-
-    /// Remove `region` from this zone under `ClosureProtocol`.
-    ///
-    /// Returns `Err(())` if `region` is invalid or no region starts at `region.start`.
-    pub fn remove_region(
-        &self,
-        alloc: &GlobalAllocator<A>,
-        Tracked(gs): Tracked<&mut ClosureGlobalState>,
-        region: MemoryRegion,
-    ) -> (res: Result<(), ()>)
-        requires
-            self.wf(),
-        ensures
-            res is Ok ==> self.wf(),
-    {
-        if !region.valid() {
-            return Err(());
-        }
-        let (mut mem_set, guard) = self.lock_write();
-        let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, ClosureProtocol> = token.get();
-        if !mem_set.has_region_starting_at(region.start) {
-            self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
-            return Err(());
-        }
-        mem_set.remove(alloc, region.start);
-        proof {
-            let tracked ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state } = content;
-            let tracked new_zone_state = ClosureProtocol::remove_region(gs, zone_state, region);
-            content =
-            ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state: new_zone_state };
-        }
-        self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
-        Ok(())
-    }
-}
-
 /// Concrete `BudgetProtocol` implementation for `Zone`.
 ///
 /// These methods take a shared `Tracked<&BudgetGlobalState>` instead of
@@ -464,6 +373,97 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             };
         }
 
+        self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+        Ok(())
+    }
+}
+
+/// `ClosureProtocol` implementation for `Zone`: `insert_region` and `remove_region`.
+///
+/// `ClosureProtocol::insert_region` modifies `gs.region_closure_tok` globally, so
+/// callers need an exclusive `&mut ClosureGlobalState` — which requires holding the
+/// HvMem **write** lock.
+impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A>,
+    A: BitmapAllocator,
+{
+    /// Insert `region` into this zone under `ClosureProtocol`.
+    ///
+    /// The caller must hold the HvMem write lock to supply `&mut ClosureGlobalState`.
+    ///
+    /// Returns `Err(())` if `region` is invalid or overlaps an existing mapping.
+    pub fn insert_region(
+        &self,
+        alloc: &GlobalAllocator<A>,
+        Tracked(gs): Tracked<&mut ClosureGlobalState>,
+        region: MemoryRegion,
+    ) -> (res: Result<(), ()>)
+        requires
+            self.wf(),
+        ensures
+            res is Ok ==> self.wf(),
+    {
+        if !region.valid() {
+            return Err(());
+        }
+        let (mut mem_set, guard) = self.lock_write();
+        let RwWriteGuard { handle, token } = guard;
+        let tracked mut content: ZoneRwContent<M, ClosureProtocol> = token.get();
+        if mem_set.overlaps_vmem(&region) {
+            self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+            return Err(());
+        }
+        mem_set.insert(alloc, region);
+        proof {
+            let tracked ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state } = content;
+            // Targeted assumptions for the new ClosureProtocol::insert_region preconditions.
+            // These conditions are checked exec-side (valid/overlaps) or are trusted
+            // configuration properties (all_regions membership, !region_closure).
+            assume(!zone_state.ghost_zone().contains_region(region));
+            assume(!zone_state.ghost_zone().mem_set.overlaps_vmem(region));
+            assume(region.spec_valid());
+            assume(all_regions().contains(region));
+            assume(!gs.region_closure().contains(region));
+            let tracked new_zone_state = ClosureProtocol::insert_region(gs, zone_state, region);
+            content =
+            ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state: new_zone_state };
+        }
+        self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+        Ok(())
+    }
+
+    /// Remove `region` from this zone under `ClosureProtocol`.
+    ///
+    /// Returns `Err(())` if `region` is invalid or no region starts at `region.start`.
+    pub fn remove_region(
+        &self,
+        alloc: &GlobalAllocator<A>,
+        Tracked(gs): Tracked<&mut ClosureGlobalState>,
+        region: MemoryRegion,
+    ) -> (res: Result<(), ()>)
+        requires
+            self.wf(),
+        ensures
+            res is Ok ==> self.wf(),
+    {
+        if !region.valid() {
+            return Err(());
+        }
+        let (mut mem_set, guard) = self.lock_write();
+        let RwWriteGuard { handle, token } = guard;
+        let tracked mut content: ZoneRwContent<M, ClosureProtocol> = token.get();
+        if !mem_set.has_region_starting_at(region.start) {
+            self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
+            return Err(());
+        }
+        mem_set.remove(alloc, region.start);
+        proof {
+            let tracked ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state } = content;
+            let tracked new_zone_state = ClosureProtocol::remove_region(gs, zone_state, region);
+            content =
+            ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state: new_zone_state };
+        }
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
         Ok(())
     }
