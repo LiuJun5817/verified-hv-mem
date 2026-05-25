@@ -1,15 +1,15 @@
-//! Assumption-2 (strong / BudgetSpec) ghost state and policy.
+//! Assumption-2 (strong / BudgetSpec) ghost state and protocol.
 //!
 //! - [`BudgetGlobalState`]: global tracked ghost state (BudgetSpec instance + `zone_ids` token).
-//! - [`BudgetPolicy`]: `HvMemPolicy` implementation for assumption 2.
+//! - [`BudgetProtocol`]: `HvMemProtocol` implementation for assumption 2.
 //!
-//! `insert_region` under `BudgetPolicy` is zone-local: only the `BudgetSpec::zones[zid]`
+//! `insert_region` under `BudgetProtocol` is zone-local: only the `BudgetSpec::zones[zid]`
 //! map-sharded token is updated, so **no global HvMem write lock is required**.
 use super::super::spec::{
     budget::{zone_budget, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken},
     GhostZone, ZoneStateOps,
 };
-use super::HvMemPolicy;
+use super::HvMemProtocol;
 use crate::address::region::MemoryRegion;
 use vstd::prelude::*;
 
@@ -84,18 +84,18 @@ impl BudgetGlobalState {
     }
 }
 
-// ─── BudgetPolicy ────────────────────────────────────────────────────────────
-/// Assumption-2 (BudgetSpec) policy marker.
+// ─── BudgetProtocol ────────────────────────────────────────────────────────────
+/// Assumption-2 (BudgetSpec) protocol marker.
 ///
-/// When `P = BudgetPolicy`:
-/// - `Zone<PT, M, A, BudgetPolicy>` holds a `BudgetZoneState` ghost token.
-/// - `HvMem<PT, M, A, BudgetPolicy>` holds `BudgetGlobalState` as global state.
+/// When `P = BudgetProtocol`:
+/// - `Zone<PT, M, A, BudgetProtocol>` holds a `BudgetZoneState` ghost token.
+/// - `HvMem<PT, M, A, BudgetProtocol>` holds `BudgetGlobalState` as global state.
 /// - `insert_region` is **zone-local**: `gs` (global state) is not modified,
 ///   so the HvMem write lock does **not** need to be held for insertion.
 ///   This is the key performance benefit of assumption 2.
-pub struct BudgetPolicy;
+pub struct BudgetProtocol;
 
-impl HvMemPolicy for BudgetPolicy {
+impl HvMemProtocol for BudgetProtocol {
     type ZoneToken = BudgetZoneState;
 
     type GlobalState = BudgetGlobalState;

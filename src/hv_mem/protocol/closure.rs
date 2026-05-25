@@ -1,13 +1,13 @@
-//! Assumption-1 (weak / ClosureSpec) ghost state and policy.
+//! Assumption-1 (weak / ClosureSpec) ghost state and protocol.
 //!
 //! - [`ClosureGlobalState`]: global tracked ghost state (ClosureSpec instance +
 //!   `zone_ids` + `region_closure` tokens).
-//! - [`ClosurePolicy`]: `HvMemPolicy` implementation for assumption 1.
+//! - [`ClosureProtocol`]: `HvMemProtocol` implementation for assumption 1.
 use super::super::spec::{
     all_regions, ClosureRegionToken, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
     GhostZone, ZoneStateOps,
 };
-use super::HvMemPolicy;
+use super::HvMemProtocol;
 use crate::address::region::MemoryRegion;
 use vstd::{prelude::*, tokens::InstanceId};
 
@@ -244,17 +244,17 @@ impl ClosureGlobalState {
     }
 }
 
-// ─── ClosurePolicy ───────────────────────────────────────────────────────────
-/// Assumption-1 (ClosureSpec) policy marker.
+// ─── ClosureProtocol ───────────────────────────────────────────────────────────
+/// Assumption-1 (ClosureSpec) protocol marker.
 ///
-/// When `P = ClosurePolicy`:
-/// - `Zone<PT, M, A, ClosurePolicy>` holds a `ZoneState` ghost token.
-/// - `HvMem<PT, M, A, ClosurePolicy>` holds `ClosureGlobalState` as global state.
+/// When `P = ClosureProtocol`:
+/// - `Zone<PT, M, A, ClosureProtocol>` holds a `ZoneState` ghost token.
+/// - `HvMem<PT, M, A, ClosureProtocol>` holds `ClosureGlobalState` as global state.
 /// - `insert_region` requires holding the HvMem **write lock** (because
 ///   `ClosureGlobalState::region_closure_tok` must be updated globally).
-pub struct ClosurePolicy;
+pub struct ClosureProtocol;
 
-impl HvMemPolicy for ClosurePolicy {
+impl HvMemProtocol for ClosureProtocol {
     type ZoneToken = ClosureZoneState;
 
     type GlobalState = ClosureGlobalState;

@@ -1,16 +1,16 @@
-//! Region-assignment policy abstraction.
+//! Region-assignment protocol abstraction.
 //!
 //! Abstracts over the two safety assumptions (`ClosureSpec` / `BudgetSpec`) so that
-//! `Zone` and `HvMem` are generic over `P: HvMemPolicy` rather than hard-wired.
+//! `Zone` and `HvMem` are generic over `P: HvMemProtocol` rather than hard-wired.
 //!
 //! Submodules:
-//! - [`weak`]:   assumption-1 ghost state (`ClosureGlobalState`) and `ClosurePolicy`.
-//! - [`strong`]: assumption-2 ghost state (`BudgetGlobalState`) and `BudgetPolicy`.
+//! - [`weak`]:   assumption-1 ghost state (`ClosureGlobalState`) and `ClosureProtocol`.
+//! - [`strong`]: assumption-2 ghost state (`BudgetGlobalState`) and `BudgetProtocol`.
 pub mod budget;
 pub mod closure;
 
-pub use budget::{BudgetGlobalState, BudgetZoneState, BudgetPolicy};
-pub use closure::{ClosureGlobalState, ClosureZoneState, ClosurePolicy};
+pub use budget::{BudgetGlobalState, BudgetZoneState, BudgetProtocol};
+pub use closure::{ClosureGlobalState, ClosureZoneState, ClosureProtocol};
 
 use super::spec::{GhostZone, ZoneStateOps};
 use crate::address::region::MemoryRegion;
@@ -18,25 +18,25 @@ use vstd::prelude::*;
 
 verus! {
 
-/// Top-level exec policy trait that unifies `ClosureSpec` (assumption 1) and
+/// Top-level exec protocol trait that unifies `ClosureSpec` (assumption 1) and
 /// `BudgetSpec` (assumption 2) under a single generic interface.
 ///
-/// `Zone<PT, M, A, P>` and `HvMem<PT, M, A, P>` are parameterized by `P: HvMemPolicy`.
+/// `Zone<PT, M, A, P>` and `HvMem<PT, M, A, P>` are parameterized by `P: HvMemProtocol`.
 /// Swapping `P` switches the entire ghost-state bookkeeping strategy without changing
 /// any exec code.
 ///
 /// | Impl            | `ZoneToken`       | `GlobalState`       | Lock for insert    |
 /// |-----------------|-------------------|---------------------|--------------------|
-/// | `ClosurePolicy` | `ZoneState`       | `ClosureGlobalState`        | global + zone lock |
-/// | `BudgetPolicy`  | `BudgetZoneState` | `BudgetGlobalState` | zone lock only     |
-pub trait HvMemPolicy: Sized {
+/// | `ClosureProtocol` | `ZoneState`       | `ClosureGlobalState`        | global + zone lock |
+/// | `BudgetProtocol`  | `BudgetZoneState` | `BudgetGlobalState` | zone lock only     |
+pub trait HvMemProtocol: Sized {
     /// Per-zone tracked ghost state (map-sharded token from `zones[zid]`).
     type ZoneToken: ZoneStateOps;
 
     /// Global tracked ghost state stored inside `HvMem`'s write-lock content.
     ///
-    /// `ClosurePolicy`: `ClosureGlobalState` (holds `region_closure_tok` — global write lock required).
-    /// `BudgetPolicy`:  `BudgetGlobalState` (no `region_closure_tok` — zone-local insert).
+    /// `ClosureProtocol`: `ClosureGlobalState` (holds `region_closure_tok` — global write lock required).
+    /// `BudgetProtocol`:  `BudgetGlobalState` (no `region_closure_tok` — zone-local insert).
     type GlobalState;
 
     // ─── Spec predicates ─────────────────────────────────────────────────────
@@ -57,15 +57,15 @@ pub trait HvMemPolicy: Sized {
 
     /// Policy-specific authorization predicate for adding a zone.
     ///
-    /// `ClosurePolicy`: every region in `zone` belongs to `all_regions()` and is
+    /// `ClosureProtocol`: every region in `zone` belongs to `all_regions()` and is
     ///   not yet in the global region closure.
-    /// `BudgetPolicy`: every region in `zone` lies within `zone_budget(zid)`.
+    /// `BudgetProtocol`: every region in `zone` lies within `zone_budget(zid)`.
     spec fn zone_authorized(gs: &Self::GlobalState, zid: nat, zone: GhostZone) -> bool;
 
     /// Policy-specific authorization predicate for inserting a region.
     ///
-    /// `ClosurePolicy`: `region` is in `all_regions()` and not yet in the closure.
-    /// `BudgetPolicy`: `region` is in `zone_budget(zt.zone_id())`.
+    /// `ClosureProtocol`: `region` is in `all_regions()` and not yet in the closure.
+    /// `BudgetProtocol`: `region` is in `zone_budget(zt.zone_id())`.
     spec fn region_authorized(gs: &Self::GlobalState, zt: &Self::ZoneToken, region: MemoryRegion) -> bool;
 
     // ─── Proof transitions ────────────────────────────────────────────────────
@@ -102,10 +102,10 @@ pub trait HvMemPolicy: Sized {
     /// The region must pass three conditions:
     /// - `!zt.ghost_zone().contains_region(region)`: no duplicate insert.
     /// - `!zt.ghost_zone().mem_set.overlaps_vmem(region)`: no virtual-address clash.
-    /// - `Self::region_authorized(...)`: policy-specific membership check
-    ///   (`all_regions` + not in closure for ClosurePolicy; `zone_budget` for BudgetPolicy).
+    /// - `Self::region_authorized(...)`: protocol-specific membership check
+    ///   (`all_regions` + not in closure for ClosureProtocol; `zone_budget` for BudgetProtocol).
     ///
-    /// For `BudgetPolicy` the `gs` argument is not modified (zone-local transition).
+    /// For `BudgetProtocol` the `gs` argument is not modified (zone-local transition).
     proof fn insert_region(
         tracked gs: &mut Self::GlobalState,
         tracked zt: Self::ZoneToken,

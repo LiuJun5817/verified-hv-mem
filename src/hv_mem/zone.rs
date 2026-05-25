@@ -4,10 +4,10 @@
 //! - [`BudgetZoneState`]: linear ghost token for `BudgetSpec::zones`.
 //! - [`ZoneKey`] / [`ZoneRwContent`] / [`ZonePred`]: lock-predicate types for a zone's `RwLock`.
 //! - [`Zone`]: exec struct holding a zone's `PCell<M>` memory set and its protecting `RwLock`.
-//!   Generic over `P: HvMemPolicy` — use `Zone<PT, M, A, ClosurePolicy>` or
-//!   `Zone<PT, M, A, BudgetPolicy>` for the two concrete assumptions.
-use super::policy::{
-    BudgetGlobalState, BudgetPolicy, ClosureGlobalState, ClosurePolicy, HvMemPolicy, BudgetZoneState, ClosureZoneState,
+//!   Generic over `P: HvMemProtocol` — use `Zone<PT, M, A, ClosureProtocol>` or
+//!   `Zone<PT, M, A, BudgetProtocol>` for the two concrete assumptions.
+use super::protocol::{
+    BudgetGlobalState, BudgetProtocol, ClosureGlobalState, ClosureProtocol, HvMemProtocol, BudgetZoneState, ClosureZoneState,
 };
 use super::spec::{BudgetZoneToken, ClosureZoneToken, GhostZone, ZoneStateOps};
 use super::spec::closure::all_regions;
@@ -45,10 +45,10 @@ pub struct ZoneKey {
 
 /// Tracked content protected by a `Zone`'s `RwLock`.
 ///
-/// Generic over `P: HvMemPolicy`: the concrete `ZoneToken` type depends on
-/// which spec assumption is in use (`ZoneState` for ClosurePolicy,
-/// `BudgetZoneState` for BudgetPolicy).
-pub tracked struct ZoneRwContent<M, P> where P: HvMemPolicy {
+/// Generic over `P: HvMemProtocol`: the concrete `ZoneToken` type depends on
+/// which spec assumption is in use (`ZoneState` for ClosureProtocol,
+/// `BudgetZoneState` for BudgetProtocol).
+pub tracked struct ZoneRwContent<M, P> where P: HvMemProtocol {
     /// Permission to read/write the zone's exec `mem_set` PCell.
     pub mem_set_perm: PointsTo<M>,
     /// Per-zone ghost token (map-sharded `zones[zid]` for the active spec).
@@ -60,7 +60,7 @@ pub struct ZonePred<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemPolicy,
+    P: HvMemProtocol,
  {
     pub _phantom: PhantomData<(PT, M, A, P)>,
 }
@@ -69,7 +69,7 @@ impl<PT, M, A, P> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePred<
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemPolicy,
+    P: HvMemProtocol,
  {
     /// The content is well-formed when:
     /// - `mem_set_perm` is initialised and points to the key's cell, and
@@ -101,7 +101,7 @@ pub struct Zone<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemPolicy,
+    P: HvMemProtocol,
  {
     /// Exec memory set — written only while the write guard is held.
     pub mem_set: PCell<M>,
@@ -117,7 +117,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemPolicy,
+    P: HvMemProtocol,
  {
     /// Structural well-formedness:
     /// - the `RwLock` is internally consistent, and
@@ -273,17 +273,17 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     }
 }
 
-/// `ClosurePolicy` implementation for `Zone`: `insert_region` and `remove_region`.
+/// `ClosureProtocol` implementation for `Zone`: `insert_region` and `remove_region`.
 ///
-/// `ClosurePolicy::insert_region` modifies `gs.region_closure_tok` globally, so
+/// `ClosureProtocol::insert_region` modifies `gs.region_closure_tok` globally, so
 /// callers need an exclusive `&mut ClosureGlobalState` — which requires holding the
 /// HvMem **write** lock.
-impl<PT, M, A> Zone<PT, M, A, ClosurePolicy> where
+impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
  {
-    /// Insert `region` into this zone under `ClosurePolicy`.
+    /// Insert `region` into this zone under `ClosureProtocol`.
     ///
     /// The caller must hold the HvMem write lock to supply `&mut ClosureGlobalState`.
     ///
@@ -304,15 +304,15 @@ impl<PT, M, A> Zone<PT, M, A, ClosurePolicy> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, ClosurePolicy> = token.get();
+        let tracked mut content: ZoneRwContent<M, ClosureProtocol> = token.get();
         if mem_set.overlaps_vmem(&region) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
         mem_set.insert(alloc, region);
         proof {
-            let tracked ZoneRwContent::<M, ClosurePolicy> { mem_set_perm, zone_state } = content;
-            // Targeted assumptions for the new ClosurePolicy::insert_region preconditions.
+            let tracked ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state } = content;
+            // Targeted assumptions for the new ClosureProtocol::insert_region preconditions.
             // These conditions are checked exec-side (valid/overlaps) or are trusted
             // configuration properties (all_regions membership, !region_closure).
             assume(!zone_state.ghost_zone().contains_region(region));
@@ -320,15 +320,15 @@ impl<PT, M, A> Zone<PT, M, A, ClosurePolicy> where
             assume(region.spec_valid());
             assume(all_regions().contains(region));
             assume(!gs.region_closure().contains(region));
-            let tracked new_zone_state = ClosurePolicy::insert_region(gs, zone_state, region);
+            let tracked new_zone_state = ClosureProtocol::insert_region(gs, zone_state, region);
             content =
-            ZoneRwContent::<M, ClosurePolicy> { mem_set_perm, zone_state: new_zone_state };
+            ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state: new_zone_state };
         }
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
         Ok(())
     }
 
-    /// Remove `region` from this zone under `ClosurePolicy`.
+    /// Remove `region` from this zone under `ClosureProtocol`.
     ///
     /// Returns `Err(())` if `region` is invalid or no region starts at `region.start`.
     pub fn remove_region(
@@ -347,24 +347,24 @@ impl<PT, M, A> Zone<PT, M, A, ClosurePolicy> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, ClosurePolicy> = token.get();
+        let tracked mut content: ZoneRwContent<M, ClosureProtocol> = token.get();
         if !mem_set.has_region_starting_at(region.start) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
         mem_set.remove(alloc, region.start);
         proof {
-            let tracked ZoneRwContent::<M, ClosurePolicy> { mem_set_perm, zone_state } = content;
-            let tracked new_zone_state = ClosurePolicy::remove_region(gs, zone_state, region);
+            let tracked ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state } = content;
+            let tracked new_zone_state = ClosureProtocol::remove_region(gs, zone_state, region);
             content =
-            ZoneRwContent::<M, ClosurePolicy> { mem_set_perm, zone_state: new_zone_state };
+            ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state: new_zone_state };
         }
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
         Ok(())
     }
 }
 
-/// Concrete `BudgetPolicy` implementation for `Zone`.
+/// Concrete `BudgetProtocol` implementation for `Zone`.
 ///
 /// These methods take a shared `Tracked<&BudgetGlobalState>` instead of
 /// `Tracked<&mut P::GlobalState>`, because `BudgetSpec::insert_region` /
@@ -373,7 +373,7 @@ impl<PT, M, A> Zone<PT, M, A, ClosurePolicy> where
 /// (constant-sharded) as a shared reference.
 ///
 /// This lets callers hold only the HvMem **read** lock rather than the write lock.
-impl<PT, M, A> Zone<PT, M, A, BudgetPolicy> where
+impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
@@ -397,7 +397,7 @@ impl<PT, M, A> Zone<PT, M, A, BudgetPolicy> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetPolicy> = token.get();
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol> = token.get();
 
         if mem_set.overlaps_vmem(&region) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -406,7 +406,7 @@ impl<PT, M, A> Zone<PT, M, A, BudgetPolicy> where
         mem_set.insert(alloc, region);
 
         proof {
-            let tracked ZoneRwContent::<M, BudgetPolicy> { mem_set_perm, zone_state } = content;
+            let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state } = content;
             let tracked BudgetZoneState { zone_tok } = zone_state;
             // Targeted assumptions for BudgetSpec::insert_region preconditions.
             // Budget membership is trusted configuration; !contains_region and
@@ -416,7 +416,7 @@ impl<PT, M, A> Zone<PT, M, A, BudgetPolicy> where
             assume(!zone_tok.value().mem_set.overlaps_vmem(region));
             let tracked new_zone_tok = gs.inst.insert_region(zone_tok.key(), region, zone_tok);
             content =
-            ZoneRwContent::<M, BudgetPolicy> {
+            ZoneRwContent::<M, BudgetProtocol> {
                 mem_set_perm,
                 zone_state: BudgetZoneState { zone_tok: new_zone_tok },
             };
@@ -445,7 +445,7 @@ impl<PT, M, A> Zone<PT, M, A, BudgetPolicy> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetPolicy> = token.get();
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol> = token.get();
 
         if !mem_set.has_region_starting_at(region.start) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -454,11 +454,11 @@ impl<PT, M, A> Zone<PT, M, A, BudgetPolicy> where
         mem_set.remove(alloc, region.start);
 
         proof {
-            let tracked ZoneRwContent::<M, BudgetPolicy> { mem_set_perm, zone_state } = content;
+            let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state } = content;
             let tracked BudgetZoneState { zone_tok } = zone_state;
             let tracked new_zone_tok = gs.inst.remove_region(zone_tok.key(), region, zone_tok);
             content =
-            ZoneRwContent::<M, BudgetPolicy> {
+            ZoneRwContent::<M, BudgetProtocol> {
                 mem_set_perm,
                 zone_state: BudgetZoneState { zone_tok: new_zone_tok },
             };
