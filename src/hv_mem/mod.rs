@@ -42,60 +42,9 @@ use vstd::{
     prelude::*,
     tokens::InstanceId,
 };
-use zone::{BudgetZoneState, Zone, ZoneKey, ZonePred, ZoneRwContent};
+use zone::{Zone, ZoneKey, ZonePred, ZoneRwContent};
 
 verus! {
-
-/// Compound guard returned by `HvMem::write_zone` / `HvMem::read_zone`.
-///
-/// Bundles the HvMem write lock resources (handle + content with empty
-/// zone-list permission) with the zone's write lock resources (handle +
-/// content with empty mem-set permission) and the temporarily-detached
-/// zone list.
-///
-/// Pass to `HvMem::unlock_write_zone` together with the (possibly modified)
-/// exec `M` to put everything back and release both locks.
-pub struct ZoneWriteGuard<PT, M, A, P> where
-    PT: PageTable<A>,
-    M: MemorySet<PT, A>,
-    A: BitmapAllocator,
-    P: HvMemPolicy,
- {
-    /// Zone list taken from HvMem's PCell (zone_list_perm is currently uninitialized).
-    pub zones: Vec<Arc<Zone<PT, M, A, P>>>,
-    /// Index of the locked zone within `zones`.
-    pub zone_idx: usize,
-    /// Zone-level write-lock handle token.
-    pub zone_write_handle: Tracked<
-        RwWriterToken<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
-    >,
-    /// Zone-level lock content (mem_set_perm is currently uninitialized — M was taken out).
-    pub zone_content: Tracked<ZoneRwContent<M, P>>,
-    /// HvMem-level write-lock handle token.
-    pub hvm_handle: Tracked<
-        RwWriterToken<HvMemKey, HvMemRwContent<PT, M, A, P>, HvMemPred<PT, M, A, P>>,
-    >,
-    /// HvMem-level lock content (zone_list_perm is currently uninitialized — zones was taken out).
-    pub hvm_content: Tracked<HvMemRwContent<PT, M, A, P>>,
-}
-
-/// Compound guard returned by `HvMem::read_zone`.
-///
-/// Structurally identical to `ZoneWriteGuard` — the zone is locked for write
-/// to allow taking `M` from the PCell.  The semantic distinction (read-only
-/// vs read-write) is enforced at the spec level: `unlock_read_zone` requires
-/// the `M` passed back to be spec-equal to the one originally returned.
-///
-/// Use the same pattern as `ZoneWriteGuard`: receive `M`, inspect it, then
-/// call `HvMem::unlock_read_zone(m, guard)`.
-pub struct ZoneReadGuard<PT, M, A, P> where
-    PT: PageTable<A>,
-    M: MemorySet<PT, A>,
-    A: BitmapAllocator,
-    P: HvMemPolicy,
- {
-    pub inner: ZoneWriteGuard<PT, M, A, P>,
-}
 
 /// Ghost key for `HvMem`'s outer `RwLock`.
 ///
@@ -303,9 +252,11 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
         let ghost inst_id: InstanceId;
         proof {
             inst_id = P::inst_id(&content.global_state);
-            // Precondition admits — dischargeable from ghost_zone + policy invariants
+            // Precondition assumes — dischargeable from ghost_zone + policy invariants
             // in a fully verified version.
             assume(!P::zone_ids(&content.global_state).contains(zid as nat));
+            assume(ghost_zone.wf(P::alloc_inst_id(&content.global_state)));
+            assume(P::zone_authorized(&content.global_state, zid as nat, ghost_zone));
             zone_state = P::add_zone(&mut content.global_state, zid as nat, ghost_zone);
         }
 

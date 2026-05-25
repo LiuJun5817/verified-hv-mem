@@ -5,14 +5,55 @@
 //! - [`ClosurePolicy`]: `HvMemPolicy` implementation for assumption 1.
 use super::super::spec::{
     all_regions, ClosureRegionToken, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
-    GhostZone,
+    GhostZone, ZoneStateOps,
 };
-use super::super::zone::ClosureZoneState;
 use super::HvMemPolicy;
 use crate::address::region::MemoryRegion;
 use vstd::{prelude::*, tokens::InstanceId};
 
 verus! {
+
+/// Per-zone tracked ghost state, holding the zone's entry in `ClosureSpec::zones`.
+///
+/// One `ClosureZoneState` is created for each zone when it is added via `ClosureGlobalState::add_zone`,
+/// and consumed when the zone is removed via `ClosureGlobalState::remove_zone`.
+///
+/// `ClosureZoneState` is typically stored inside the zone-level lock, so that only the thread
+/// holding the zone lock can invoke `insert_region`/`remove_region`.
+pub tracked struct ClosureZoneState {
+    pub zone_tok: ClosureZoneToken,
+}
+
+impl ClosureZoneState {
+    /// Well-formedness: the zone token belongs to the given `ClosureSpec` instance.
+    pub open spec fn wf(&self, alloc_inst_id: InstanceId) -> bool {
+        self.zone_tok.instance_id() == alloc_inst_id
+    }
+
+    /// The zone ID (key in the `zones` map sharding).
+    pub open spec fn zone_id(&self) -> nat {
+        self.zone_tok.key()
+    }
+
+    /// The ghost zone state (value in the `zones` map sharding).
+    pub open spec fn ghost_zone(&self) -> GhostZone {
+        self.zone_tok.value()
+    }
+}
+
+impl ZoneStateOps for ClosureZoneState {
+    open spec fn zone_id(&self) -> nat {
+        self.zone_tok.key()
+    }
+
+    open spec fn ghost_zone(&self) -> GhostZone {
+        self.zone_tok.value()
+    }
+
+    open spec fn wf(&self, inst_id: InstanceId) -> bool {
+        self.zone_tok.instance_id() == inst_id
+    }
+}
 
 // ─── ClosureGlobalState ──────────────────────────────────────────────────────────────
 /// Global tracked ghost state held by the hypervisor memory manager under
@@ -86,7 +127,7 @@ impl ClosureGlobalState {
         requires
             old(self).wf(),
             !old(self).zone_ids().contains(zid),
-            zone.wf(old(self).inst_id()),
+            zone.wf(old(self).inst.alloc_inst_id()),
             forall|r: MemoryRegion| #[trigger]
                 zone.regions().contains(r) ==> all_regions().contains(r),
             forall|r: MemoryRegion| #[trigger]
@@ -150,6 +191,7 @@ impl ClosureGlobalState {
             region.spec_valid(),
             all_regions().contains(region),
             !old(self).region_closure().contains(region),
+            !zone_state.ghost_zone().mem_set.overlaps_vmem(region),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),
@@ -229,15 +271,29 @@ impl HvMemPolicy for ClosurePolicy {
         gs.zone_ids()
     }
 
+    open spec fn alloc_inst_id(gs: &ClosureGlobalState) -> InstanceId {
+        gs.inst.alloc_inst_id()
+    }
+
+    open spec fn zone_authorized(gs: &ClosureGlobalState, zid: nat, zone: GhostZone) -> bool {
+        &&& (forall|r: MemoryRegion| #[trigger] zone.regions().contains(r) ==> all_regions().contains(r))
+        &&& (forall|r: MemoryRegion| #[trigger] zone.regions().contains(r) ==> !gs.region_closure().contains(r))
+    }
+
+    open spec fn region_authorized(gs: &ClosureGlobalState, zt: &ClosureZoneState, region: MemoryRegion) -> bool {
+        &&& region.spec_valid()
+        &&& all_regions().contains(region)
+        &&& !gs.region_closure().contains(region)
+    }
+
     proof fn add_zone(
         tracked gs: &mut ClosureGlobalState,
         zid: nat,
         zone: GhostZone,
     ) -> (tracked zt: ClosureZoneState) {
-        // Delegate to ClosureGlobalState::add_zone (state-machine transition).
-        // Note: the admission of ghost_zone.wf and region disjointness
-        // obligations is deferred to the exec caller via assume().
-        admit();
+        // All ClosureGlobalState::add_zone preconditions are satisfied by the
+        // trait requires: global_wf, !zone_ids.contains, zone.wf(alloc_inst_id),
+        // zone_authorized (covers all_regions + !region_closure conditions).
         gs.add_zone(zid, zone)
     }
 
@@ -250,8 +306,9 @@ impl HvMemPolicy for ClosurePolicy {
         tracked zt: ClosureZoneState,
         region: MemoryRegion,
     ) -> (tracked new_zt: ClosureZoneState) {
-        // Authorization (!region_closure.contains(region)) is admitted here.
-        admit();
+        // All ClosureGlobalState::insert_region preconditions are satisfied:
+        // region_authorized covers spec_valid + all_regions + !region_closure;
+        // !overlaps_vmem comes from the trait requires.
         gs.insert_region(zt, region)
     }
 

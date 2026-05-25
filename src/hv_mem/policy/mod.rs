@@ -9,8 +9,8 @@
 pub mod budget;
 pub mod closure;
 
-pub use budget::{BudgetGlobalState, BudgetPolicy};
-pub use closure::{ClosureGlobalState, ClosurePolicy};
+pub use budget::{BudgetGlobalState, BudgetZoneState, BudgetPolicy};
+pub use closure::{ClosureGlobalState, ClosureZoneState, ClosurePolicy};
 
 use super::spec::{GhostZone, ZoneStateOps};
 use crate::address::region::MemoryRegion;
@@ -49,6 +49,25 @@ pub trait HvMemPolicy: Sized {
     /// The current set of registered zone IDs.
     spec fn zone_ids(gs: &Self::GlobalState) -> Set<nat>;
 
+    /// The allocator instance ID stored as a constant in the spec state machine.
+    ///
+    /// Used to check `GhostZone::wf`: zones entering the system must have been
+    /// constructed for this allocator instance.
+    spec fn alloc_inst_id(gs: &Self::GlobalState) -> InstanceId;
+
+    /// Policy-specific authorization predicate for adding a zone.
+    ///
+    /// `ClosurePolicy`: every region in `zone` belongs to `all_regions()` and is
+    ///   not yet in the global region closure.
+    /// `BudgetPolicy`: every region in `zone` lies within `zone_budget(zid)`.
+    spec fn zone_authorized(gs: &Self::GlobalState, zid: nat, zone: GhostZone) -> bool;
+
+    /// Policy-specific authorization predicate for inserting a region.
+    ///
+    /// `ClosurePolicy`: `region` is in `all_regions()` and not yet in the closure.
+    /// `BudgetPolicy`: `region` is in `zone_budget(zt.zone_id())`.
+    spec fn region_authorized(gs: &Self::GlobalState, zt: &Self::ZoneToken, region: MemoryRegion) -> bool;
+
     // ─── Proof transitions ────────────────────────────────────────────────────
     /// Register a new zone; returns a fresh zone token.
     proof fn add_zone(tracked gs: &mut Self::GlobalState, zid: nat, zone: GhostZone) -> (tracked zt:
@@ -56,6 +75,8 @@ pub trait HvMemPolicy: Sized {
         requires
             Self::global_wf(old(gs)),
             !Self::zone_ids(old(gs)).contains(zid),
+            zone.wf(Self::alloc_inst_id(old(gs))),
+            Self::zone_authorized(old(gs), zid, zone),
         ensures
             Self::global_wf(gs),
             Self::inst_id(gs) == Self::inst_id(old(gs)),
@@ -78,8 +99,12 @@ pub trait HvMemPolicy: Sized {
 
     /// Insert a region into a zone and return the updated zone token.
     ///
-    /// Authorization (`all_regions` or `zone_budget`) is checked at the
-    /// Authorization is admitted here; discharge via `HvMemPolicy` preconditions.
+    /// The region must pass three conditions:
+    /// - `!zt.ghost_zone().contains_region(region)`: no duplicate insert.
+    /// - `!zt.ghost_zone().mem_set.overlaps_vmem(region)`: no virtual-address clash.
+    /// - `Self::region_authorized(...)`: policy-specific membership check
+    ///   (`all_regions` + not in closure for ClosurePolicy; `zone_budget` for BudgetPolicy).
+    ///
     /// For `BudgetPolicy` the `gs` argument is not modified (zone-local transition).
     proof fn insert_region(
         tracked gs: &mut Self::GlobalState,
@@ -89,6 +114,9 @@ pub trait HvMemPolicy: Sized {
         requires
             Self::global_wf(old(gs)),
             zt.wf(Self::inst_id(old(gs))),
+            !zt.ghost_zone().contains_region(region),
+            !zt.ghost_zone().mem_set.overlaps_vmem(region),
+            Self::region_authorized(old(gs), &zt, region),
         ensures
             Self::global_wf(gs),
             Self::inst_id(gs) == Self::inst_id(old(gs)),

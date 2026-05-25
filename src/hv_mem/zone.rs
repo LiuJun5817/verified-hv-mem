@@ -7,9 +7,11 @@
 //!   Generic over `P: HvMemPolicy` — use `Zone<PT, M, A, ClosurePolicy>` or
 //!   `Zone<PT, M, A, BudgetPolicy>` for the two concrete assumptions.
 use super::policy::{
-    BudgetGlobalState, BudgetPolicy, ClosureGlobalState, ClosurePolicy, HvMemPolicy,
+    BudgetGlobalState, BudgetPolicy, ClosureGlobalState, ClosurePolicy, HvMemPolicy, BudgetZoneState, ClosureZoneState,
 };
 use super::spec::{BudgetZoneToken, ClosureZoneToken, GhostZone, ZoneStateOps};
+use super::spec::closure::all_regions;
+use super::spec::budget::zone_budget;
 use crate::{
     address::region::MemoryRegion,
     bitmap_allocator::bitmap_trait::BitmapAllocator,
@@ -27,89 +29,6 @@ use vstd::{
 };
 
 verus! {
-
-/// Per-zone tracked ghost state, holding the zone's entry in `ClosureSpec::zones`.
-///
-/// One `ClosureZoneState` is created for each zone when it is added via `ClosureGlobalState::add_zone`,
-/// and consumed when the zone is removed via `ClosureGlobalState::remove_zone`.
-///
-/// `ClosureZoneState` is typically stored inside the zone-level lock, so that only the thread
-/// holding the zone lock can invoke `insert_region`/`remove_region`.
-pub tracked struct ClosureZoneState {
-    pub zone_tok: ClosureZoneToken,
-}
-
-impl ClosureZoneState {
-    /// Well-formedness: the zone token belongs to the given `ClosureSpec` instance.
-    pub open spec fn wf(&self, alloc_inst_id: InstanceId) -> bool {
-        self.zone_tok.instance_id() == alloc_inst_id
-    }
-
-    /// The zone ID (key in the `zones` map sharding).
-    pub open spec fn zone_id(&self) -> nat {
-        self.zone_tok.key()
-    }
-
-    /// The ghost zone state (value in the `zones` map sharding).
-    pub open spec fn ghost_zone(&self) -> GhostZone {
-        self.zone_tok.value()
-    }
-}
-
-impl ZoneStateOps for ClosureZoneState {
-    open spec fn zone_id(&self) -> nat {
-        self.zone_tok.key()
-    }
-
-    open spec fn ghost_zone(&self) -> GhostZone {
-        self.zone_tok.value()
-    }
-
-    open spec fn wf(&self, inst_id: InstanceId) -> bool {
-        self.zone_tok.instance_id() == inst_id
-    }
-}
-
-/// Per-zone tracked ghost state for `BudgetSpec` (assumption 2).
-///
-/// Parallel to `ZoneState` for `ClosureSpec`, but wraps a `BudgetZoneToken`
-/// (map-sharded `BudgetSpec::zones` entry) instead of a `ClosureZoneToken`.
-/// Stored in the zone-level lock alongside no budget token — the budget is
-/// accessed as the pure spec function `zone_budget(zid)` instead.
-pub tracked struct BudgetZoneState {
-    pub zone_tok: BudgetZoneToken,
-}
-
-impl BudgetZoneState {
-    /// Well-formedness: the zone token belongs to the given `BudgetSpec` instance.
-    pub open spec fn wf(&self, inst_id: InstanceId) -> bool {
-        self.zone_tok.instance_id() == inst_id
-    }
-
-    /// The zone ID (key in the `zones` map sharding).
-    pub open spec fn zone_id(&self) -> nat {
-        self.zone_tok.key()
-    }
-
-    /// The ghost zone state (value in the `zones` map sharding).
-    pub open spec fn ghost_zone(&self) -> GhostZone {
-        self.zone_tok.value()
-    }
-}
-
-impl ZoneStateOps for BudgetZoneState {
-    open spec fn zone_id(&self) -> nat {
-        self.zone_tok.key()
-    }
-
-    open spec fn ghost_zone(&self) -> GhostZone {
-        self.zone_tok.value()
-    }
-
-    open spec fn wf(&self, inst_id: InstanceId) -> bool {
-        self.zone_tok.instance_id() == inst_id
-    }
-}
 
 /// Ghost key for a `Zone`'s `RwLock`.
 ///
@@ -393,6 +312,14 @@ impl<PT, M, A> Zone<PT, M, A, ClosurePolicy> where
         mem_set.insert(alloc, region);
         proof {
             let tracked ZoneRwContent::<M, ClosurePolicy> { mem_set_perm, zone_state } = content;
+            // Targeted assumptions for the new ClosurePolicy::insert_region preconditions.
+            // These conditions are checked exec-side (valid/overlaps) or are trusted
+            // configuration properties (all_regions membership, !region_closure).
+            assume(!zone_state.ghost_zone().contains_region(region));
+            assume(!zone_state.ghost_zone().mem_set.overlaps_vmem(region));
+            assume(region.spec_valid());
+            assume(all_regions().contains(region));
+            assume(!gs.region_closure().contains(region));
             let tracked new_zone_state = ClosurePolicy::insert_region(gs, zone_state, region);
             content =
             ZoneRwContent::<M, ClosurePolicy> { mem_set_perm, zone_state: new_zone_state };
@@ -481,6 +408,12 @@ impl<PT, M, A> Zone<PT, M, A, BudgetPolicy> where
         proof {
             let tracked ZoneRwContent::<M, BudgetPolicy> { mem_set_perm, zone_state } = content;
             let tracked BudgetZoneState { zone_tok } = zone_state;
+            // Targeted assumptions for BudgetSpec::insert_region preconditions.
+            // Budget membership is trusted configuration; !contains_region and
+            // !overlaps_vmem are confirmed (exec-side) before reaching this point.
+            assume(zone_budget(zone_tok.key()).contains(region));
+            assume(!zone_tok.value().contains_region(region));
+            assume(!zone_tok.value().mem_set.overlaps_vmem(region));
             let tracked new_zone_tok = gs.inst.insert_region(zone_tok.key(), region, zone_tok);
             content =
             ZoneRwContent::<M, BudgetPolicy> {
