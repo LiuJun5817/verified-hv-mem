@@ -130,13 +130,20 @@ tokenized_state_machine! {
                         zone1.regions().contains(r1) && zone2.regions().contains(r2)
                         implies !r1.spec_overlaps_pmem(r2) by
                     {
-                        assume(zone_budget(zid1).contains(r1));
-                        assume(zone_budget(zid2).contains(r2));
+                        // r1 ∈ zone1 = zones[zid1] ⊆ budget[zid1]  (inv_zone_within_budget)
+                        assert(pre.zones.contains_key(zid1) && pre.zones[zid1].contains_region(r1));
+                        assert(zone_budget(zid1).contains(r1));
+                        // r2 ∈ zone2 = zones[zid2] ⊆ budget[zid2]
+                        assert(pre.zones.contains_key(zid2) && pre.zones[zid2].contains_region(r2));
+                        assert(zone_budget(zid2).contains(r2));
+                        // budget ⊆ all_regions()  (zone_budget_in_all_regions axiom)
+                        zone_budget_in_all_regions();
                         assert(all_regions().contains(r1) && all_regions().contains(r2));
                         if r1 != r2 {
                             all_regions_disjoint();
                         } else {
-                            // r1 = r2 ∈ budget[zid1] ∩ budget[zid2] contradicts inv_budgets_disjoint.
+                            // r1 = r2 ∈ budget[zid1] ∩ budget[zid2] contradicts disjointness.
+                            zone_budget_pairwise_disjoint();
                             assert(false);
                         }
                     };
@@ -216,22 +223,170 @@ tokenized_state_machine! {
 
         #[inductive(add_zone)]
         fn add_zone_inductive(pre: Self, post: Self, zid: nat, zone: GhostZone) {
-            admit();
+            // inv_zone_ids: dom(pre.zones.insert(zid, zone)) == pre.zone_ids.insert(zid)
+            assert(post.zones.dom() == post.zone_ids);
+            // inv_zones_wf: new zone uses require(zone.wf(…)); existing zones unchanged
+            assert forall|zid2: nat| post.zones.contains_key(zid2)
+                implies #[trigger] post.zones[zid2].wf(post.alloc_inst_id) by {
+                if zid2 == zid {
+                    assert(post.zones[zid] == zone);
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                }
+            };
+            // inv_zone_within_budget: new zone by require; existing zones from pre invariant
+            assert forall|zid2: nat, r: MemoryRegion|
+                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].contains_region(r)
+                implies #[trigger] zone_budget(zid2).contains(r) by {
+                if zid2 == zid {
+                    assert(post.zones[zid] == zone);
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                    assert(pre.zones.contains_key(zid2));
+                }
+            };
+            // inv_budgets_in_all_regions & inv_budgets_disjoint: direct from axioms
+            zone_budget_in_all_regions();
+            zone_budget_pairwise_disjoint();
         }
 
         #[inductive(remove_zone)]
         fn remove_zone_inductive(pre: Self, post: Self, zid: nat) {
-            admit();
+            // inv_zone_ids: dom(pre.zones.remove(zid)) == pre.zone_ids.remove(zid)
+            assert(post.zones.dom() == post.zone_ids);
+            // inv_zones_wf: only remaining zones (all != zid), unchanged from pre
+            assert forall|zid2: nat| post.zones.contains_key(zid2)
+                implies #[trigger] post.zones[zid2].wf(post.alloc_inst_id) by {
+                assert(post.zones[zid2] == pre.zones[zid2]);
+            };
+            // inv_zone_within_budget: remaining zones unchanged
+            assert forall|zid2: nat, r: MemoryRegion|
+                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].contains_region(r)
+                implies #[trigger] zone_budget(zid2).contains(r) by {
+                assert(post.zones[zid2] == pre.zones[zid2]);
+                assert(pre.zones.contains_key(zid2));
+            };
+            zone_budget_in_all_regions();
+            zone_budget_pairwise_disjoint();
         }
 
         #[inductive(insert_region)]
         fn insert_region_inductive(pre: Self, post: Self, zid: nat, region: MemoryRegion) {
-            admit();
+            let old_zone = pre.zones[zid];
+            let new_zone = post.zones[zid];
+            // inv_zone_ids: zone_ids unchanged; zones replaces value at zid only
+            assert(post.zones.dom() == post.zone_ids);
+            // inv_zones_wf
+            assert forall|zid2: nat| post.zones.contains_key(zid2)
+                implies #[trigger] post.zones[zid2].wf(post.alloc_inst_id) by {
+                if zid2 == zid {
+                    assert(old_zone.wf(pre.alloc_inst_id));
+                    assert(new_zone == old_zone.insert_region(region));
+                    assert(new_zone.mem_set.regions =~= old_zone.regions().insert(region));
+                    assert(new_zone.mem_set.wf()) by {
+                        // All regions valid: old from old_zone.wf(); new from zone_budget ⊆ all_regions.
+                        assert forall|r: MemoryRegion| #[trigger] new_zone.mem_set.regions.contains(r)
+                            implies r.spec_valid() by {
+                            if r == region {
+                                zone_budget_in_all_regions();
+                                assert(all_regions().contains(region));
+                                all_regions_valid();
+                            } else {
+                                assert(old_zone.mem_set.regions.contains(r));
+                            }
+                        };
+                        // No vmem overlap: old pairs from old_zone.wf();
+                        // region vs existing: !old_zone.mem_set.overlaps_vmem(region) (transition require).
+                        // spec_overlaps_vmem is NOT trivially symmetric, so use the lemma for r1==region.
+                        assert forall|r1: MemoryRegion, r2: MemoryRegion|
+                            #[trigger] new_zone.mem_set.regions.contains(r1) &&
+                            #[trigger] new_zone.mem_set.regions.contains(r2) && r1 != r2
+                            implies !r1.spec_overlaps_vmem(r2) by {
+                            if r1 == region {
+                                assert(old_zone.mem_set.regions.contains(r2));
+                                // !overlaps_vmem(region) + r2 ∈ old_zone => !r2.spec_overlaps_vmem(region)
+                                assert(!r2.spec_overlaps_vmem(region));
+                                // Symmetry: !region.spec_overlaps_vmem(r2)
+                                zone_budget_in_all_regions(); all_regions_valid();
+                                assert(region.spec_valid());
+                                assert(r2.spec_valid());
+                                region.lemma_overlaps_vmem_symmetric(r2);
+                            } else if r2 == region {
+                                assert(old_zone.mem_set.regions.contains(r1));
+                                // !overlaps_vmem(region) + r1 ∈ old_zone => !r1.spec_overlaps_vmem(region)
+                            } else {
+                                assert(old_zone.mem_set.regions.contains(r1) && old_zone.mem_set.regions.contains(r2));
+                            }
+                        };
+                    };
+                    assert(new_zone.wf(pre.alloc_inst_id));
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                }
+            };
+            // inv_zone_within_budget: new region by require; old regions and other zones from pre
+            assert forall|zid2: nat, r: MemoryRegion|
+                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].contains_region(r)
+                implies #[trigger] zone_budget(zid2).contains(r) by {
+                if zid2 == zid {
+                    assert(new_zone == old_zone.insert_region(region));
+                    if r == region {
+                        // zone_budget(zid).contains(region) is a transition require
+                    } else {
+                        assert(old_zone.regions().contains(r));
+                        assert(pre.zones.contains_key(zid) && pre.zones[zid].contains_region(r));
+                    }
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                    assert(pre.zones.contains_key(zid2));
+                }
+            };
+            zone_budget_in_all_regions();
+            zone_budget_pairwise_disjoint();
         }
 
         #[inductive(remove_region)]
         fn remove_region_inductive(pre: Self, post: Self, zid: nat, region: MemoryRegion) {
-            admit();
+            let old_zone = pre.zones[zid];
+            let new_zone = post.zones[zid];
+            // inv_zone_ids: zone_ids unchanged; zones replaces value at zid only
+            assert(post.zones.dom() == post.zone_ids);
+            // inv_zones_wf: removing a region preserves wf (regions() shrinks)
+            assert forall|zid2: nat| post.zones.contains_key(zid2)
+                implies #[trigger] post.zones[zid2].wf(post.alloc_inst_id) by {
+                if zid2 == zid {
+                    assert(old_zone.wf(pre.alloc_inst_id));
+                    assert(new_zone == old_zone.remove_region(region));
+                    assert forall|r: MemoryRegion| #[trigger] new_zone.regions().contains(r)
+                        implies r.spec_valid() by {
+                        assert(old_zone.regions().contains(r));
+                    };
+                    assert forall|r1: MemoryRegion, r2: MemoryRegion|
+                        new_zone.regions().contains(r1) && new_zone.regions().contains(r2) && r1 != r2
+                        implies !r1.spec_overlaps_vmem(r2) by {
+                        assert(old_zone.regions().contains(r1) && old_zone.regions().contains(r2));
+                    };
+                    assert(new_zone.mem_set.wf());
+                    assert(new_zone.wf(pre.alloc_inst_id));
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                }
+            };
+            // inv_zone_within_budget: new_zone.regions() ⊆ old_zone.regions() ⊆ budget(zid)
+            assert forall|zid2: nat, r: MemoryRegion|
+                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].contains_region(r)
+                implies #[trigger] zone_budget(zid2).contains(r) by {
+                if zid2 == zid {
+                    assert(new_zone == old_zone.remove_region(region));
+                    assert(old_zone.regions().contains(r));
+                    assert(pre.zones.contains_key(zid) && pre.zones[zid].contains_region(r));
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                    assert(pre.zones.contains_key(zid2));
+                }
+            };
+            zone_budget_in_all_regions();
+            zone_budget_pairwise_disjoint();
         }
     }
 }
