@@ -311,7 +311,7 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
                     P::zone_ids(&content.global_state).contains(z) == (exists|k: int|
                         0 <= k < new_zones.len() && #[trigger] new_zones[k].zone_id as nat
                             == z) by {
-                    if z == zid as nat {
+                    if z == zid {
                         // zone_ids(new_gs) contains zid as nat (inserted by add_zone).
                         assert(P::zone_ids(&content.global_state).contains(z));
                         // new_zones[old_len].zone_id == zid.
@@ -411,6 +411,7 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
         }
         // ── Step 3: remove zone from list ─────────────────────────────────────
 
+        let ghost old_zones = zones@;
         let zone = zones.swap_remove(i);
 
         // ── Step 4: extract zone token and M from the zone ────────────────────
@@ -432,7 +433,34 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
         // ── Step 6: restore zone list and release HvMem write lock ───────────
         self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
-            assume(HvMemPred::<PT, M, A, P>::inv(self.lock.k@, content));
+            let zone_list = content.zone_list_perm@.mem_contents->Init_0;
+            // After push+put: zone_list@ = old_zones.push(new_zone)
+            let new_zones = zone_list@;
+            assert(forall|k: int|
+                0 <= k < new_zones.len() && k != i ==> new_zones[k] == old_zones[k]);
+            assert(i < new_zones.len() ==> new_zones[i as int] == old_zones[old_zones.len() - 1]);
+            assert(HvMemPred::<PT, M, A, P>::inv(self.lock.k@, content)) by {
+                // 1. zone_list_perm.is_init() — from put.
+                // 2. pcell matches — from loop invariant.
+                assert(content.zone_list_perm@.pcell === self.lock.k@.cell_id);
+                // 3. global_wf — from P::add_zone postcondition.
+                // 4. Bijection: zone_ids(new_gs) <-> new_zones.
+                assert(forall|z: nat|
+                    P::zone_ids(&content.global_state).contains(z) == (exists|k: int|
+                        0 <= k < new_zones.len() && #[trigger] new_zones[k].zone_id as nat == z));
+                // 5. Spec-instance consistency for all new zones.
+                assert(forall|k: int|
+                    #![trigger new_zones[k]]
+                    0 <= k < new_zones.len() ==> new_zones[k].mem_inst_id()
+                        == self.lock.k@.mem_inst_id);
+                // 6. Pairwise distinct IDs.
+                assert(forall|k: int, l: int|
+                    #![auto]
+                    0 <= k < new_zones.len() && 0 <= l < new_zones.len() && k != l
+                        ==> new_zones[k].zone_id != new_zones[l].zone_id);
+                // 7. All zones well-formed.
+                assert(forall|k: int| #![auto] 0 <= k < new_zones.len() ==> new_zones[k].wf());
+            };
         }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
 
