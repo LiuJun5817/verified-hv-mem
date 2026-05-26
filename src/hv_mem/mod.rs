@@ -97,20 +97,24 @@ impl<PT, M, A, P> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P>> for 
         &&& {
             let zone_list = v.zone_list_perm@.mem_contents->Init_0;
             // The ghost zone_ids set is exactly the set of exec zone IDs.
-            &&& (forall|zid: nat| #[trigger]
+            &&& forall|zid: nat| #[trigger]
                 P::zone_ids(&v.global_state).contains(zid) == (exists|i: int|
                     0 <= i < zone_list.len() && #[trigger] zone_list[i].zone_id as nat
-                        == zid))
-            // Each exec zone's lock is bound to the correct spec instance.
-            &&& (forall|i: int|
+                        == zid)
+                // Each exec zone's lock is bound to the correct spec instance.
+            &&& forall|i: int|
                 #![trigger zone_list[i]]
                 0 <= i < zone_list.len() ==> zone_list[i].lock.k@.mem_inst_id == P::inst_id(
                     &v.global_state,
-                ))
+                )
             // Exec zone IDs are pairwise distinct (ensures the bijection above is well-defined).
-            &&& (forall|i: int, j: int|
+            &&& forall|i: int, j: int|
+                #![auto]
                 0 <= i < zone_list.len() && 0 <= j < zone_list.len() && i != j
-                    ==> zone_list[i].zone_id != zone_list[j].zone_id)
+                    ==> zone_list[i].zone_id
+                    != zone_list[j].zone_id
+            // Each zone in the list is well-formed.
+            &&& forall|i: int| #![auto] 0 <= i < zone_list.len() ==> zone_list[i].wf()
         }
     }
 }
@@ -156,6 +160,7 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
  {
     /// Structural well-formedness:
     /// - the outer `RwLock` is internally consistent,
+    /// - the `PointsTo` inside the lock points to the same cell as the key,
     /// - the global allocator is valid.
     ///
     /// `HvMemPred::inv` (checked on every write-lock release) additionally
@@ -163,6 +168,7 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
     /// and that `ClosureGlobalState` is well-formed.
     pub open spec fn invariants(&self) -> bool {
         &&& self.lock.wf()
+        &&& self.zone_mem_list.id() == self.lock.k@.cell_id
         &&& self.alloc.invariants()
     }
 
@@ -177,11 +183,7 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
     /// 3. Delegate Zone assembly to `Zone::new` (infallible).
     /// 4. Push the new `Zone`, return the zone list to its `PCell`, and release
     ///    the write lock.
-    pub fn add_zone(
-        &self,
-        zid: usize,
-        pt_constants: PTConstants,
-    ) -> (res: Result<(), ()>)
+    pub fn add_zone(&self, zid: usize, pt_constants: PTConstants) -> (res: Result<(), ()>)
         requires
             self.invariants(),
             pt_constants@.valid(),
@@ -198,13 +200,63 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
         let tracked mut content: HvMemRwContent<PT, M, A, P> = token.get();
         let mut zones = self.zone_mem_list.take(Tracked(&mut content.zone_list_perm));
 
+        // ── Step 1b: reject duplicate zone IDs ────────────────────────────────
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant
+                i <= zones.len(),
+                self.invariants(),
+                !content.zone_list_perm.is_init(),
+                content.zone_list_perm@.pcell === self.zone_mem_list.id(),
+                content.zone_list_perm@.pcell === self.lock.k@.cell_id,
+                handle@.instance_id() == self.lock.inst@.id(),
+                P::global_wf(&content.global_state),
+                // Scan progress: none of the zones before i have zone_id == zid.
+                forall|j: int| 0 <= j < i ==> #[trigger] zones[j].zone_id != zid,
+                // Bijection: ghost zone_ids <-> exec zone IDs.
+                forall|z: nat| #[trigger]
+                    P::zone_ids(&content.global_state).contains(z) == (exists|k: int|
+                        0 <= k < zones@.len() && #[trigger] zones@[k].zone_id as nat == z),
+                // Spec-instance consistency.
+                forall|k: int|
+                    #![trigger zones@[k]]
+                    0 <= k < zones@.len() ==> zones@[k].lock.k@.mem_inst_id == P::inst_id(
+                        &content.global_state,
+                    ),
+                // Pairwise distinct IDs.
+                forall|k: int, l: int|
+                    #![auto]
+                    0 <= k < zones@.len() && 0 <= l < zones@.len() && k != l ==> zones@[k].zone_id
+                        != zones@[l].zone_id,
+                // All zones well-formed.
+                forall|k: int| #![auto] 0 <= k < zones@.len() ==> zones@[k].wf(),
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
+                assert(HvMemPred::<PT, M, A, P>::inv(self.lock.k@, content));
+                self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
+                return Err(());
+            }
+            i += 1;
+        }
+
         // ── Step 2: advance protocol ghost state, obtain zone token ───────────
+        // Capture ghost values before mutating global_state.
+        let ghost pre_add_zone_ids: Set<nat>;
         let tracked zone_state: P::ZoneToken;
         let ghost inst_id: InstanceId;
         proof {
+            pre_add_zone_ids = P::zone_ids(&content.global_state);
             inst_id = P::inst_id(&content.global_state);
-            assume(!P::zone_ids(&content.global_state).contains(zid as nat));
+            assert(forall|j: int| 0 <= j < zones.len() ==> #[trigger] zones[j].zone_id != zid);
+            // From the bijection invariant: zone_ids.contains(zid as nat) iff
+            // some exec zone has zone_id == zid — but the scan found none.
+            assert(!P::zone_ids(&content.global_state).contains(zid as nat));
             zone_state = P::add_zone(&mut content.global_state, zid as nat);
+            // Postcondition: zone_ids(new_gs) = pre_add_zone_ids.insert(zid as nat)
+            //                inst_id(new_gs)  = inst_id  (unchanged)
+            //                global_wf(new_gs)
         }
 
         // ── Step 3: assemble the new Zone with an empty MemorySet ─────────────
@@ -212,12 +264,76 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
         let new_zone = Arc::new(
             Zone::<PT, M, A, P>::new(mem_set, zid, Ghost(inst_id), Tracked(zone_state)),
         );
+        // Snapshot the pre-push zone list for use in the postcondition proof.
+        let ghost old_zones = zones@;
 
         // ── Step 4: push zone, restore PCell, release write lock ─────────────
         zones.push(new_zone);
         self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
-            assume(HvMemPred::<PT, M, A, P>::inv(self.lock.k@, content));
+            let zone_list = content.zone_list_perm@.mem_contents->Init_0;
+            // After push+put: zone_list@ = old_zones.push(new_zone)
+            let new_zones = zone_list@;
+            let old_len = old_zones.len() as int;
+            assert(new_zones =~= old_zones.push(new_zone));
+            assert(forall|k: int| 0 <= k < old_len ==> new_zones[k] == old_zones[k]);
+            assert(new_zones[old_len] == new_zone);
+            // From P::add_zone postconditions:
+            assert(P::zone_ids(&content.global_state) =~= pre_add_zone_ids.insert(zid as nat));
+            assert(P::inst_id(&content.global_state) == inst_id);
+            assert(HvMemPred::<PT, M, A, P>::inv(self.lock.k@, content)) by {
+                // 1. zone_list_perm.is_init() — from put.
+                // 2. pcell matches — from loop invariant.
+                assert(content.zone_list_perm@.pcell === self.lock.k@.cell_id);
+                // 3. global_wf — from P::add_zone postcondition.
+                // 4. Bijection: zone_ids(new_gs) <-> new_zones.
+                assert forall|z: nat|
+                    P::zone_ids(&content.global_state).contains(z) == (exists|k: int|
+                        0 <= k < new_zones.len() && #[trigger] new_zones[k].zone_id as nat
+                            == z) by {
+                    if z == zid as nat {
+                        // zone_ids(new_gs) contains zid as nat (inserted by add_zone).
+                        assert(P::zone_ids(&content.global_state).contains(z));
+                        // new_zones[old_len].zone_id == zid.
+                        assert(new_zones[old_len].zone_id as nat == z);
+                    } else {
+                        // zone_ids(new_gs).contains(z) == pre_add_zone_ids.contains(z)
+                        assert(P::zone_ids(&content.global_state).contains(z)
+                            == pre_add_zone_ids.contains(z));
+                        // old bijection: pre_add_zone_ids.contains(z) == exists k < old_len.
+                        assert(pre_add_zone_ids.contains(z) == (exists|k: int|
+                            0 <= k < old_len && #[trigger] old_zones[k].zone_id as nat == z));
+                    }
+                };
+                // 5. Spec-instance consistency for all new zones.
+                assert forall|k: int|
+                    #![trigger new_zones[k]]
+                    0 <= k < new_zones.len() implies new_zones[k].lock.k@.mem_inst_id == P::inst_id(
+                    &content.global_state,
+                ) by {
+                    if k < old_len {
+                        // From loop invariant: old_zones[k].lock.k@.mem_inst_id == inst_id.
+                        assert(old_zones[k].lock.k@.mem_inst_id == inst_id);
+                    }
+                };
+                // 6. Pairwise distinct IDs.
+                assert forall|k: int, l: int|
+                    #![auto]
+                    0 <= k < new_zones.len() && 0 <= l < new_zones.len() && k
+                        != l implies new_zones[k].zone_id != new_zones[l].zone_id by {
+                    if k < old_len && l < old_len {
+                        // From loop invariant.
+                    } else if k == old_len {
+                        // new_zone.zone_id == zid; old_zones[l].zone_id != zid (from scan).
+                        assert(old_zones[l].zone_id != zid);
+                    } else {
+                        // l == old_len; old_zones[k].zone_id != zid (from scan).
+                        assert(old_zones[k].zone_id != zid);
+                    }
+                };
+                // 7. All zones well-formed.
+                assert(forall|k: int| #![auto] 0 <= k < new_zones.len() ==> new_zones[k].wf());
+            };
         }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
 
@@ -248,33 +364,35 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
         let mut zones = self.zone_mem_list.take(Tracked(&mut content.zone_list_perm));
 
         // ── Step 2: find zone by ID ───────────────────────────────────────────
-        let mut idx_opt: Option<usize> = None;
         let mut i: usize = 0;
         while i < zones.len()
-            invariant
+            invariant_except_break
                 i <= zones.len(),
+                self.invariants(),
+                // Every zone in the list is well-formed.
+                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
+                // No zone before index i has zone_id == zid.
+                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
+            ensures
+                i < zones.len() ==> zones[i as int].zone_id == zid && zones[i as int].wf(),
             decreases zones.len() - i,
         {
             if zones[i].zone_id == zid {
-                idx_opt = Some(i);
                 break ;
             }
             i += 1;
         }
 
-        if idx_opt.is_none() {
+        if i >= zones.len() {
             // Zone not found — restore and return error.
             self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
-            proof {
-                assume(HvMemPred::<PT, M, A, P>::inv(self.lock.k@, content));
-            }
+            assert(HvMemPred::<PT, M, A, P>::inv(self.lock.k@, content));
             self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
         // ── Step 3: remove zone from list ─────────────────────────────────────
 
-        let idx = idx_opt.unwrap();
-        let zone = zones.swap_remove(idx);
+        let zone = zones.swap_remove(i);
 
         // ── Step 4: extract zone token and M from the zone ────────────────────
         let zone_guard = zone.lock.lock_write();
@@ -290,7 +408,6 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
             P::remove_zone(&mut content.global_state, zone_state);
             // zone_handle (writer token) is consumed here via assume — the zone is
             // being destroyed so there is no need to formally unlock it.
-            assume(false);  // FIXME: zone_handle (RwWriterToken) needs explicit disposal
         }
 
         // ── Step 6: restore zone list and release HvMem write lock ───────────
@@ -316,29 +433,37 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
         let guard = self.lock.lock_read();
 
         // ── Borrow the zone list via the lock's ghost predicate ───────────────
-        let tracked HvMemRwContent::<PT, M, A, P> { zone_list_perm, .. } =
-            self.lock.inst.borrow().read_guard(guard.handle@.element(), guard.handle.borrow());
-        assume(zone_list_perm.is_init());
-        assume(zone_list_perm@.pcell == self.zone_mem_list.id());
+        let Tracked(content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, P> { zone_list_perm, .. } = content;
         let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
 
         // ── Scan for matching zone ID ─────────────────────────────────────────
-        let mut idx_opt: Option<usize> = None;
         let mut i: usize = 0;
         while i < zones.len()
-            invariant
+            invariant_except_break
                 i <= zones.len(),
+                self.invariants(),
+                // Every zone in the list is well-formed.
+                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
+                // No zone before index i has zone_id == zid.
+                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
+            ensures
+                i < zones.len() ==> zones[i as int].zone_id == zid && zones[i as int].wf(),
             decreases zones.len() - i,
         {
             if zones[i].zone_id == zid {
-                idx_opt = Some(i);
                 break ;
             }
             i += 1;
         }
-
-        let result = if let Some(idx) = idx_opt {
-            Some(zones[idx].clone())
+        let result = if i < zones.len() {
+            let zone = zones[i].clone();
+            proof {
+                // Arc::clone gives the same inner Zone; spec field access deref through Arc.
+                assert(zone.zone_id == zid);
+                assert(zone.wf());
+            }
+            Some(zone)
         } else {
             None
         };

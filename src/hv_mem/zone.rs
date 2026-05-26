@@ -7,11 +7,12 @@
 //!   Generic over `P: HvMemProtocol` — use `Zone<PT, M, A, ClosureProtocol>` or
 //!   `Zone<PT, M, A, BudgetProtocol>` for the two concrete assumptions.
 use super::protocol::{
-    BudgetGlobalState, BudgetProtocol, ClosureGlobalState, ClosureProtocol, HvMemProtocol, BudgetZoneState, ClosureZoneState,
+    BudgetGlobalState, BudgetProtocol, BudgetZoneState, ClosureGlobalState, ClosureProtocol,
+    ClosureZoneState, HvMemProtocol,
 };
-use super::spec::{BudgetZoneToken, ClosureZoneToken, GhostZone, ZoneStateOps};
-use super::spec::closure::all_regions;
 use super::spec::budget::zone_budget;
+use super::spec::closure::all_regions;
+use super::spec::{BudgetZoneToken, ClosureZoneToken, GhostZone, ZoneStateOps};
 use crate::{
     address::region::MemoryRegion,
     bitmap_allocator::bitmap_trait::BitmapAllocator,
@@ -387,7 +388,7 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-{
+ {
     /// Insert `region` into this zone under `ClosureProtocol`.
     ///
     /// The caller must hold the HvMem write lock to supply `&mut ClosureGlobalState`.
