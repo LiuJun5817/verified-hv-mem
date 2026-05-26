@@ -132,26 +132,50 @@ impl HvMemProtocol for BudgetProtocol {
         gs.inst.remove_zone(zid, &mut gs.zone_ids_tok, zone_tok);
     }
 
-    proof fn insert_region(
-        tracked gs: &mut BudgetGlobalState,
+}
+
+impl BudgetProtocol {
+    /// Insert a region into a zone.
+    ///
+    /// Zone-local: only the `BudgetSpec::zones[zid]` map-sharded token is updated;
+    /// `gs` is not mutated, so callers do not need to hold the HvMem write lock.
+    pub proof fn insert_region(
+        tracked gs: &BudgetGlobalState,
         tracked zt: BudgetZoneState,
         region: MemoryRegion,
-    ) -> (tracked new_zt: BudgetZoneState) {
-        // Zone-local: only the BudgetSpec::zones[zid] token is updated.
-        // gs (holding zone_ids_tok) is not touched — no global lock needed.
-        // All BudgetSpec::insert_region preconditions are satisfied:
-        // zone_budget membership from region_authorized, !contains_region and
-        // !overlaps_vmem from the trait requires.
+    ) -> (tracked new_zt: BudgetZoneState)
+        requires
+            zt.wf(gs.mem_inst_id()),
+            zone_budget(zt.zone_id()).contains(region),
+            !zt.ghost_zone().contains_region(region),
+            !zt.ghost_zone().mem_set.overlaps_vmem(region),
+        ensures
+            new_zt.zone_id() == zt.zone_id(),
+            new_zt.wf(gs.mem_inst_id()),
+            new_zt.ghost_zone() == zt.ghost_zone().insert_region(region),
+    {
         let zid = zt.zone_id();
         let tracked new_tok = gs.inst.insert_region(zid, region, zt.zone_tok);
         BudgetZoneState { zone_tok: new_tok }
     }
 
-    proof fn remove_region(
-        tracked gs: &mut BudgetGlobalState,
+    /// Remove a region from a zone.
+    ///
+    /// Zone-local: only the `BudgetSpec::zones[zid]` map-sharded token is updated;
+    /// `gs` is not mutated, so callers do not need to hold the HvMem write lock.
+    pub proof fn remove_region(
+        tracked gs: &BudgetGlobalState,
         tracked zt: BudgetZoneState,
         region: MemoryRegion,
-    ) -> (tracked new_zt: BudgetZoneState) {
+    ) -> (tracked new_zt: BudgetZoneState)
+        requires
+            zt.wf(gs.mem_inst_id()),
+            zt.ghost_zone().contains_region(region),
+        ensures
+            new_zt.zone_id() == zt.zone_id(),
+            new_zt.wf(gs.mem_inst_id()),
+            new_zt.ghost_zone() == zt.ghost_zone().remove_region(region),
+    {
         let zid = zt.zone_id();
         let tracked new_tok = gs.inst.remove_region(zid, region, zt.zone_tok);
         BudgetZoneState { zone_tok: new_tok }

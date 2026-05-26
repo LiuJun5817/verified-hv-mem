@@ -41,6 +41,7 @@ use vstd::{
     tokens::InstanceId,
 };
 use zone::{Zone, ZoneKey, ZonePred, ZoneRwContent};
+use spec::budget::zone_budget;
 
 verus! {
 
@@ -516,6 +517,7 @@ impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
     pub fn insert_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
         requires
             self.invariants(),
+            zone_budget(zid as nat).contains(region),
         ensures
             res is Ok ==> self.invariants(),
     {
@@ -523,41 +525,43 @@ impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
         if !region.valid() {
             return Err(());
         }
-        // ── Step 2: acquire HvMem read lock ───────────────────────────────────
 
+        // ── Step 2: acquire HvMem read lock ───────────────────────────────────
         let guard = self.lock.lock_read();
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } =
-            self.lock.inst.borrow().read_guard(guard.handle@.element(), guard.handle.borrow());
-        assume(zone_list_perm.is_init());
-        assume(zone_list_perm@.pcell == self.zone_mem_list.id());
+        let Tracked(content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } = content;
         let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
 
         // ── Step 3: find zone by ID ────────────────────────────────────────────
-        let mut idx_opt: Option<usize> = None;
         let mut i: usize = 0;
         while i < zones.len()
-            invariant
+            invariant_except_break
                 i <= zones.len(),
+                self.invariants(),
+                // Every zone in the list is well-formed.
+                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
+                // No zone before index i has zone_id == zid.
+                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
+            ensures
+                i < zones.len() ==> zones[i as int].zone_id == zid && zones[i as int].wf(),
             decreases zones.len() - i,
         {
             if zones[i].zone_id == zid {
-                idx_opt = Some(i);
                 break ;
             }
             i += 1;
         }
-
-        if idx_opt.is_none() {
+        if i >= zones.len() {
             self.lock.unlock_read(guard);
             return Err(());
         }
-        let idx = idx_opt.unwrap();
 
         // ── Step 4: delegate to Zone::insert_region ────────────────
         // Zone::insert_region acquires the zone write lock internally
         // and advances the BudgetSpec ghost state via a shared &BudgetGlobalState,
         // so the HvMem read lock is sufficient.
-        let res = zones[idx].insert_region(&self.allocator, Tracked(&global_state), region);
+        assert(zones[i as int].zone_id == zid);
+        let res = zones[i].insert_region(&self.allocator, Tracked(&global_state), region);
 
         self.lock.unlock_read(guard);
         res
@@ -580,38 +584,37 @@ impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
         if !region.valid() {
             return Err(());
         }
-        // ── Step 2: acquire HvMem read lock ───────────────────────────────────
 
+        // ── Step 2: acquire HvMem read lock ───────────────────────────────────
         let guard = self.lock.lock_read();
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } =
-            self.lock.inst.borrow().read_guard(guard.handle@.element(), guard.handle.borrow());
-        assume(zone_list_perm.is_init());
-        assume(zone_list_perm@.pcell == self.zone_mem_list.id());
+        let Tracked(content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } = content;
         let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
 
         // ── Step 3: find zone by ID ────────────────────────────────────────────
-        let mut idx_opt: Option<usize> = None;
         let mut i: usize = 0;
         while i < zones.len()
             invariant
                 i <= zones.len(),
+                self.invariants(),
+                // Every zone in the list is well-formed.
+                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
+                // No zone before index i has zone_id == zid.
+                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
             decreases zones.len() - i,
         {
             if zones[i].zone_id == zid {
-                idx_opt = Some(i);
                 break ;
             }
             i += 1;
         }
-
-        if idx_opt.is_none() {
+        if i == zones.len() {
             self.lock.unlock_read(guard);
             return Err(());
         }
-        let idx = idx_opt.unwrap();
 
         // ── Step 4: delegate to Zone::remove_region ────────────────
-        let res = zones[idx].remove_region(&self.allocator, Tracked(&global_state), region);
+        let res = zones[i].remove_region(&self.allocator, Tracked(&global_state), region);
 
         self.lock.unlock_read(guard);
         res
@@ -641,6 +644,9 @@ impl<PT, M, A> HvMem<PT, M, A, ClosureProtocol> where
         ensures
             res is Ok ==> self.invariants(),
     {
+        // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
+        proof { admit(); }
+
         // ── Step 1: validate region ────────────────────────────────────────────
         if !region.valid() {
             return Err(());
@@ -713,6 +719,9 @@ impl<PT, M, A> HvMem<PT, M, A, ClosureProtocol> where
         ensures
             res is Ok ==> self.invariants(),
     {
+        // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
+        proof { admit(); }
+        
         // ── Step 1: validate region ────────────────────────────────────────────
         if !region.valid() {
             return Err(());

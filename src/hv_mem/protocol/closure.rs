@@ -276,22 +276,57 @@ impl HvMemProtocol for ClosureProtocol {
         gs.remove_zone(zt)
     }
 
-    proof fn insert_region(
+}
+
+impl ClosureProtocol {
+    /// Insert a region into a zone under `ClosureSpec`.
+    ///
+    /// Requires `&mut ClosureGlobalState` because `region_closure_tok` must be
+    /// extended globally — callers must hold the HvMem write lock.
+    pub proof fn insert_region(
         tracked gs: &mut ClosureGlobalState,
         tracked zt: ClosureZoneState,
         region: MemoryRegion,
-    ) -> (tracked new_zt: ClosureZoneState) {
-        // All ClosureGlobalState::insert_region preconditions are satisfied:
-        // region_authorized covers spec_valid + all_regions + !region_closure;
-        // !overlaps_vmem comes from the trait requires.
+    ) -> (tracked new_zt: ClosureZoneState)
+        requires
+            old(gs).wf(),
+            zt.wf(old(gs).mem_inst_id()),
+            region.spec_valid(),
+            all_regions().contains(region),
+            !old(gs).region_closure().contains(region),
+            !zt.ghost_zone().mem_set.overlaps_vmem(region),
+        ensures
+            gs.wf(),
+            gs.mem_inst_id() == old(gs).mem_inst_id(),
+            new_zt.zone_id() == zt.zone_id(),
+            new_zt.wf(gs.mem_inst_id()),
+            gs.region_closure() =~= old(gs).region_closure().insert(region),
+            new_zt.ghost_zone() == zt.ghost_zone().insert_region(region),
+    {
         gs.insert_region(zt, region)
     }
 
-    proof fn remove_region(
+    /// Remove a region from a zone under `ClosureSpec`.
+    ///
+    /// Requires `&mut ClosureGlobalState` because `region_closure_tok` must be
+    /// shrunk globally — callers must hold the HvMem write lock.
+    pub proof fn remove_region(
         tracked gs: &mut ClosureGlobalState,
         tracked zt: ClosureZoneState,
         region: MemoryRegion,
-    ) -> (tracked new_zt: ClosureZoneState) {
+    ) -> (tracked new_zt: ClosureZoneState)
+        requires
+            old(gs).wf(),
+            zt.wf(old(gs).mem_inst_id()),
+            zt.ghost_zone().contains_region(region),
+        ensures
+            gs.wf(),
+            gs.mem_inst_id() == old(gs).mem_inst_id(),
+            new_zt.zone_id() == zt.zone_id(),
+            new_zt.wf(gs.mem_inst_id()),
+            gs.region_closure() =~= old(gs).region_closure().remove(region),
+            new_zt.ghost_zone() == zt.ghost_zone().remove_region(region),
+    {
         gs.remove_region(zt, region)
     }
 }

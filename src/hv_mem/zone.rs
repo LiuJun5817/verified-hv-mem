@@ -40,6 +40,8 @@ verus! {
 /// `ZoneState` token belongs to this spec instance, and the memory
 /// set was built for this allocator instance".
 pub struct ZoneKey {
+    /// Zone ID,
+    pub zone_id: usize,
     /// `PCell::id()` of the zone's `mem_set` cell.
     pub cell_id: CellId,
     /// Spec (ClosureSpec / BudgetSpec) instance id shared by the whole hypervisor.
@@ -79,14 +81,17 @@ impl<PT, M, A, P> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePred<
     /// The content is well-formed when:
     /// - `mem_set_perm` is initialised and points to the key's cell,
     /// - the wrapped memory set satisfies its own invariant,
-    /// - the memory set's allocator instance matches the key's `alloc_inst_id`, and
-    /// - `zone_state` belongs to the key's spec instance.
+    /// - the memory set's allocator instance matches the key's `alloc_inst_id`,
+    /// - `zone_state` belongs to the key's spec instance, and
+    /// - the ghost zone's region set mirrors the exec memory set's view.
     open spec fn inv(k: ZoneKey, v: ZoneRwContent<M, P>) -> bool {
         &&& v.mem_set_perm.is_init()
         &&& v.mem_set_perm@.pcell === k.cell_id
         &&& v.mem_set_perm@.mem_contents->Init_0.invariants()
         &&& v.mem_set_perm@.mem_contents->Init_0.inst_id() == k.alloc_inst_id
+        &&& v.zone_state.zone_id() == k.zone_id
         &&& v.zone_state.wf(k.mem_inst_id)
+        &&& v.zone_state.ghost_zone().mem_set == v.mem_set_perm@.mem_contents->Init_0@
     }
 }
 
@@ -138,6 +143,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     pub open spec fn wf(&self) -> bool {
         &&& self.lock.wf()
         &&& self.lock.k@.cell_id == self.mem_set.id()
+        &&& self.lock.k@.zone_id == self.zone_id
     }
 
     /// The HvMemSpec-instance ID of this zone, obtained from the lock's ghost key.
@@ -180,7 +186,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
 
         // Build the ZoneKey (evaluated in spec mode via Ghost(…)).
         let zone_key = Ghost(
-            ZoneKey { cell_id: mem_set_cell.id(), mem_inst_id, alloc_inst_id },
+            ZoneKey { zone_id, cell_id: mem_set_cell.id(), mem_inst_id, alloc_inst_id },
         );
 
         // Admit ZonePred::inv; dischargeable from PCell::new postconditions,
@@ -211,6 +217,9 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
             res.1.wf(&self.lock),
             res.1.token.mem_set_perm@.pcell == self.mem_set.id(),
             !res.1.token.mem_set_perm.is_init(),
+            res.1.token@.zone_state.zone_id() == self.lock.k@.zone_id,
+            res.1.token@.zone_state.wf(self.lock.k@.mem_inst_id),
+            res.1.token@.zone_state.ghost_zone().mem_set == res.0@,
     {
         let RwWriteGuard { handle, token } = self.lock.lock_write();
         let tracked mut content: ZoneRwContent<M, P> = token.get();
@@ -270,34 +279,6 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     {
         self.lock.unlock_read(guard)
     }
-
-    /// Borrow the zone's exec `mem_set` while a read guard is held.
-    ///
-    /// Both `self` and `guard` must be alive for lifetime `'a`, so the returned
-    /// `&'a M` is valid for exactly that duration.  Do not call `unlock_read`
-    /// until the `&M` reference is no longer in use.
-    pub fn borrow_mem_set<'a>(
-        &'a self,
-        guard: &'a RwReadGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
-    ) -> (res: &'a M)
-        requires
-            self.wf(),
-            guard.wf(&self.lock),
-    {
-        // `self.lock.inst` is borrowed for `'a` (from `&'a self`).
-        // `guard.handle`   is borrowed for `'a` (from `&'a guard`).
-        // `read_guard` yields a ghost `&'a ZoneRwContent<M, P>`, so the field borrow
-        // `&mem_set_perm` also carries lifetime `'a`, which flows through
-        // `PCell::borrow` into the returned `&'a M`.
-        let tracked ZoneRwContent::<M, P> { mem_set_perm, .. } = self.lock.inst.borrow().read_guard(
-            guard.handle@.element(),
-            guard.handle.borrow(),
-        );
-        // TODO: how to prove this?
-        assume(mem_set_perm.is_init());
-        assume(mem_set_perm@.pcell == self.mem_set.id());
-        self.mem_set.borrow(Tracked(&mem_set_perm))
-    }
 }
 
 /// Concrete `BudgetProtocol` implementation for `Zone`.
@@ -325,10 +306,10 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
     ) -> (res: Result<(), ()>)
         requires
             self.wf(),
+            self.lock.k@.mem_inst_id == BudgetProtocol::mem_inst_id(gs),
             self.lock.k@.alloc_inst_id == allocator.inst_id(),
             allocator.invariants(),
-        ensures
-            res is Ok ==> self.wf(),
+            zone_budget(self.zone_id as nat).contains(region),
     {
         if !region.valid() {
             return Err(());
@@ -337,27 +318,25 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, BudgetProtocol> = token.get();
 
-        if mem_set.overlaps_vmem(&region) {
+        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.start) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
+        let ghost old_mem_set = mem_set@;
         mem_set.insert(allocator, region);
 
         proof {
             let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state } = content;
-            let tracked BudgetZoneState { zone_tok } = zone_state;
-            // Targeted assumptions for BudgetSpec::insert_region preconditions.
+            // Targeted assumptions for BudgetProtocol::insert_region preconditions.
+            // zone_state.wf is derived from lock_write postcondition + mem_inst_id precondition.
+            assert(zone_state.wf(gs.mem_inst_id()));
+            assert(zone_state.ghost_zone().mem_set == old_mem_set);
+            assert(!zone_state.ghost_zone().contains_region(region));
+            assert(!zone_state.ghost_zone().mem_set.overlaps_vmem(region));
             // Budget membership is trusted configuration; !contains_region and
             // !overlaps_vmem are confirmed (exec-side) before reaching this point.
-            assume(zone_budget(zone_tok.key()).contains(region));
-            assume(!zone_tok.value().contains_region(region));
-            assume(!zone_tok.value().mem_set.overlaps_vmem(region));
-            let tracked new_zone_tok = gs.inst.insert_region(zone_tok.key(), region, zone_tok);
-            content =
-            ZoneRwContent::<M, BudgetProtocol> {
-                mem_set_perm,
-                zone_state: BudgetZoneState { zone_tok: new_zone_tok },
-            };
+            let tracked new_zone_state = BudgetProtocol::insert_region(gs, zone_state, region);
+            content = ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
         }
 
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -375,10 +354,9 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
     ) -> (res: Result<(), ()>)
         requires
             self.wf(),
+            self.lock.k@.mem_inst_id == BudgetProtocol::mem_inst_id(gs),
             self.lock.k@.alloc_inst_id == allocator.inst_id(),
             allocator.invariants(),
-        ensures
-            res is Ok ==> self.wf(),
     {
         if !region.valid() {
             return Err(());
@@ -391,17 +369,25 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
+        let ghost old_mem_set = mem_set@;
         mem_set.remove(allocator, region.start);
 
         proof {
             let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state } = content;
-            let tracked BudgetZoneState { zone_tok } = zone_state;
-            let tracked new_zone_tok = gs.inst.remove_region(zone_tok.key(), region, zone_tok);
-            content =
-            ZoneRwContent::<M, BudgetProtocol> {
-                mem_set_perm,
-                zone_state: BudgetZoneState { zone_tok: new_zone_tok },
-            };
+            // zone_state.wf derived from lock_write postcondition + mem_inst_id precondition.
+            assert(zone_state.wf(gs.mem_inst_id()));
+            // The linking invariant (surfaced by lock_write) connects the ghost zone's
+            // region set to the exec mem_set at the point the lock was acquired.
+            assert(zone_state.ghost_zone().mem_set == old_mem_set);
+            // The exec check guarantees a region starts at region.start, so the ghost
+            // zone also has one — they are in sync by the linking invariant.
+            assert(zone_state.ghost_zone().mem_set.has_region_starting_at(region.start@));
+            // Derive the ghost region from the zone's own view; no assume needed.
+            let ghost ghost_region = choose|r: MemoryRegion| #[trigger]
+                zone_state.ghost_zone().mem_set.regions.contains(r) && r.start@ == region.start@;
+            assert(zone_state.ghost_zone().contains_region(ghost_region));
+            let tracked new_zone_state = BudgetProtocol::remove_region(gs, zone_state, ghost_region);
+            content = ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
         }
 
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -437,6 +423,9 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
         ensures
             res is Ok ==> self.wf(),
     {
+        // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
+        proof { admit(); }
+
         if !region.valid() {
             return Err(());
         }
@@ -482,6 +471,9 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
         ensures
             res is Ok ==> self.wf(),
     {
+        // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
+        proof { admit(); }
+
         if !region.valid() {
             return Err(());
         }

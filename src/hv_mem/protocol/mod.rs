@@ -86,52 +86,6 @@ pub trait HvMemProtocol: Sized {
             Self::mem_inst_id(gs) == Self::mem_inst_id(old(gs)),
             Self::zone_ids(gs) =~= Self::zone_ids(old(gs)).remove(zt.zone_id()),
     ;
-
-    /// Insert a region into a zone and return the updated zone token.
-    ///
-    /// The region must pass three conditions:
-    /// - `!zt.ghost_zone().contains_region(region)`: no duplicate insert.
-    /// - `!zt.ghost_zone().mem_set.overlaps_vmem(region)`: no virtual-address clash.
-    /// - `Self::region_authorized(...)`: protocol-specific membership check
-    ///   (`all_regions` + not in closure for ClosureProtocol; `zone_budget` for BudgetProtocol).
-    ///
-    /// For `BudgetProtocol` the `gs` argument is not modified (zone-local transition).
-    proof fn insert_region(
-        tracked gs: &mut Self::GlobalState,
-        tracked zt: Self::ZoneToken,
-        region: MemoryRegion,
-    ) -> (tracked new_zt: Self::ZoneToken)
-        requires
-            Self::global_wf(old(gs)),
-            zt.wf(Self::mem_inst_id(old(gs))),
-            !zt.ghost_zone().contains_region(region),
-            !zt.ghost_zone().mem_set.overlaps_vmem(region),
-            Self::region_authorized(old(gs), &zt, region),
-        ensures
-            Self::global_wf(gs),
-            Self::mem_inst_id(gs) == Self::mem_inst_id(old(gs)),
-            new_zt.zone_id() == zt.zone_id(),
-            new_zt.wf(Self::mem_inst_id(gs)),
-            new_zt.ghost_zone() == zt.ghost_zone().insert_region(region),
-    ;
-
-    /// Remove a region from a zone and return the updated zone token.
-    proof fn remove_region(
-        tracked gs: &mut Self::GlobalState,
-        tracked zt: Self::ZoneToken,
-        region: MemoryRegion,
-    ) -> (tracked new_zt: Self::ZoneToken)
-        requires
-            Self::global_wf(old(gs)),
-            zt.wf(Self::mem_inst_id(old(gs))),
-            zt.ghost_zone().contains_region(region),
-        ensures
-            Self::global_wf(gs),
-            Self::mem_inst_id(gs) == Self::mem_inst_id(old(gs)),
-            new_zt.zone_id() == zt.zone_id(),
-            new_zt.wf(Self::mem_inst_id(gs)),
-            new_zt.ghost_zone() == zt.ghost_zone().remove_region(region),
-    ;
 }
 
 } // verus!
