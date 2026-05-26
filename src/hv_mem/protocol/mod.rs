@@ -1,7 +1,7 @@
 //! Region-assignment protocol abstraction.
 //!
 //! Abstracts over the two safety assumptions (`ClosureSpec` / `BudgetSpec`) so that
-//! `Zone` and `HvMem` are generic over `P: HvMemProtocol` rather than hard-wired.
+//! `Zone` and `HvMem` are generic over `P: ZoneGhostProtocol` rather than hard-wired.
 //!
 //! Submodules:
 //! - [`weak`]:   assumption-1 ghost state (`ClosureGlobalState`) and `ClosureProtocol`.
@@ -9,27 +9,52 @@
 pub mod budget;
 pub mod closure;
 
+use super::spec::GhostZone;
 pub use budget::{BudgetGlobalState, BudgetProtocol, BudgetZoneState};
 pub use closure::{ClosureGlobalState, ClosureProtocol, ClosureZoneState};
 
-use super::spec::ZoneStateOps;
-use crate::address::region::MemoryRegion;
 use vstd::prelude::*;
 
 verus! {
 
-/// Top-level exec protocol trait that unifies `ClosureSpec` (assumption 1) and
-/// `BudgetSpec` (assumption 2) under a single generic interface.
+/// Minimal spec interface shared by `ZoneState` (ClosureSpec) and `BudgetZoneState`
+/// (BudgetSpec). Defined here in the `spec` layer so that `zone.rs` can implement
+/// it without depending on the `protocol` module, avoiding a circular dependency.
 ///
-/// `Zone<PT, M, A, P>` and `HvMem<PT, M, A, P>` are parameterized by `P: HvMemProtocol`.
+/// Used as the bound `P::ZoneToken: ZoneStateOps` in the `ZoneGhostProtocol` trait.
+pub trait ZoneStateOps {
+    /// The zone ID (key in the `zones` map sharding).
+    spec fn zone_id(&self) -> nat;
+
+    /// The ghost zone state (value in the `zones` map sharding).
+    spec fn ghost_zone(&self) -> GhostZone;
+
+    /// Well-formedness relative to a spec-instance ID.
+    spec fn wf(&self, mem_inst_id: InstanceId) -> bool;
+}
+
+/// Ghost-state trait for **zone lifecycle** operations (add / remove a zone).
+///
+/// `Zone<PT, M, A, P>` and `HvMem<PT, M, A, P>` are parameterized by `P: ZoneGhostProtocol`.
 /// Swapping `P` switches the entire ghost-state bookkeeping strategy without changing
 /// any exec code.
 ///
-/// | Impl              | `ZoneToken`       | `GlobalState`       | Lock for insert    |
-/// |-------------------|-------------------|---------------------|--------------------|
-/// | `ClosureProtocol` | `ZoneState`       | `ClosureGlobalState`| global + zone lock |
-/// | `BudgetProtocol`  | `BudgetZoneState` | `BudgetGlobalState` | zone lock only     |
-pub trait HvMemProtocol: Sized {
+/// ## Scope
+/// This trait abstracts only the *globally-serialized* zone add/remove operations,
+/// because both `ClosureProtocol` and `BudgetProtocol` require `&mut GlobalState`
+/// for these (they both update `zone_ids_tok`).
+///
+/// Region insert/remove are **not** in this trait because their required borrow of
+/// `GlobalState` differs by protocol and cannot be unified in a Rust trait:
+///
+/// | Protocol          | region insert/remove borrow | Why                              |
+/// |-------------------|-----------------------------|----------------------------------|
+/// | `ClosureProtocol` | `&mut ClosureGlobalState`   | must mutate `region_closure_tok` |
+/// | `BudgetProtocol`  | `&BudgetGlobalState`        | zone-local only; `gs` unchanged  |
+///
+/// Region operations live in protocol-specific `impl Zone<..., P>` blocks and are
+/// called from protocol-specific `impl HvMem<..., P>` blocks.
+pub trait ZoneGhostProtocol: Sized {
     /// Per-zone tracked ghost state (map-sharded token from `zones[zid]`).
     type ZoneToken: ZoneStateOps;
 
@@ -48,16 +73,6 @@ pub trait HvMemProtocol: Sized {
 
     /// The current set of registered zone IDs.
     spec fn zone_ids(gs: &Self::GlobalState) -> Set<nat>;
-
-    /// Policy-specific authorization predicate for inserting a region.
-    ///
-    /// `ClosureProtocol`: `region` is in `all_regions()` and not yet in the closure.
-    /// `BudgetProtocol`: `region` is in `zone_budget(zt.zone_id())`.
-    spec fn region_authorized(
-        gs: &Self::GlobalState,
-        zt: &Self::ZoneToken,
-        region: MemoryRegion,
-    ) -> bool;
 
     // ─── Proof transitions ────────────────────────────────────────────────────
     /// Register a new empty zone; returns a fresh zone token.

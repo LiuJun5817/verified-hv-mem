@@ -1,15 +1,15 @@
 //! Assumption-2 (strong / BudgetSpec) ghost state and protocol.
 //!
 //! - [`BudgetGlobalState`]: global tracked ghost state (BudgetSpec instance + `zone_ids` token).
-//! - [`BudgetProtocol`]: `HvMemProtocol` implementation for assumption 2.
+//! - [`BudgetProtocol`]: `ZoneGhostProtocol` implementation for assumption 2.
 //!
 //! `insert_region` under `BudgetProtocol` is zone-local: only the `BudgetSpec::zones[zid]`
 //! map-sharded token is updated, so **no global HvMem write lock is required**.
 use super::super::spec::{
     budget::{zone_budget, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken},
-    GhostZone, ZoneStateOps,
+    GhostZone,
 };
-use super::HvMemProtocol;
+use super::{ZoneGhostProtocol, ZoneStateOps};
 use crate::address::region::MemoryRegion;
 use vstd::prelude::*;
 
@@ -25,34 +25,20 @@ pub tracked struct BudgetZoneState {
     pub zone_tok: BudgetZoneToken,
 }
 
-impl BudgetZoneState {
+impl ZoneStateOps for BudgetZoneState {
     /// Well-formedness: the zone token belongs to the given `BudgetSpec` instance.
-    pub open spec fn wf(&self, mem_inst_id: InstanceId) -> bool {
+    open spec fn wf(&self, mem_inst_id: InstanceId) -> bool {
         self.zone_tok.instance_id() == mem_inst_id
     }
 
     /// The zone ID (key in the `zones` map sharding).
-    pub open spec fn zone_id(&self) -> nat {
-        self.zone_tok.key()
-    }
-
-    /// The ghost zone state (value in the `zones` map sharding).
-    pub open spec fn ghost_zone(&self) -> GhostZone {
-        self.zone_tok.value()
-    }
-}
-
-impl ZoneStateOps for BudgetZoneState {
     open spec fn zone_id(&self) -> nat {
         self.zone_tok.key()
     }
 
+    /// The ghost zone state (value in the `zones` map sharding).
     open spec fn ghost_zone(&self) -> GhostZone {
         self.zone_tok.value()
-    }
-
-    open spec fn wf(&self, mem_inst_id: InstanceId) -> bool {
-        self.zone_tok.instance_id() == mem_inst_id
     }
 }
 
@@ -95,7 +81,7 @@ impl BudgetGlobalState {
 ///   This is the key performance benefit of assumption 2.
 pub struct BudgetProtocol;
 
-impl HvMemProtocol for BudgetProtocol {
+impl ZoneGhostProtocol for BudgetProtocol {
     type ZoneToken = BudgetZoneState;
 
     type GlobalState = BudgetGlobalState;
@@ -112,14 +98,6 @@ impl HvMemProtocol for BudgetProtocol {
         gs.zone_ids()
     }
 
-    open spec fn region_authorized(
-        gs: &BudgetGlobalState,
-        zt: &BudgetZoneState,
-        region: MemoryRegion,
-    ) -> bool {
-        zone_budget(zt.zone_id()).contains(region)
-    }
-
     proof fn add_zone(tracked gs: &mut BudgetGlobalState, zid: nat) -> (tracked zt:
         BudgetZoneState) {
         let tracked zone_tok = gs.inst.add_zone(zid, &mut gs.zone_ids_tok);
@@ -131,7 +109,6 @@ impl HvMemProtocol for BudgetProtocol {
         let tracked BudgetZoneState { zone_tok } = zt;
         gs.inst.remove_zone(zid, &mut gs.zone_ids_tok, zone_tok);
     }
-
 }
 
 impl BudgetProtocol {

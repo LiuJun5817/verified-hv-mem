@@ -56,20 +56,4 @@ impl GhostZone {
     }
 }
 
-/// Minimal spec interface shared by `ZoneState` (ClosureSpec) and `BudgetZoneState`
-/// (BudgetSpec). Defined here in the `spec` layer so that `zone.rs` can implement
-/// it without depending on the `protocol` module, avoiding a circular dependency.
-///
-/// Used as the bound `P::ZoneToken: ZoneStateOps` in the `HvMemProtocol` trait.
-pub trait ZoneStateOps {
-    /// The zone ID (key in the `zones` map sharding).
-    spec fn zone_id(&self) -> nat;
-
-    /// The ghost zone state (value in the `zones` map sharding).
-    spec fn ghost_zone(&self) -> GhostZone;
-
-    /// Well-formedness relative to a spec-instance ID.
-    spec fn wf(&self, mem_inst_id: InstanceId) -> bool;
-}
-
 } // verus!

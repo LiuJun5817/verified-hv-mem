@@ -4,15 +4,15 @@
 //! - [`BudgetZoneState`]: linear ghost token for `BudgetSpec::zones`.
 //! - [`ZoneKey`] / [`ZoneRwContent`] / [`ZonePred`]: lock-predicate types for a zone's `RwLock`.
 //! - [`Zone`]: exec struct holding a zone's `PCell<M>` memory set and its protecting `RwLock`.
-//!   Generic over `P: HvMemProtocol` — use `Zone<PT, M, A, ClosureProtocol>` or
+//!   Generic over `P: ZoneGhostProtocol` — use `Zone<PT, M, A, ClosureProtocol>` or
 //!   `Zone<PT, M, A, BudgetProtocol>` for the two concrete assumptions.
 use super::protocol::{
     BudgetGlobalState, BudgetProtocol, BudgetZoneState, ClosureGlobalState, ClosureProtocol,
-    ClosureZoneState, HvMemProtocol,
+    ClosureZoneState, ZoneGhostProtocol, ZoneStateOps,
 };
-use super::spec::budget::zone_budget;
-use super::spec::closure::all_regions;
-use super::spec::{BudgetZoneToken, ClosureZoneToken, GhostZone, ZoneStateOps};
+use super::spec::{
+    budget::zone_budget, closure::all_regions, BudgetZoneToken, ClosureZoneToken, GhostZone,
+};
 use crate::{
     address::region::MemoryRegion,
     bitmap_allocator::bitmap_trait::BitmapAllocator,
@@ -52,10 +52,10 @@ pub struct ZoneKey {
 
 /// Tracked content protected by a `Zone`'s `RwLock`.
 ///
-/// Generic over `P: HvMemProtocol`: the concrete `ZoneToken` type depends on
+/// Generic over `P: ZoneGhostProtocol`: the concrete `ZoneToken` type depends on
 /// which spec assumption is in use (`ZoneState` for ClosureProtocol,
 /// `BudgetZoneState` for BudgetProtocol).
-pub tracked struct ZoneRwContent<M, P> where P: HvMemProtocol {
+pub tracked struct ZoneRwContent<M, P> where P: ZoneGhostProtocol {
     /// Permission to read/write the zone's exec `mem_set` PCell.
     pub mem_set_perm: PointsTo<M>,
     /// Per-zone ghost token (map-sharded `zones[zid]` for the active spec).
@@ -67,7 +67,7 @@ pub struct ZonePred<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemProtocol,
+    P: ZoneGhostProtocol,
  {
     pub _phantom: PhantomData<(PT, M, A, P)>,
 }
@@ -76,7 +76,7 @@ impl<PT, M, A, P> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePred<
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemProtocol,
+    P: ZoneGhostProtocol,
  {
     /// The content is well-formed when:
     /// - `mem_set_perm` is initialised and points to the key's cell,
@@ -115,7 +115,7 @@ pub struct Zone<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemProtocol,
+    P: ZoneGhostProtocol,
  {
     /// Exec memory set — written only while the write guard is held.
     pub mem_set: PCell<M>,
@@ -131,7 +131,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemProtocol,
+    P: ZoneGhostProtocol,
  {
     /// Structural well-formedness:
     /// - the `RwLock` is internally consistent, and
@@ -336,7 +336,8 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             // Budget membership is trusted configuration; !contains_region and
             // !overlaps_vmem are confirmed (exec-side) before reaching this point.
             let tracked new_zone_state = BudgetProtocol::insert_region(gs, zone_state, region);
-            content = ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
+            content =
+            ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
         }
 
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -357,6 +358,9 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             self.lock.k@.mem_inst_id == BudgetProtocol::mem_inst_id(gs),
             self.lock.k@.alloc_inst_id == allocator.inst_id(),
             allocator.invariants(),
+        ensures
+            self.lock.wf(),
+            res is Ok ==> self.wf(),
     {
         if !region.valid() {
             return Err(());
@@ -424,7 +428,9 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
             res is Ok ==> self.wf(),
     {
         // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
-        proof { admit(); }
+        proof {
+            admit();
+        }
 
         if !region.valid() {
             return Err(());
@@ -472,7 +478,9 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
             res is Ok ==> self.wf(),
     {
         // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
-        proof { admit(); }
+        proof {
+            admit();
+        }
 
         if !region.valid() {
             return Err(());

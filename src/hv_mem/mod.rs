@@ -33,7 +33,8 @@ use crate::{
 };
 use alloc::sync::Arc;
 use core::marker::PhantomData;
-use protocol::{BudgetProtocol, ClosureProtocol, HvMemProtocol};
+use protocol::{BudgetProtocol, ClosureProtocol, ZoneGhostProtocol};
+use spec::budget::zone_budget;
 use vstd::invariant::InvariantPredicate;
 use vstd::{
     cell::{CellId, PCell, PointsTo},
@@ -41,7 +42,6 @@ use vstd::{
     tokens::InstanceId,
 };
 use zone::{Zone, ZoneKey, ZonePred, ZoneRwContent};
-use spec::budget::zone_budget;
 
 verus! {
 
@@ -65,7 +65,7 @@ pub tracked struct HvMemRwContent<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemProtocol,
+    P: ZoneGhostProtocol,
  {
     /// Permission to read/write the zone-list PCell.
     pub zone_list_perm: PointsTo<Vec<Arc<Zone<PT, M, A, P>>>>,
@@ -78,7 +78,7 @@ pub struct HvMemPred<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemProtocol,
+    P: ZoneGhostProtocol,
  {
     pub _phantom: PhantomData<(PT, M, A, P)>,
 }
@@ -88,7 +88,7 @@ impl<PT, M, A, P> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P>> for 
     M,
     A,
     P,
-> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator, P: HvMemProtocol {
+> where PT: PageTable<A>, M: MemorySet<PT, A>, A: BitmapAllocator, P: ZoneGhostProtocol {
     /// The content is well-formed when:
     /// - `zone_list_perm` is initialised and points to the key's cell,
     /// - `global_state` is internally well-formed (`P::global_wf`), and
@@ -137,7 +137,7 @@ impl<PT, M, A, P> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P>> for 
 /// ```text
 ///  RwLock<HvMemRwContent<PT,M,A>>
 ///      .zone_list_perm : PointsTo<Vec<Zone<...>>>   <- cell permission  ┐ protected by
-///      .hv_mem_state   : ClosureGlobalState                 <- ghost tokens     ┘ RwLock
+///      .hv_mem_state   : GlobalState                <- ghost tokens     ┘ RwLock
 ///
 ///  PCell<Vec<Zone<...>>>   <- zone list, accessed only while lock is held
 ///
@@ -152,7 +152,7 @@ pub struct HvMem<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemProtocol,
+    P: ZoneGhostProtocol,
  {
     /// Zone list — written only while the HvMem write guard is held.
     pub zone_mem_list: PCell<Vec<Arc<Zone<PT, M, A, P>>>>,
@@ -166,7 +166,7 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
     PT: PageTable<A>,
     M: MemorySet<PT, A>,
     A: BitmapAllocator,
-    P: HvMemProtocol,
+    P: ZoneGhostProtocol,
  {
     /// Structural well-formedness:
     /// - the outer `RwLock` is internally consistent,
@@ -525,11 +525,12 @@ impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
         if !region.valid() {
             return Err(());
         }
-
         // ── Step 2: acquire HvMem read lock ───────────────────────────────────
+
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } = content;
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } =
+            content;
         let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
 
         // ── Step 3: find zone by ID ────────────────────────────────────────────
@@ -555,11 +556,11 @@ impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
             self.lock.unlock_read(guard);
             return Err(());
         }
-
         // ── Step 4: delegate to Zone::insert_region ────────────────
         // Zone::insert_region acquires the zone write lock internally
         // and advances the BudgetSpec ghost state via a shared &BudgetGlobalState,
         // so the HvMem read lock is sufficient.
+
         assert(zones[i as int].zone_id == zid);
         let res = zones[i].insert_region(&self.allocator, Tracked(&global_state), region);
 
@@ -584,11 +585,12 @@ impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
         if !region.valid() {
             return Err(());
         }
-
         // ── Step 2: acquire HvMem read lock ───────────────────────────────────
+
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } = content;
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } =
+            content;
         let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
 
         // ── Step 3: find zone by ID ────────────────────────────────────────────
@@ -612,8 +614,8 @@ impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
             self.lock.unlock_read(guard);
             return Err(());
         }
-
         // ── Step 4: delegate to Zone::remove_region ────────────────
+
         let res = zones[i].remove_region(&self.allocator, Tracked(&global_state), region);
 
         self.lock.unlock_read(guard);
@@ -645,7 +647,9 @@ impl<PT, M, A> HvMem<PT, M, A, ClosureProtocol> where
             res is Ok ==> self.invariants(),
     {
         // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
-        proof { admit(); }
+        proof {
+            admit();
+        }
 
         // ── Step 1: validate region ────────────────────────────────────────────
         if !region.valid() {
@@ -720,8 +724,10 @@ impl<PT, M, A> HvMem<PT, M, A, ClosureProtocol> where
             res is Ok ==> self.invariants(),
     {
         // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
-        proof { admit(); }
-        
+        proof {
+            admit();
+        }
+
         // ── Step 1: validate region ────────────────────────────────────────────
         if !region.valid() {
             return Err(());

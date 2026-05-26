@@ -2,12 +2,12 @@
 //!
 //! - [`ClosureGlobalState`]: global tracked ghost state (ClosureSpec instance +
 //!   `zone_ids` + `region_closure` tokens).
-//! - [`ClosureProtocol`]: `HvMemProtocol` implementation for assumption 1.
+//! - [`ClosureProtocol`]: `ZoneGhostProtocol` implementation for assumption 1.
 use super::super::spec::{
     all_regions, ClosureRegionToken, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
-    GhostZone, ZoneStateOps,
+    GhostZone,
 };
-use super::HvMemProtocol;
+use super::{ZoneGhostProtocol, ZoneStateOps};
 use crate::address::region::MemoryRegion;
 use vstd::{prelude::*, tokens::InstanceId};
 
@@ -24,32 +24,18 @@ pub tracked struct ClosureZoneState {
     pub zone_tok: ClosureZoneToken,
 }
 
-impl ClosureZoneState {
-    /// Well-formedness: the zone token belongs to the given `ClosureSpec` instance.
-    pub open spec fn wf(&self, mem_inst_id: InstanceId) -> bool {
-        self.zone_tok.instance_id() == mem_inst_id
-    }
-
-    /// The zone ID (key in the `zones` map sharding).
-    pub open spec fn zone_id(&self) -> nat {
-        self.zone_tok.key()
-    }
-
-    /// The ghost zone state (value in the `zones` map sharding).
-    pub open spec fn ghost_zone(&self) -> GhostZone {
-        self.zone_tok.value()
-    }
-}
-
 impl ZoneStateOps for ClosureZoneState {
+    /// The zone ID (key in the `zones` map sharding).
     open spec fn zone_id(&self) -> nat {
         self.zone_tok.key()
     }
-
+    
+    /// The ghost zone state (value in the `zones` map sharding).
     open spec fn ghost_zone(&self) -> GhostZone {
         self.zone_tok.value()
     }
-
+    
+    /// Well-formedness: the zone token belongs to the given `ClosureSpec` instance.
     open spec fn wf(&self, mem_inst_id: InstanceId) -> bool {
         self.zone_tok.instance_id() == mem_inst_id
     }
@@ -240,7 +226,7 @@ impl ClosureGlobalState {
 ///   `ClosureGlobalState::region_closure_tok` must be updated globally).
 pub struct ClosureProtocol;
 
-impl HvMemProtocol for ClosureProtocol {
+impl ZoneGhostProtocol for ClosureProtocol {
     type ZoneToken = ClosureZoneState;
 
     type GlobalState = ClosureGlobalState;
@@ -257,16 +243,6 @@ impl HvMemProtocol for ClosureProtocol {
         gs.zone_ids()
     }
 
-    open spec fn region_authorized(
-        gs: &ClosureGlobalState,
-        zt: &ClosureZoneState,
-        region: MemoryRegion,
-    ) -> bool {
-        &&& region.spec_valid()
-        &&& all_regions().contains(region)
-        &&& !gs.region_closure().contains(region)
-    }
-
     proof fn add_zone(tracked gs: &mut ClosureGlobalState, zid: nat) -> (tracked zt:
         ClosureZoneState) {
         gs.add_zone(zid)
@@ -275,7 +251,6 @@ impl HvMemProtocol for ClosureProtocol {
     proof fn remove_zone(tracked gs: &mut ClosureGlobalState, tracked zt: ClosureZoneState) {
         gs.remove_zone(zt)
     }
-
 }
 
 impl ClosureProtocol {
