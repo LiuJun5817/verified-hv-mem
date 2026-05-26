@@ -48,6 +48,10 @@ verus! {
 ///
 /// Binds the lock to the `PCell<Vec<Zone<...>>>` (via `cell_id`).
 pub struct HvMemKey {
+    /// Memory instance ID.
+    pub mem_inst_id: InstanceId,
+    /// Global allocator instance ID (for P3 PTMemDisjoint).
+    pub alloc_inst_id: InstanceId,
     /// `PCell::id()` of `HvMem`'s zone-list cell.
     pub cell_id: CellId,
 }
@@ -93,6 +97,7 @@ impl<PT, M, A, P> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P>> for 
     open spec fn inv(k: HvMemKey, v: HvMemRwContent<PT, M, A, P>) -> bool {
         &&& v.zone_list_perm.is_init()
         &&& v.zone_list_perm@.pcell === k.cell_id
+        &&& P::mem_inst_id(&v.global_state) == k.mem_inst_id
         &&& P::global_wf(&v.global_state)
         &&& {
             let zone_list = v.zone_list_perm@.mem_contents->Init_0;
@@ -101,18 +106,22 @@ impl<PT, M, A, P> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P>> for 
                 P::zone_ids(&v.global_state).contains(zid) == (exists|i: int|
                     0 <= i < zone_list.len() && #[trigger] zone_list[i].zone_id as nat
                         == zid)
-                // Each exec zone's lock is bound to the correct spec instance.
-            &&& forall|i: int|
-                #![trigger zone_list[i]]
-                0 <= i < zone_list.len() ==> zone_list[i].lock.k@.mem_inst_id == P::inst_id(
-                    &v.global_state,
-                )
-            // Exec zone IDs are pairwise distinct (ensures the bijection above is well-defined).
+                // Exec zone IDs are pairwise distinct (ensures the bijection above is well-defined).
             &&& forall|i: int, j: int|
                 #![auto]
                 0 <= i < zone_list.len() && 0 <= j < zone_list.len() && i != j
                     ==> zone_list[i].zone_id
                     != zone_list[j].zone_id
+            // Each exec zone is bound to the correct mem spec instance.
+            &&& forall|i: int|
+                #![trigger zone_list[i]]
+                0 <= i < zone_list.len() ==> zone_list[i].mem_inst_id()
+                    == k.mem_inst_id
+            // Each exec zone is bound to the same allocator instance.
+            &&& forall|i: int|
+                #![trigger zone_list[i]]
+                0 <= i < zone_list.len() ==> zone_list[i].alloc_inst_id()
+                    == k.alloc_inst_id
             // Each zone in the list is well-formed.
             &&& forall|i: int| #![auto] 0 <= i < zone_list.len() ==> zone_list[i].wf()
         }
@@ -149,7 +158,7 @@ pub struct HvMem<PT, M, A, P> where
     /// RwLock protecting `HvMemRwContent<PT,M,A,P>` with `HvMemKey` predicate.
     pub lock: RwLock<HvMemKey, HvMemRwContent<PT, M, A, P>, HvMemPred<PT, M, A, P>>,
     /// Global allocator — already protected by its own `Mutex`.
-    pub alloc: GlobalAllocator<A>,
+    pub allocator: GlobalAllocator<A>,
 }
 
 impl<PT, M, A, P> HvMem<PT, M, A, P> where
@@ -169,7 +178,8 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
     pub open spec fn invariants(&self) -> bool {
         &&& self.lock.wf()
         &&& self.zone_mem_list.id() == self.lock.k@.cell_id
-        &&& self.alloc.invariants()
+        &&& self.allocator.invariants()
+        &&& self.lock.k@.alloc_inst_id == self.allocator.inst_id()
     }
 
     /// Add a new empty zone to the hypervisor memory manager.
@@ -210,6 +220,7 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
                 content.zone_list_perm@.pcell === self.zone_mem_list.id(),
                 content.zone_list_perm@.pcell === self.lock.k@.cell_id,
                 handle@.instance_id() == self.lock.inst@.id(),
+                P::mem_inst_id(&content.global_state) == self.lock.k@.mem_inst_id,
                 P::global_wf(&content.global_state),
                 // Scan progress: none of the zones before i have zone_id == zid.
                 forall|j: int| 0 <= j < i ==> #[trigger] zones[j].zone_id != zid,
@@ -220,9 +231,11 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
                 // Spec-instance consistency.
                 forall|k: int|
                     #![trigger zones@[k]]
-                    0 <= k < zones@.len() ==> zones@[k].lock.k@.mem_inst_id == P::inst_id(
-                        &content.global_state,
-                    ),
+                    0 <= k < zones@.len() ==> zones@[k].mem_inst_id() == self.lock.k@.mem_inst_id,
+                forall|k: int|
+                    #![trigger zones@[k]]
+                    0 <= k < zones@.len() ==> zones@[k].alloc_inst_id()
+                        == self.lock.k@.alloc_inst_id,
                 // Pairwise distinct IDs.
                 forall|k: int, l: int|
                     #![auto]
@@ -245,24 +258,30 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
         // Capture ghost values before mutating global_state.
         let ghost pre_add_zone_ids: Set<nat>;
         let tracked zone_state: P::ZoneToken;
-        let ghost inst_id: InstanceId;
+        let ghost mem_inst_id: InstanceId;
         proof {
             pre_add_zone_ids = P::zone_ids(&content.global_state);
-            inst_id = P::inst_id(&content.global_state);
+            mem_inst_id = P::mem_inst_id(&content.global_state);
             assert(forall|j: int| 0 <= j < zones.len() ==> #[trigger] zones[j].zone_id != zid);
             // From the bijection invariant: zone_ids.contains(zid as nat) iff
             // some exec zone has zone_id == zid — but the scan found none.
             assert(!P::zone_ids(&content.global_state).contains(zid as nat));
             zone_state = P::add_zone(&mut content.global_state, zid as nat);
             // Postcondition: zone_ids(new_gs) = pre_add_zone_ids.insert(zid as nat)
-            //                inst_id(new_gs)  = inst_id  (unchanged)
+            //                mem_inst_id(new_gs)  = mem_inst_id  (unchanged)
             //                global_wf(new_gs)
         }
 
         // ── Step 3: assemble the new Zone with an empty MemorySet ─────────────
-        let mem_set = M::new(&self.alloc, pt_constants);
+        let mem_set = M::new(&self.allocator, pt_constants);
         let new_zone = Arc::new(
-            Zone::<PT, M, A, P>::new(mem_set, zid, Ghost(inst_id), Tracked(zone_state)),
+            Zone::<PT, M, A, P>::new(
+                mem_set,
+                zid,
+                Ghost(mem_inst_id),
+                Ghost(self.allocator.inst_id()),
+                Tracked(zone_state),
+            ),
         );
         // Snapshot the pre-push zone list for use in the postcondition proof.
         let ghost old_zones = zones@;
@@ -280,7 +299,7 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
             assert(new_zones[old_len] == new_zone);
             // From P::add_zone postconditions:
             assert(P::zone_ids(&content.global_state) =~= pre_add_zone_ids.insert(zid as nat));
-            assert(P::inst_id(&content.global_state) == inst_id);
+            assert(P::mem_inst_id(&content.global_state) == mem_inst_id);
             assert(HvMemPred::<PT, M, A, P>::inv(self.lock.k@, content)) by {
                 // 1. zone_list_perm.is_init() — from put.
                 // 2. pcell matches — from loop invariant.
@@ -308,12 +327,11 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
                 // 5. Spec-instance consistency for all new zones.
                 assert forall|k: int|
                     #![trigger new_zones[k]]
-                    0 <= k < new_zones.len() implies new_zones[k].lock.k@.mem_inst_id == P::inst_id(
-                    &content.global_state,
-                ) by {
+                    0 <= k < new_zones.len() implies new_zones[k].mem_inst_id()
+                    == self.lock.k@.mem_inst_id by {
                     if k < old_len {
-                        // From loop invariant: old_zones[k].lock.k@.mem_inst_id == inst_id.
-                        assert(old_zones[k].lock.k@.mem_inst_id == inst_id);
+                        // From loop invariant: old_zones[k].mem_inst_id() == mem_inst_id.
+                        assert(old_zones[k].mem_inst_id() == mem_inst_id);
                     }
                 };
                 // 6. Pairwise distinct IDs.
@@ -539,7 +557,7 @@ impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
         // Zone::insert_region acquires the zone write lock internally
         // and advances the BudgetSpec ghost state via a shared &BudgetGlobalState,
         // so the HvMem read lock is sufficient.
-        let res = zones[idx].insert_region(&self.alloc, Tracked(&global_state), region);
+        let res = zones[idx].insert_region(&self.allocator, Tracked(&global_state), region);
 
         self.lock.unlock_read(guard);
         res
@@ -593,7 +611,7 @@ impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
         let idx = idx_opt.unwrap();
 
         // ── Step 4: delegate to Zone::remove_region ────────────────
-        let res = zones[idx].remove_region(&self.alloc, Tracked(&global_state), region);
+        let res = zones[idx].remove_region(&self.allocator, Tracked(&global_state), region);
 
         self.lock.unlock_read(guard);
         res
@@ -667,7 +685,7 @@ impl<PT, M, A> HvMem<PT, M, A, ClosureProtocol> where
         // We hold the HvMem write lock throughout, supplying
         // &mut hvm_content.global_state as required by ClosureProtocol.
         let res = zones[idx].insert_region(
-            &self.alloc,
+            &self.allocator,
             Tracked(&mut hvm_content.global_state),
             region,
         );
@@ -735,7 +753,7 @@ impl<PT, M, A> HvMem<PT, M, A, ClosureProtocol> where
 
         // ── Step 4: delegate to Zone::remove_region ───────────────────────────
         let res = zones[idx].remove_region(
-            &self.alloc,
+            &self.allocator,
             Tracked(&mut hvm_content.global_state),
             region,
         );

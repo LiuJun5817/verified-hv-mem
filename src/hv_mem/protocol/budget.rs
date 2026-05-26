@@ -27,8 +27,8 @@ pub tracked struct BudgetZoneState {
 
 impl BudgetZoneState {
     /// Well-formedness: the zone token belongs to the given `BudgetSpec` instance.
-    pub open spec fn wf(&self, inst_id: InstanceId) -> bool {
-        self.zone_tok.instance_id() == inst_id
+    pub open spec fn wf(&self, mem_inst_id: InstanceId) -> bool {
+        self.zone_tok.instance_id() == mem_inst_id
     }
 
     /// The zone ID (key in the `zones` map sharding).
@@ -51,8 +51,8 @@ impl ZoneStateOps for BudgetZoneState {
         self.zone_tok.value()
     }
 
-    open spec fn wf(&self, inst_id: InstanceId) -> bool {
-        self.zone_tok.instance_id() == inst_id
+    open spec fn wf(&self, mem_inst_id: InstanceId) -> bool {
+        self.zone_tok.instance_id() == mem_inst_id
     }
 }
 
@@ -75,7 +75,7 @@ impl BudgetGlobalState {
         self.zone_ids_tok.instance_id() == self.inst.id()
     }
 
-    pub open spec fn inst_id(&self) -> vstd::tokens::InstanceId {
+    pub open spec fn mem_inst_id(&self) -> vstd::tokens::InstanceId {
         self.inst.id()
     }
 
@@ -104,16 +104,12 @@ impl HvMemProtocol for BudgetProtocol {
         gs.wf()
     }
 
-    open spec fn inst_id(gs: &BudgetGlobalState) -> vstd::tokens::InstanceId {
-        gs.inst_id()
+    open spec fn mem_inst_id(gs: &BudgetGlobalState) -> vstd::tokens::InstanceId {
+        gs.mem_inst_id()
     }
 
     open spec fn zone_ids(gs: &BudgetGlobalState) -> Set<nat> {
         gs.zone_ids()
-    }
-
-    open spec fn alloc_inst_id(gs: &BudgetGlobalState) -> InstanceId {
-        gs.inst.alloc_inst_id()
     }
 
     open spec fn region_authorized(

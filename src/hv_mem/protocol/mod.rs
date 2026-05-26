@@ -25,9 +25,9 @@ verus! {
 /// Swapping `P` switches the entire ghost-state bookkeeping strategy without changing
 /// any exec code.
 ///
-/// | Impl            | `ZoneToken`       | `GlobalState`       | Lock for insert    |
-/// |-----------------|-------------------|---------------------|--------------------|
-/// | `ClosureProtocol` | `ZoneState`       | `ClosureGlobalState`        | global + zone lock |
+/// | Impl              | `ZoneToken`       | `GlobalState`       | Lock for insert    |
+/// |-------------------|-------------------|---------------------|--------------------|
+/// | `ClosureProtocol` | `ZoneState`       | `ClosureGlobalState`| global + zone lock |
 /// | `BudgetProtocol`  | `BudgetZoneState` | `BudgetGlobalState` | zone lock only     |
 pub trait HvMemProtocol: Sized {
     /// Per-zone tracked ghost state (map-sharded token from `zones[zid]`).
@@ -44,16 +44,10 @@ pub trait HvMemProtocol: Sized {
     spec fn global_wf(gs: &Self::GlobalState) -> bool;
 
     /// The spec-instance ID embedded in the global state.
-    spec fn inst_id(gs: &Self::GlobalState) -> InstanceId;
+    spec fn mem_inst_id(gs: &Self::GlobalState) -> InstanceId;
 
     /// The current set of registered zone IDs.
     spec fn zone_ids(gs: &Self::GlobalState) -> Set<nat>;
-
-    /// The allocator instance ID stored as a constant in the spec state machine.
-    ///
-    /// Used to check `GhostZone::wf`: zones entering the system must have been
-    /// constructed for this allocator instance.
-    spec fn alloc_inst_id(gs: &Self::GlobalState) -> InstanceId;
 
     /// Policy-specific authorization predicate for inserting a region.
     ///
@@ -75,10 +69,10 @@ pub trait HvMemProtocol: Sized {
             !Self::zone_ids(old(gs)).contains(zid),
         ensures
             Self::global_wf(gs),
-            Self::inst_id(gs) == Self::inst_id(old(gs)),
+            Self::mem_inst_id(gs) == Self::mem_inst_id(old(gs)),
             zt.zone_id() == zid,
             zt.ghost_zone().regions() =~= Set::empty(),
-            zt.wf(Self::inst_id(gs)),
+            zt.wf(Self::mem_inst_id(gs)),
             Self::zone_ids(gs) =~= Self::zone_ids(old(gs)).insert(zid),
     ;
 
@@ -86,10 +80,10 @@ pub trait HvMemProtocol: Sized {
     proof fn remove_zone(tracked gs: &mut Self::GlobalState, tracked zt: Self::ZoneToken)
         requires
             Self::global_wf(old(gs)),
-            zt.wf(Self::inst_id(old(gs))),
+            zt.wf(Self::mem_inst_id(old(gs))),
         ensures
             Self::global_wf(gs),
-            Self::inst_id(gs) == Self::inst_id(old(gs)),
+            Self::mem_inst_id(gs) == Self::mem_inst_id(old(gs)),
             Self::zone_ids(gs) =~= Self::zone_ids(old(gs)).remove(zt.zone_id()),
     ;
 
@@ -109,15 +103,15 @@ pub trait HvMemProtocol: Sized {
     ) -> (tracked new_zt: Self::ZoneToken)
         requires
             Self::global_wf(old(gs)),
-            zt.wf(Self::inst_id(old(gs))),
+            zt.wf(Self::mem_inst_id(old(gs))),
             !zt.ghost_zone().contains_region(region),
             !zt.ghost_zone().mem_set.overlaps_vmem(region),
             Self::region_authorized(old(gs), &zt, region),
         ensures
             Self::global_wf(gs),
-            Self::inst_id(gs) == Self::inst_id(old(gs)),
+            Self::mem_inst_id(gs) == Self::mem_inst_id(old(gs)),
             new_zt.zone_id() == zt.zone_id(),
-            new_zt.wf(Self::inst_id(gs)),
+            new_zt.wf(Self::mem_inst_id(gs)),
             new_zt.ghost_zone() == zt.ghost_zone().insert_region(region),
     ;
 
@@ -129,13 +123,13 @@ pub trait HvMemProtocol: Sized {
     ) -> (tracked new_zt: Self::ZoneToken)
         requires
             Self::global_wf(old(gs)),
-            zt.wf(Self::inst_id(old(gs))),
+            zt.wf(Self::mem_inst_id(old(gs))),
             zt.ghost_zone().contains_region(region),
         ensures
             Self::global_wf(gs),
-            Self::inst_id(gs) == Self::inst_id(old(gs)),
+            Self::mem_inst_id(gs) == Self::mem_inst_id(old(gs)),
             new_zt.zone_id() == zt.zone_id(),
-            new_zt.wf(Self::inst_id(gs)),
+            new_zt.wf(Self::mem_inst_id(gs)),
             new_zt.ghost_zone() == zt.ghost_zone().remove_region(region),
     ;
 }

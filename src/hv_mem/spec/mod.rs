@@ -18,17 +18,14 @@ verus! {
 
 /// Ghost state for one zone tracked inside `ClosureSpec` or `BudgetSpec`.
 pub ghost struct GhostZone {
-    /// Allocator instance id shared by the whole hypervisor memory manager.
-    pub alloc_inst_id: InstanceId,
     /// Region sequence used by the existing memory-set abstraction.
     pub mem_set: SpecMemorySet,
 }
 
 impl GhostZone {
-    /// Well-formedness relative to the system allocator instance.
-    pub open spec fn wf(&self, alloc_inst_id: InstanceId) -> bool {
-        &&& self.alloc_inst_id == alloc_inst_id
-        &&& self.mem_set.wf()
+    /// Well-formedness: all regions in the zone are valid and non-overlapping.
+    pub open spec fn wf(&self) -> bool {
+        self.mem_set.wf()
     }
 
     /// Region set of this zone.
@@ -44,7 +41,6 @@ impl GhostZone {
     /// Insert a region into this zone.
     pub open spec fn insert_region(&self, region: MemoryRegion) -> Self {
         Self {
-            alloc_inst_id: self.alloc_inst_id,
             mem_set: SpecMemorySet { regions: self.regions().insert(region) },
         }
     }
@@ -55,7 +51,6 @@ impl GhostZone {
             self.regions().contains(region),
     {
         Self {
-            alloc_inst_id: self.alloc_inst_id,
             mem_set: SpecMemorySet { regions: self.regions().remove(region) },
         }
     }
@@ -74,7 +69,7 @@ pub trait ZoneStateOps {
     spec fn ghost_zone(&self) -> GhostZone;
 
     /// Well-formedness relative to a spec-instance ID.
-    spec fn wf(&self, inst_id: InstanceId) -> bool;
+    spec fn wf(&self, mem_inst_id: InstanceId) -> bool;
 }
 
 } // verus!

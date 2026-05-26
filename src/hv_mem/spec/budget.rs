@@ -45,9 +45,6 @@ pub axiom fn zone_budget_pairwise_disjoint()
 tokenized_state_machine! {
     BudgetSpec {
         fields {
-            #[sharding(constant)]
-            pub alloc_inst_id: InstanceId,
-
             #[sharding(variable)]
             pub zone_ids: Set<nat>,
 
@@ -64,11 +61,11 @@ tokenized_state_machine! {
             self.zones.dom() == self.zone_ids
         }
 
-        /// All zones are well-formed relative to the system allocator instance.
+        /// All zones are well-formed (regions valid and non-overlapping).
         #[invariant]
         pub fn inv_zones_wf(&self) -> bool {
             forall|zid: nat|
-                self.zones.contains_key(zid) ==> #[trigger] self.zones[zid].wf(self.alloc_inst_id)
+                self.zones.contains_key(zid) ==> #[trigger] self.zones[zid].wf()
         }
 
         /// Every region currently assigned to a zone lies within that zone's budget.
@@ -155,8 +152,7 @@ tokenized_state_machine! {
         // ── Transitions ─────────────────────────────────────────────────────────────
 
         init! {
-            initialize(alloc_inst_id: InstanceId) {
-                init alloc_inst_id = alloc_inst_id;
+            initialize() {
                 init zone_ids = Set::empty();
                 init zones = Map::empty();
             }
@@ -171,7 +167,6 @@ tokenized_state_machine! {
                 require(!pre.zone_ids.contains(zid));
                 update zone_ids = pre.zone_ids.insert(zid);
                 add zones += [zid => GhostZone {
-                    alloc_inst_id: pre.alloc_inst_id,
                     mem_set: SpecMemorySet { regions: Set::empty() },
                 }];
             }
@@ -220,18 +215,17 @@ tokenized_state_machine! {
         // ── Inductive proofs ────────────────────────────────────────────────────────
 
         #[inductive(initialize)]
-        fn initialize_inductive(post: Self, alloc_inst_id: InstanceId) { }
+        fn initialize_inductive(post: Self) { }
 
         #[inductive(add_zone)]
         fn add_zone_inductive(pre: Self, post: Self, zid: nat) {
             // The new zone is always empty; all invariants are trivially preserved.
             assert(post.zones.dom() == post.zone_ids);
-            // inv_zones_wf: empty zone has alloc_inst_id == pre.alloc_inst_id and
-            // SpecMemorySet::wf() is vacuously true for an empty region set.
+            // inv_zones_wf: empty zone has SpecMemorySet::wf() vacuously true.
             assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf(post.alloc_inst_id) by {
+                implies #[trigger] post.zones[zid2].wf() by {
                 if zid2 == zid {
-                    // constructed as GhostZone { alloc_inst_id: pre.alloc_inst_id, mem_set: empty }
+                    // constructed as GhostZone { mem_set: empty }
                 } else {
                     assert(post.zones[zid2] == pre.zones[zid2]);
                 }
@@ -257,7 +251,7 @@ tokenized_state_machine! {
             assert(post.zones.dom() == post.zone_ids);
             // inv_zones_wf: only remaining zones (all != zid), unchanged from pre
             assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf(post.alloc_inst_id) by {
+                implies #[trigger] post.zones[zid2].wf() by {
                 assert(post.zones[zid2] == pre.zones[zid2]);
             };
             // inv_zone_within_budget: remaining zones unchanged
@@ -279,9 +273,9 @@ tokenized_state_machine! {
             assert(post.zones.dom() == post.zone_ids);
             // inv_zones_wf
             assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf(post.alloc_inst_id) by {
+                implies #[trigger] post.zones[zid2].wf() by {
                 if zid2 == zid {
-                    assert(old_zone.wf(pre.alloc_inst_id));
+                    assert(old_zone.wf());
                     assert(new_zone == old_zone.insert_region(region));
                     assert(new_zone.mem_set.regions =~= old_zone.regions().insert(region));
                     assert(new_zone.mem_set.wf()) by {
@@ -320,7 +314,7 @@ tokenized_state_machine! {
                             }
                         };
                     };
-                    assert(new_zone.wf(pre.alloc_inst_id));
+                    assert(new_zone.wf());
                 } else {
                     assert(post.zones[zid2] == pre.zones[zid2]);
                 }
@@ -354,9 +348,9 @@ tokenized_state_machine! {
             assert(post.zones.dom() == post.zone_ids);
             // inv_zones_wf: removing a region preserves wf (regions() shrinks)
             assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf(post.alloc_inst_id) by {
+                implies #[trigger] post.zones[zid2].wf() by {
                 if zid2 == zid {
-                    assert(old_zone.wf(pre.alloc_inst_id));
+                    assert(old_zone.wf());
                     assert(new_zone == old_zone.remove_region(region));
                     assert forall|r: MemoryRegion| #[trigger] new_zone.regions().contains(r)
                         implies r.spec_valid() by {
@@ -368,7 +362,7 @@ tokenized_state_machine! {
                         assert(old_zone.regions().contains(r1) && old_zone.regions().contains(r2));
                     };
                     assert(new_zone.mem_set.wf());
-                    assert(new_zone.wf(pre.alloc_inst_id));
+                    assert(new_zone.wf());
                 } else {
                     assert(post.zones[zid2] == pre.zones[zid2]);
                 }

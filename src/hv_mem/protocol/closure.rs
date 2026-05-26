@@ -26,8 +26,8 @@ pub tracked struct ClosureZoneState {
 
 impl ClosureZoneState {
     /// Well-formedness: the zone token belongs to the given `ClosureSpec` instance.
-    pub open spec fn wf(&self, alloc_inst_id: InstanceId) -> bool {
-        self.zone_tok.instance_id() == alloc_inst_id
+    pub open spec fn wf(&self, mem_inst_id: InstanceId) -> bool {
+        self.zone_tok.instance_id() == mem_inst_id
     }
 
     /// The zone ID (key in the `zones` map sharding).
@@ -50,8 +50,8 @@ impl ZoneStateOps for ClosureZoneState {
         self.zone_tok.value()
     }
 
-    open spec fn wf(&self, inst_id: InstanceId) -> bool {
-        self.zone_tok.instance_id() == inst_id
+    open spec fn wf(&self, mem_inst_id: InstanceId) -> bool {
+        self.zone_tok.instance_id() == mem_inst_id
     }
 }
 
@@ -80,7 +80,7 @@ impl ClosureGlobalState {
     }
 
     /// The `ClosureSpec` instance ID.
-    pub open spec fn inst_id(&self) -> InstanceId {
+    pub open spec fn mem_inst_id(&self) -> InstanceId {
         self.inst.id()
     }
 
@@ -108,7 +108,7 @@ impl ClosureGlobalState {
             region_closure_tok.value() =~= Set::empty(),
         ensures
             state.wf(),
-            state.inst_id() == inst.id(),
+            state.mem_inst_id() == inst.id(),
             state.zone_ids() =~= Set::empty(),
             state.region_closure() =~= Set::empty(),
     {
@@ -125,10 +125,10 @@ impl ClosureGlobalState {
             !old(self).zone_ids().contains(zid),
         ensures
             self.wf(),
-            self.inst_id() == old(self).inst_id(),
+            self.mem_inst_id() == old(self).mem_inst_id(),
             self.zone_ids() =~= old(self).zone_ids().insert(zid),
             self.region_closure() == old(self).region_closure(),
-            zone_state.wf(self.inst_id()),
+            zone_state.wf(self.mem_inst_id()),
             zone_state.zone_id() == zid,
             zone_state.ghost_zone().regions() =~= Set::empty(),
     {
@@ -143,10 +143,10 @@ impl ClosureGlobalState {
     pub proof fn remove_zone(tracked &mut self, tracked zone_state: ClosureZoneState)
         requires
             old(self).wf(),
-            zone_state.wf(old(self).inst_id()),
+            zone_state.wf(old(self).mem_inst_id()),
         ensures
             self.wf(),
-            self.inst_id() == old(self).inst_id(),
+            self.mem_inst_id() == old(self).mem_inst_id(),
             self.zone_ids() =~= old(self).zone_ids().remove(zone_state.zone_id()),
             self.region_closure() =~= old(self).region_closure().difference(
                 zone_state.ghost_zone().regions(),
@@ -173,15 +173,15 @@ impl ClosureGlobalState {
     ) -> (tracked new_zone_state: ClosureZoneState)
         requires
             old(self).wf(),
-            zone_state.wf(old(self).inst_id()),
+            zone_state.wf(old(self).mem_inst_id()),
             region.spec_valid(),
             all_regions().contains(region),
             !old(self).region_closure().contains(region),
             !zone_state.ghost_zone().mem_set.overlaps_vmem(region),
         ensures
             self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            new_zone_state.wf(self.inst_id()),
+            self.mem_inst_id() == old(self).mem_inst_id(),
+            new_zone_state.wf(self.mem_inst_id()),
             new_zone_state.zone_id() == zone_state.zone_id(),
             self.region_closure() =~= old(self).region_closure().insert(region),
             new_zone_state.ghost_zone() == zone_state.ghost_zone().insert_region(region),
@@ -208,12 +208,12 @@ impl ClosureGlobalState {
     ) -> (tracked new_zone_state: ClosureZoneState)
         requires
             old(self).wf(),
-            zone_state.wf(old(self).inst_id()),
+            zone_state.wf(old(self).mem_inst_id()),
             zone_state.ghost_zone().contains_region(region),
         ensures
             self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            new_zone_state.wf(self.inst_id()),
+            self.mem_inst_id() == old(self).mem_inst_id(),
+            new_zone_state.wf(self.mem_inst_id()),
             new_zone_state.zone_id() == zone_state.zone_id(),
             self.region_closure() =~= old(self).region_closure().remove(region),
             new_zone_state.ghost_zone() == zone_state.ghost_zone().remove_region(region),
@@ -249,16 +249,12 @@ impl HvMemProtocol for ClosureProtocol {
         gs.wf()
     }
 
-    open spec fn inst_id(gs: &ClosureGlobalState) -> InstanceId {
-        gs.inst_id()
+    open spec fn mem_inst_id(gs: &ClosureGlobalState) -> InstanceId {
+        gs.mem_inst_id()
     }
 
     open spec fn zone_ids(gs: &ClosureGlobalState) -> Set<nat> {
         gs.zone_ids()
-    }
-
-    open spec fn alloc_inst_id(gs: &ClosureGlobalState) -> InstanceId {
-        gs.inst.alloc_inst_id()
     }
 
     open spec fn region_authorized(

@@ -33,15 +33,19 @@ verus! {
 
 /// Ghost key for a `Zone`'s `RwLock`.
 ///
-/// Binds the lock to a specific `PCell<M>` (via `cell_id`) and to the
-/// `ClosureSpec` instance (via `inst_id`), so the predicate can express
-/// "the `PointsTo` inside the lock belongs to this cell, and the
-/// `ZoneState` token belongs to this instance".
+/// Binds the lock to a specific `PCell<M>` (via `cell_id`), to the
+/// spec instance (via `mem_inst_id`), and to the allocator instance
+/// (via `alloc_inst_id`), so the predicate can express
+/// "the `PointsTo` inside the lock belongs to this cell, the
+/// `ZoneState` token belongs to this spec instance, and the memory
+/// set was built for this allocator instance".
 pub struct ZoneKey {
     /// `PCell::id()` of the zone's `mem_set` cell.
     pub cell_id: CellId,
-    /// `ClosureSpec` instance id shared by the whole hypervisor.
+    /// Spec (ClosureSpec / BudgetSpec) instance id shared by the whole hypervisor.
     pub mem_inst_id: InstanceId,
+    /// Global allocator instance id — must match `M::inst_id()` of the stored memory set.
+    pub alloc_inst_id: InstanceId,
 }
 
 /// Tracked content protected by a `Zone`'s `RwLock`.
@@ -73,11 +77,15 @@ impl<PT, M, A, P> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePred<
     P: HvMemProtocol,
  {
     /// The content is well-formed when:
-    /// - `mem_set_perm` is initialised and points to the key's cell, and
+    /// - `mem_set_perm` is initialised and points to the key's cell,
+    /// - the wrapped memory set satisfies its own invariant,
+    /// - the memory set's allocator instance matches the key's `alloc_inst_id`, and
     /// - `zone_state` belongs to the key's spec instance.
     open spec fn inv(k: ZoneKey, v: ZoneRwContent<M, P>) -> bool {
         &&& v.mem_set_perm.is_init()
         &&& v.mem_set_perm@.pcell === k.cell_id
+        &&& v.mem_set_perm@.mem_contents->Init_0.invariants()
+        &&& v.mem_set_perm@.mem_contents->Init_0.inst_id() == k.alloc_inst_id
         &&& v.zone_state.wf(k.mem_inst_id)
     }
 }
@@ -125,11 +133,21 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     /// - the lock's ghost key `cell_id` matches `self.mem_set.id()`.
     ///
     /// The stronger invariant that `PointsTo.pcell == cell_id` and
-    /// `ZoneState.inst_id == k.inst_id` is captured by `ZonePred` and
+    /// `ZoneState.mem_inst_id == k.mem_inst_id` is captured by `ZonePred` and
     /// enforced every time the lock is acquired or released.
     pub open spec fn wf(&self) -> bool {
         &&& self.lock.wf()
         &&& self.lock.k@.cell_id == self.mem_set.id()
+    }
+
+    /// The HvMemSpec-instance ID of this zone, obtained from the lock's ghost key.
+    pub open spec fn mem_inst_id(&self) -> InstanceId {
+        self.lock.k@.mem_inst_id
+    }
+
+    /// The allocator instance ID of this zone, obtained from the lock's ghost key.
+    pub open spec fn alloc_inst_id(&self) -> InstanceId {
+        self.lock.k@.alloc_inst_id
     }
 
     /// Assemble a `Zone` from an already-built exec `mem_set` and its ghost token.
@@ -141,14 +159,17 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     pub fn new(
         mem_set: M,
         zone_id: usize,
-        Ghost(inst_id): Ghost<InstanceId>,
+        Ghost(mem_inst_id): Ghost<InstanceId>,
+        Ghost(alloc_inst_id): Ghost<InstanceId>,
         Tracked(zone_state): Tracked<P::ZoneToken>,
     ) -> (res: Self)
         requires
-            zone_state.wf(inst_id),
+            zone_state.wf(mem_inst_id),
+            mem_set.inst_id() == alloc_inst_id,
         ensures
             res.wf(),
-            res.lock.k@.mem_inst_id == inst_id,
+            res.lock.k@.mem_inst_id == mem_inst_id,
+            res.lock.k@.alloc_inst_id == alloc_inst_id,
             res.zone_id == zone_id,
     {
         // Store the exec mem_set in a fresh PCell.
@@ -158,10 +179,13 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
         let tracked zone_rw_content = ZoneRwContent::<M, P> { mem_set_perm, zone_state };
 
         // Build the ZoneKey (evaluated in spec mode via Ghost(…)).
-        let zone_key = Ghost(ZoneKey { cell_id: mem_set_cell.id(), mem_inst_id: inst_id });
+        let zone_key = Ghost(
+            ZoneKey { cell_id: mem_set_cell.id(), mem_inst_id, alloc_inst_id },
+        );
 
-        // Admit ZonePred::inv; dischargeable from PCell::new postconditions and
-        // zone_state.wf(inst_id) from the precondition.
+        // Admit ZonePred::inv; dischargeable from PCell::new postconditions,
+        // zone_state.wf(mem_inst_id) from the precondition, and the caller's
+        // responsibility to supply a mem_set satisfying M::invariants().
         proof {
             assume(ZonePred::<PT, M, A, P>::inv(zone_key@, zone_rw_content));
         }
@@ -182,6 +206,8 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
         requires
             self.wf(),
         ensures
+            res.0.invariants(),
+            res.0.inst_id() == self.lock.k@.alloc_inst_id,
             res.1.wf(&self.lock),
             res.1.token.mem_set_perm@.pcell == self.mem_set.id(),
             !res.1.token.mem_set_perm.is_init(),
@@ -293,12 +319,14 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
     /// Returns `Err(())` if `region` is invalid or overlaps an existing mapping.
     pub fn insert_region(
         &self,
-        alloc: &GlobalAllocator<A>,
+        allocator: &GlobalAllocator<A>,
         Tracked(gs): Tracked<&BudgetGlobalState>,
         region: MemoryRegion,
     ) -> (res: Result<(), ()>)
         requires
             self.wf(),
+            self.lock.k@.alloc_inst_id == allocator.inst_id(),
+            allocator.invariants(),
         ensures
             res is Ok ==> self.wf(),
     {
@@ -313,7 +341,7 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
-        mem_set.insert(alloc, region);
+        mem_set.insert(allocator, region);
 
         proof {
             let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state } = content;
@@ -341,12 +369,14 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
     /// Returns `Err(())` if `region` is invalid or no region starts at `region.start`.
     pub fn remove_region(
         &self,
-        alloc: &GlobalAllocator<A>,
+        allocator: &GlobalAllocator<A>,
         Tracked(gs): Tracked<&BudgetGlobalState>,
         region: MemoryRegion,
     ) -> (res: Result<(), ()>)
         requires
             self.wf(),
+            self.lock.k@.alloc_inst_id == allocator.inst_id(),
+            allocator.invariants(),
         ensures
             res is Ok ==> self.wf(),
     {
@@ -361,7 +391,7 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
-        mem_set.remove(alloc, region.start);
+        mem_set.remove(allocator, region.start);
 
         proof {
             let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state } = content;
@@ -396,12 +426,14 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
     /// Returns `Err(())` if `region` is invalid or overlaps an existing mapping.
     pub fn insert_region(
         &self,
-        alloc: &GlobalAllocator<A>,
+        allocator: &GlobalAllocator<A>,
         Tracked(gs): Tracked<&mut ClosureGlobalState>,
         region: MemoryRegion,
     ) -> (res: Result<(), ()>)
         requires
             self.wf(),
+            self.lock.k@.alloc_inst_id == allocator.inst_id(),
+            allocator.invariants(),
         ensures
             res is Ok ==> self.wf(),
     {
@@ -415,7 +447,7 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
-        mem_set.insert(alloc, region);
+        mem_set.insert(allocator, region);
         proof {
             let tracked ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state } = content;
             // Targeted assumptions for the new ClosureProtocol::insert_region preconditions.
@@ -439,12 +471,14 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
     /// Returns `Err(())` if `region` is invalid or no region starts at `region.start`.
     pub fn remove_region(
         &self,
-        alloc: &GlobalAllocator<A>,
+        allocator: &GlobalAllocator<A>,
         Tracked(gs): Tracked<&mut ClosureGlobalState>,
         region: MemoryRegion,
     ) -> (res: Result<(), ()>)
         requires
             self.wf(),
+            self.lock.k@.alloc_inst_id == allocator.inst_id(),
+            allocator.invariants(),
         ensures
             res is Ok ==> self.wf(),
     {
@@ -458,7 +492,7 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
-        mem_set.remove(alloc, region.start);
+        mem_set.remove(allocator, region.start);
         proof {
             let tracked ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state } = content;
             let tracked new_zone_state = ClosureProtocol::remove_region(gs, zone_state, region);
