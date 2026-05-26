@@ -139,6 +139,10 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
 
             birds_eye let x = pre.storage->0;
             withdraw storage -= Some(x);
+            // Expose the predicate for the withdrawn value as a transition postcondition.
+            // Follows from storage_inv: pre.storage is Some (withdraw requires it)
+            // => Pred::inv(pre.k, pre.storage->0) = Pred::inv(pre.k, x).
+            assert(Pred::inv(pre.k, x)) by {};
         }
     }
 
@@ -169,14 +173,33 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
         read_match(x: V, y: V) {
             have reader >= {x};
             have reader >= {y};
-            assert(equal(x, y));
+            assert(equal(x, y)) by {
+                assert(equal(pre.storage, Some(x)));
+                assert(equal(pre.storage, Some(y)));
+            };
+        }
+    }
+
+    property!{
+        reader_element_pred(x: V) {
+            have reader >= {x};
+            assert(Pred::inv(pre.k, x)) by {
+                assert(equal(pre.storage, Some(x)));
+            };
         }
     }
 
     property!{
         write_locked_implies_real_rc_is_zero() {
             have writer >= Some(());
-            assert(pre.flag_real_rc == 0);
+            assert(pre.flag_real_rc == 0) by {
+                assert(pre.storage is None);
+                assert(pre.reader.count(pre.storage->0) == 0) by {
+                    if pre.reader.count(pre.storage->0) > 0 {
+                        assert(equal(pre.storage, Some(pre.storage->0)));
+                    }
+                };
+            };
         }
     }
 
@@ -393,7 +416,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
             self.wf(),
         ensures
             res.wf(self),
-            self.inv(res.view()),
+            self.inv(res@),
     {
         let mut done = false;
         let tracked mut pending_writer_token: Option<RwPendingWriterToken<K, V, Pred>> = None;
@@ -429,6 +452,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
             ensures
                 write_handle_opt is Some,
                 write_handle_opt->Some_0.wf(self),
+                self.inv(write_handle_opt->Some_0.view()),
         {
             let tracked mut handle_opt: Option<RwWriterToken<K, V, Pred>> = None;
             let tracked mut token_opt: Option<V> = None;
@@ -444,9 +468,12 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                             None => proof_from_false(),
                         };
                         // Consume pending_writer token and produce writer token.
+                        // acquire_exc_end asserts Pred::inv(k, x) on the withdrawn value,
+                        // so exc_token satisfies the predicate as a transition postcondition.
                         let tracked res = self.inst.borrow().acquire_exc_end(&g, pw_token);
                         let tracked exc_handle = res.2.get();
                         let tracked exc_token = res.1.get();
+                        assert(Pred::inv(self.k@, exc_token));
                         pending_writer_token = None;
                         handle_opt = Some(exc_handle);
                         token_opt = Some(exc_token);
@@ -463,6 +490,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                     Some(t) => t,
                     None => proof_from_false(),
                 };
+                assert(self.inv(token));
 
                 let _ =
                     atomic_with_ghost!(
@@ -591,12 +619,15 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
 
                     match result {
                         Ok(_) => {
+                            let tracked handle = match handle_opt {
+                                Some(t) => t,
+                                None => proof_from_false(),
+                            };
+                            proof {
+                                self.inst.borrow().reader_element_pred(handle.element(), &handle);
+                            }
                             let read_handle = RwReadGuard {
-                                handle: Tracked(match handle_opt {
-                                    Some(t) => t,
-                                    None => proof_from_false(),
-                                }),
-
+                                handle: Tracked(handle),
                             };
                             read_handle_opt = Some(read_handle);
                             break;
@@ -694,7 +725,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwWriteGuard<K, V, Pred> {
         &&& self.handle@.instance_id() == rwlock.inst@.id()
     }
 
-    /// Ghost view of the stored value (used in `rwlock.inv(guard.view())`).
+    /// Ghost view of the stored value.
     pub open spec fn view(self) -> V {
         self.token@
     }
@@ -708,19 +739,21 @@ pub struct RwReadGuard<K, V, Pred: InvariantPredicate<K, V>> {
 impl<K, V, Pred: InvariantPredicate<K, V>> RwReadGuard<K, V, Pred> {
     pub open spec fn wf(self, rwlock: &RwLock<K, V, Pred>) -> bool {
         &&& self.handle@.instance_id() == rwlock.inst@.id()
+        &&& rwlock.inv(self.handle@.element())
     }
 
     pub fn borrow(&self, rwlock: &RwLock<K, V, Pred>) -> (res: Tracked<&V>)
         requires
             self.wf(rwlock),
         ensures
-            *res@ =~= self.handle@.element()
+            *res@ =~= self.handle@.element(),
+            Pred::inv(rwlock.k@, *res@),
     {
-        let tracked pair = rwlock.inst.borrow().read_guard(
+        let tracked val = rwlock.inst.borrow().read_guard(
             self.handle@.element(),
             self.handle.borrow(),
         );
-        Tracked(pair)
+        Tracked(val)
     }
 }
 
