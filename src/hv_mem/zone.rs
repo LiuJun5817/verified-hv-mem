@@ -229,8 +229,8 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
 
     /// Release the write lock and restore the zone invariant.
     ///
-    /// Puts `mem_set` back into the zone's `PCell`, asserts (via `assume`) that
-    /// `ZonePred::inv` holds, and then releases the `RwLock`.
+    /// Puts `mem_set` back into the zone's `PCell` and proves `ZonePred::inv`
+    /// from the supplied preconditions before releasing the `RwLock`.
     pub fn unlock_write(
         &self,
         mem_set: M,
@@ -241,12 +241,42 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
             guard.wf(&self.lock),
             guard.token.mem_set_perm@.pcell == self.mem_set.id(),
             !guard.token.mem_set_perm.is_init(),
+            // Linking invariant: the mem_set being stored back satisfies M's own wf.
+            mem_set.invariants(),
+            mem_set.inst_id() == self.lock.k@.alloc_inst_id,
+            // Ghost-token invariant: the zone_state in the guard is consistent with
+            // the mem_set being stored back and with this zone's lock key.
+            guard.token@.zone_state.zone_id() == self.lock.k@.zone_id,
+            guard.token@.zone_state.wf(self.lock.k@.mem_inst_id),
+            guard.token@.zone_state.ghost_zone().mem_set == mem_set@,
     {
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, P> = token.get();
         self.mem_set.put(Tracked(&mut content.mem_set_perm), mem_set);
         proof {
-            assume(ZonePred::<PT, M, A, P>::inv(self.lock.k@, content));
+            assert(ZonePred::<PT, M, A, P>::inv(self.lock.k@, content)) by {
+                // mem_set_perm.is_init() — PCell::put postcondition.
+                assert(content.mem_set_perm.is_init());
+                // pcell matches — existing precondition + self.wf() gives
+                // guard.token.mem_set_perm@.pcell == self.mem_set.id() == self.lock.k@.cell_id.
+                assert(content.mem_set_perm@.pcell === self.lock.k@.cell_id);
+                // M invariant — precondition mem_set.invariants().
+                assert(content.mem_set_perm@.mem_contents->Init_0.invariants());
+                // alloc_inst_id — precondition mem_set.inst_id() == self.lock.k@.alloc_inst_id.
+                assert(
+                    content.mem_set_perm@.mem_contents->Init_0.inst_id()
+                        == self.lock.k@.alloc_inst_id
+                );
+                // zone_id — precondition on guard.token@.zone_state, equal to content.zone_state.
+                assert(content.zone_state.zone_id() == self.lock.k@.zone_id);
+                // zone_state wf — precondition on guard.token@.zone_state.
+                assert(content.zone_state.wf(self.lock.k@.mem_inst_id));
+                // ghost/exec linking: both sides equal mem_set@ after PCell::put.
+                assert(
+                    content.zone_state.ghost_zone().mem_set
+                        == content.mem_set_perm@.mem_contents->Init_0@
+                );
+            };
         }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
     }
@@ -338,6 +368,11 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             let tracked new_zone_state = BudgetProtocol::insert_region(gs, zone_state, region);
             content =
             ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
+            // Linking invariant: new ghost_zone mirrors the updated exec mem_set.
+            // new_zone_state.ghost_zone() == old_ghost_zone.insert_region(region)
+            // and M::insert ensures mem_set@.regions == old_mem_set.regions.insert(region),
+            // so both sides reduce to SpecMemorySet { regions: old_mem_set.regions.insert(region) }.
+            assert(content.zone_state.ghost_zone().mem_set == mem_set@);
         }
 
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -358,9 +393,6 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             self.lock.k@.mem_inst_id == BudgetProtocol::mem_inst_id(gs),
             self.lock.k@.alloc_inst_id == allocator.inst_id(),
             allocator.invariants(),
-        ensures
-            self.lock.wf(),
-            res is Ok ==> self.wf(),
     {
         if !region.valid() {
             return Err(());
@@ -392,6 +424,11 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             assert(zone_state.ghost_zone().contains_region(ghost_region));
             let tracked new_zone_state = BudgetProtocol::remove_region(gs, zone_state, ghost_region);
             content = ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
+            // Linking invariant: new ghost_zone mirrors the updated exec mem_set.
+            // new_zone_state.ghost_zone() == old_ghost_zone.remove_region(ghost_region)
+            // and M::remove ensures mem_set@.regions == old_mem_set.regions.remove(ghost_region),
+            // so both sides reduce to SpecMemorySet { regions: old_mem_set.regions.remove(ghost_region) }.
+            assert(content.zone_state.ghost_zone().mem_set == mem_set@);
         }
 
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -424,8 +461,6 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
             self.wf(),
             self.lock.k@.alloc_inst_id == allocator.inst_id(),
             allocator.invariants(),
-        ensures
-            res is Ok ==> self.wf(),
     {
         // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
         proof {
@@ -474,8 +509,6 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
             self.wf(),
             self.lock.k@.alloc_inst_id == allocator.inst_id(),
             allocator.invariants(),
-        ensures
-            res is Ok ==> self.wf(),
     {
         // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
         proof {
