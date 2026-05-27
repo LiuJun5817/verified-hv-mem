@@ -15,8 +15,6 @@
 //!   - `protocol::strong`: assumption-2 ghost state (`BudgetGlobalState`) + `BudgetProtocol`.
 //! - `config`: zone configuration types and conversion to `MemoryRegion`.
 //! - `mod` (this file): `ZoneWriteGuard`, `HvMem` — the global exec orchestration layer.
-extern crate alloc;
-
 mod config;
 pub mod protocol;
 pub mod spec;
@@ -31,7 +29,6 @@ use crate::{
     page_table::{PTConstants, PageTable},
     sync::rwlock::{RwLock, RwReadGuard, RwReaderToken, RwWriteGuard, RwWriterToken},
 };
-use alloc::sync::Arc;
 use core::marker::PhantomData;
 use protocol::{BudgetProtocol, ClosureProtocol, ZoneGhostProtocol};
 use spec::budget::zone_budget;
@@ -68,7 +65,7 @@ pub tracked struct HvMemRwContent<PT, M, A, P> where
     P: ZoneGhostProtocol,
  {
     /// Permission to read/write the zone-list PCell.
-    pub zone_list_perm: PointsTo<Vec<Arc<Zone<PT, M, A, P>>>>,
+    pub zone_list_perm: PointsTo<Vec<Zone<PT, M, A, P>>>,
     /// Protocol-specific global ghost state (e.g. `ClosureGlobalState` for ClosureProtocol).
     pub global_state: P::GlobalState,
 }
@@ -155,7 +152,7 @@ pub struct HvMem<PT, M, A, P> where
     P: ZoneGhostProtocol,
  {
     /// Zone list — written only while the HvMem write guard is held.
-    pub zone_mem_list: PCell<Vec<Arc<Zone<PT, M, A, P>>>>,
+    pub zone_mem_list: PCell<Vec<Zone<PT, M, A, P>>>,
     /// RwLock protecting `HvMemRwContent<PT,M,A,P>` with `HvMemKey` predicate.
     pub lock: RwLock<HvMemKey, HvMemRwContent<PT, M, A, P>, HvMemPred<PT, M, A, P>>,
     /// Global allocator — already protected by its own `Mutex`.
@@ -275,14 +272,12 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
 
         // ── Step 3: assemble the new Zone with an empty MemorySet ─────────────
         let mem_set = M::new(&self.allocator, pt_constants);
-        let new_zone = Arc::new(
-            Zone::<PT, M, A, P>::new(
-                mem_set,
-                zid,
-                Ghost(mem_inst_id),
-                Ghost(self.allocator.inst_id()),
-                Tracked(zone_state),
-            ),
+        let new_zone = Zone::<PT, M, A, P>::new(
+            mem_set,
+            zid,
+            Ghost(mem_inst_id),
+            Ghost(self.allocator.inst_id()),
+            Tracked(zone_state),
         );
         // Snapshot the pre-push zone list for use in the postcondition proof.
         let ghost old_zones = zones@;
@@ -415,6 +410,8 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
         let zone = zones.swap_remove(i);
 
         // ── Step 4: extract zone token and M from the zone ────────────────────
+        // `zone` is an exclusively-owned value here (no Arc copies exist), so
+        // acquiring the write lock cannot deadlock.
         let zone_guard = zone.lock.lock_write();
         let RwWriteGuard { handle: zone_handle, token: zone_token } = zone_guard;
         let tracked mut zone_content: ZoneRwContent<M, P> = zone_token.get();
@@ -467,16 +464,22 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
         Ok(())
     }
 
-    /// Look up the zone with the given `zid` and return an `Arc` clone if found.
+    /// Access the zone identified by `zid` via a scoped callback.
     ///
-    /// Acquires only a **read lock**, allowing concurrent lookups from multiple CPUs.
-    pub fn find_zone(&self, zid: usize) -> (res: Option<Arc<Zone<PT, M, A, P>>>)
+    /// Holds the HvMem **read** lock for the entire duration of the callback:
+    /// - Multiple CPUs may call `with_zone` concurrently (multiple readers allowed).
+    /// - `remove_zone` (a writer) is excluded while any callback is running, so
+    ///   the zone reference passed to `f` is guaranteed to remain valid.
+    ///
+    /// Returns `None` if no zone with `zid` is registered; otherwise calls `f`
+    /// with a shared reference to the matching zone and returns `Some(f(zone))`.
+    pub fn with_zone<R, F: FnOnce(&Zone<PT, M, A, P>) -> R>(&self, zid: usize, f: F) -> (res:
+        Option<R>)
         requires
             self.invariants(),
-        ensures
-            res.is_some() ==> res.unwrap().wf() && res.unwrap().zone_id == zid,
+            forall|zone: &Zone<PT, M, A, P>| #[trigger] f.requires((zone,)) == zone.wf(),
     {
-        // ── Acquire HvMem read lock (allows concurrent lookups) ───────────────
+        // ── Acquire HvMem read lock ───────────────────────────────────────────
         let guard = self.lock.lock_read();
 
         // ── Borrow the zone list via the lock's ghost predicate ───────────────
@@ -503,14 +506,12 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
             }
             i += 1;
         }
+
+        // ── Invoke callback while the read lock is held ───────────────────────
+        // The borrow of `zones[i]` ends when `f` returns (R does not borrow from
+        // the zone), so `unlock_read` can safely consume `guard` afterwards.
         let result = if i < zones.len() {
-            let zone = zones[i].clone();
-            proof {
-                // Arc::clone gives the same inner Zone; spec field access deref through Arc.
-                assert(zone.zone_id == zid);
-                assert(zone.wf());
-            }
-            Some(zone)
+            Some(f(&zones[i]))
         } else {
             None
         };
