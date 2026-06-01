@@ -1,5 +1,5 @@
 //! Page table memory read/write utilities and permission assumptions.
-use crate::global_allocator::{frame_is_empty, Frame4KPerm};
+use crate::global_allocator::{Frame4KPerm, frame_is_empty};
 use vstd::prelude::*;
 use vstd::simple_pptr::PointsTo;
 

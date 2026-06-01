@@ -4,8 +4,8 @@
 //!   `zone_ids` + `region_closure` tokens).
 //! - [`ClosureProtocol`]: `ZoneGhostProtocol` implementation for assumption 1.
 use super::super::spec::{
-    all_regions, ClosureRegionToken, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
-    GhostZone,
+    ClosureRegionToken, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken, GhostZone,
+    all_regions,
 };
 use super::{ZoneGhostProtocol, ZoneStateOps};
 use crate::address::region::MemoryRegion;
@@ -29,12 +29,12 @@ impl ZoneStateOps for ClosureZoneState {
     open spec fn zone_id(&self) -> nat {
         self.zone_tok.key()
     }
-    
+
     /// The ghost zone state (value in the `zones` map sharding).
     open spec fn ghost_zone(&self) -> GhostZone {
         self.zone_tok.value()
     }
-    
+
     /// Well-formedness: the zone token belongs to the given `ClosureSpec` instance.
     open spec fn wf(&self, mem_inst_id: InstanceId) -> bool {
         self.zone_tok.instance_id() == mem_inst_id
@@ -163,7 +163,7 @@ impl ClosureGlobalState {
             region.spec_valid(),
             all_regions().contains(region),
             !old(self).region_closure().contains(region),
-            !zone_state.ghost_zone().mem_set.overlaps_vmem(region),
+            !zone_state.ghost_zone().cpu_mem_set.overlaps_vmem(region),
         ensures
             self.wf(),
             self.mem_inst_id() == old(self).mem_inst_id(),
@@ -269,7 +269,7 @@ impl ClosureProtocol {
             region.spec_valid(),
             all_regions().contains(region),
             !old(gs).region_closure().contains(region),
-            !zt.ghost_zone().mem_set.overlaps_vmem(region),
+            !zt.ghost_zone().cpu_mem_set.overlaps_vmem(region),
         ensures
             gs.wf(),
             gs.mem_inst_id() == old(gs).mem_inst_id(),

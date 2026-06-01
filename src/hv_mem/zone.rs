@@ -11,7 +11,7 @@ use super::protocol::{
     ClosureZoneState, ZoneGhostProtocol, ZoneStateOps,
 };
 use super::spec::{
-    budget::zone_budget, closure::all_regions, BudgetZoneToken, ClosureZoneToken, GhostZone,
+    BudgetZoneToken, ClosureZoneToken, GhostZone, budget::zone_regions, closure::all_regions,
 };
 use crate::{
     address::region::MemoryRegion,
@@ -91,7 +91,7 @@ impl<PT, M, A, P> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePred<
         &&& v.mem_set_perm@.mem_contents->Init_0.inst_id() == k.alloc_inst_id
         &&& v.zone_state.zone_id() == k.zone_id
         &&& v.zone_state.wf(k.mem_inst_id)
-        &&& v.zone_state.ghost_zone().mem_set == v.mem_set_perm@.mem_contents->Init_0@
+        &&& v.zone_state.ghost_zone().cpu_mem_set == v.mem_set_perm@.mem_contents->Init_0@
     }
 }
 
@@ -219,7 +219,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
             !res.1.token.mem_set_perm.is_init(),
             res.1.token@.zone_state.zone_id() == self.lock.k@.zone_id,
             res.1.token@.zone_state.wf(self.lock.k@.mem_inst_id),
-            res.1.token@.zone_state.ghost_zone().mem_set == res.0@,
+            res.1.token@.zone_state.ghost_zone().cpu_mem_set == res.0@,
     {
         let RwWriteGuard { handle, token } = self.lock.lock_write();
         let tracked mut content: ZoneRwContent<M, P> = token.get();
@@ -248,7 +248,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
             // the mem_set being stored back and with this zone's lock key.
             guard.token@.zone_state.zone_id() == self.lock.k@.zone_id,
             guard.token@.zone_state.wf(self.lock.k@.mem_inst_id),
-            guard.token@.zone_state.ghost_zone().mem_set == mem_set@,
+            guard.token@.zone_state.ghost_zone().cpu_mem_set == mem_set@,
     {
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, P> = token.get();
@@ -273,7 +273,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
                 assert(content.zone_state.wf(self.lock.k@.mem_inst_id));
                 // ghost/exec linking: both sides equal mem_set@ after PCell::put.
                 assert(
-                    content.zone_state.ghost_zone().mem_set
+                    content.zone_state.ghost_zone().cpu_mem_set
                         == content.mem_set_perm@.mem_contents->Init_0@
                 );
             };
@@ -339,7 +339,7 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             self.lock.k@.mem_inst_id == BudgetProtocol::mem_inst_id(gs),
             self.lock.k@.alloc_inst_id == allocator.inst_id(),
             allocator.invariants(),
-            zone_budget(self.zone_id as nat).contains(region),
+            zone_regions(self.zone_id as nat).contains(region),
     {
         if !region.valid() {
             return Err(());
@@ -360,19 +360,19 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             // Targeted assumptions for BudgetProtocol::insert_region preconditions.
             // zone_state.wf is derived from lock_write postcondition + mem_inst_id precondition.
             assert(zone_state.wf(gs.mem_inst_id()));
-            assert(zone_state.ghost_zone().mem_set == old_mem_set);
+            assert(zone_state.ghost_zone().cpu_mem_set == old_mem_set);
             assert(!zone_state.ghost_zone().contains_region(region));
-            assert(!zone_state.ghost_zone().mem_set.overlaps_vmem(region));
+            assert(!zone_state.ghost_zone().cpu_mem_set.overlaps_vmem(region));
             // Budget membership is trusted configuration; !contains_region and
             // !overlaps_vmem are confirmed (exec-side) before reaching this point.
-            let tracked new_zone_state = BudgetProtocol::insert_region(gs, zone_state, region);
+            let tracked new_zone_state = BudgetProtocol::cpu_insert_region(gs, zone_state, region);
             content =
             ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
             // Linking invariant: new ghost_zone mirrors the updated exec mem_set.
             // new_zone_state.ghost_zone() == old_ghost_zone.insert_region(region)
             // and M::insert ensures mem_set@.regions == old_mem_set.regions.insert(region),
             // so both sides reduce to SpecMemorySet { regions: old_mem_set.regions.insert(region) }.
-            assert(content.zone_state.ghost_zone().mem_set == mem_set@);
+            assert(content.zone_state.ghost_zone().cpu_mem_set == mem_set@);
         }
 
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -414,21 +414,21 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             assert(zone_state.wf(gs.mem_inst_id()));
             // The linking invariant (surfaced by lock_write) connects the ghost zone's
             // region set to the exec mem_set at the point the lock was acquired.
-            assert(zone_state.ghost_zone().mem_set == old_mem_set);
+            assert(zone_state.ghost_zone().cpu_mem_set == old_mem_set);
             // The exec check guarantees a region starts at region.start, so the ghost
             // zone also has one — they are in sync by the linking invariant.
-            assert(zone_state.ghost_zone().mem_set.has_region_starting_at(region.start@));
+            assert(zone_state.ghost_zone().cpu_mem_set.has_region_starting_at(region.start@));
             // Derive the ghost region from the zone's own view; no assume needed.
             let ghost ghost_region = choose|r: MemoryRegion| #[trigger]
-                zone_state.ghost_zone().mem_set.regions.contains(r) && r.start@ == region.start@;
+                zone_state.ghost_zone().cpu_mem_set.regions.contains(r) && r.start@ == region.start@;
             assert(zone_state.ghost_zone().contains_region(ghost_region));
-            let tracked new_zone_state = BudgetProtocol::remove_region(gs, zone_state, ghost_region);
+            let tracked new_zone_state = BudgetProtocol::cpu_remove_region(gs, zone_state, ghost_region);
             content = ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
             // Linking invariant: new ghost_zone mirrors the updated exec mem_set.
             // new_zone_state.ghost_zone() == old_ghost_zone.remove_region(ghost_region)
             // and M::remove ensures mem_set@.regions == old_mem_set.regions.remove(ghost_region),
             // so both sides reduce to SpecMemorySet { regions: old_mem_set.regions.remove(ghost_region) }.
-            assert(content.zone_state.ghost_zone().mem_set == mem_set@);
+            assert(content.zone_state.ghost_zone().cpu_mem_set == mem_set@);
         }
 
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -484,7 +484,7 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
             // These conditions are checked exec-side (valid/overlaps) or are trusted
             // configuration properties (all_regions membership, !region_closure).
             assume(!zone_state.ghost_zone().contains_region(region));
-            assume(!zone_state.ghost_zone().mem_set.overlaps_vmem(region));
+            assume(!zone_state.ghost_zone().cpu_mem_set.overlaps_vmem(region));
             assume(region.spec_valid());
             assume(all_regions().contains(region));
             assume(!gs.region_closure().contains(region));

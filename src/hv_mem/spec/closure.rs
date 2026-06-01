@@ -169,7 +169,7 @@ tokenized_state_machine! {
         /// P2 (ZoneIsolated): every mapped translation in a zone stays within the declaring
         /// region's physical range.
         ///
-        /// Derivation: `inv_zones_wf` gives `zone.wf()` which includes `zone.mem_set.wf()`,
+        /// Derivation: `inv_zones_wf` gives `zone.wf()` which includes `zone.cpu_mem_set.wf()`,
         /// so every region `r` in the zone satisfies `r.spec_valid()`.  For any virtual
         /// address `v` mapped in the zone, `SpecMemorySet::translate` chooses the same `r`
         /// that `contains_vaddr` witnesses.  `MemoryRegion::lemma_contains_vaddr_implies_contains_paddr`
@@ -177,17 +177,17 @@ tokenized_state_machine! {
         property! {
             zone_isolated(zid: nat, zone: GhostZone, v: SpecVAddr) {
                 have zones >= [zid => zone];
-                require(zone.mem_set.contains_vaddr(v));
+                require(zone.cpu_mem_set.contains_vaddr(v));
                 assert(zone.wf());
                 assert({
-                    let paddr = zone.mem_set.translate(v);
+                    let paddr = zone.cpu_mem_set.translate(v);
                     let r = choose|r: MemoryRegion|
                         #[trigger] zone.regions().contains(r) && r.spec_contains_vaddr(v);
                     r.spec_contains_paddr(paddr)
                 }) by {
-                    // inv_zones_wf => zone.wf() => zone.mem_set.wf()
-                    let paddr = zone.mem_set.translate(v);
-                    assert(zone.mem_set.wf());
+                    // inv_zones_wf => zone.wf() => zone.cpu_mem_set.wf()
+                    let paddr = zone.cpu_mem_set.translate(v);
+                    assert(zone.cpu_mem_set.wf());
                     assert(exists|r: MemoryRegion| #[trigger] zone.regions().contains(r) && r.spec_contains_vaddr(v));
                     let r = choose|r: MemoryRegion| #[trigger]
                         zone.regions().contains(r) && r.spec_contains_vaddr(v);
@@ -216,7 +216,8 @@ tokenized_state_machine! {
                 require(!pre.zone_ids.contains(zid));
                 update zone_ids = pre.zone_ids.insert(zid);
                 add zones += [zid => GhostZone {
-                    mem_set: SpecMemorySet { regions: Set::empty() },
+                    cpu_mem_set: SpecMemorySet { regions: Set::empty() },
+                    iommu_mem_set: SpecMemorySet { regions: Set::empty() },
                 }];
                 // region_closure is unchanged — empty zone contributes no regions.
             }
@@ -248,7 +249,7 @@ tokenized_state_machine! {
                 remove zones -= [zid => let zone];
                 require(region.spec_valid());
                 require(all_regions().contains(region));
-                require(!zone.mem_set.overlaps_vmem(region));
+                require(!zone.cpu_mem_set.overlaps_vmem(region));
                 require(!pre.region_closure.contains(region));
                 add zones += [zid => zone.insert_region(region)];
                 update region_closure = pre.region_closure.insert(region);
@@ -392,7 +393,7 @@ tokenized_state_machine! {
                     assert(old_zone.wf());
 
                     assert(new_zone == old_zone.insert_region(region));
-                    // old_zone.wf() includes old_zone.mem_set.wf(), which gives validity of all
+                    // old_zone.wf() includes old_zone.cpu_mem_set.wf(), which gives validity of all
                     // regions in old_zone, so the new zone with one more valid region is still wf.
                     assert forall|r| #[trigger] new_zone.regions().contains(r) implies r.spec_valid() by {
                         if r != region {
@@ -417,7 +418,7 @@ tokenized_state_machine! {
                             assert(!r1.spec_overlaps_vmem(r2));
                         }
                     }
-                    assert(new_zone.mem_set.wf());
+                    assert(new_zone.cpu_mem_set.wf());
                     assert(new_zone.wf());
                 } else {
                     assert(post.zones[zid2] == pre.zones[zid2]);

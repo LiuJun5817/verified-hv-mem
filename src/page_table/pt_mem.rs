@@ -9,8 +9,8 @@ use crate::{
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::{
-        frame_is_empty, inst_base, ClientState, Frame4KPerm, FrameID, GlobalAllocator,
-        SPEC_FRAME_SIZE,
+        ClientState, Frame4KPerm, FrameID, GlobalAllocator, SPEC_FRAME_SIZE, frame_is_empty,
+        inst_base,
     },
     page_table::{
         pt_arch::{PTArch, SpecPTArch},

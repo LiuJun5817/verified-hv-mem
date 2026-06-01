@@ -1,8 +1,8 @@
-use vstd::prelude::*;
 use super::{
     addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
     frame::MemAttr,
 };
+use vstd::prelude::*;
 
 verus! {
 
@@ -40,7 +40,7 @@ impl MemoryRegion {
     {
         self.start@.offset(self.pages as nat * SPEC_PAGE_SIZE)
     }
-    
+
     /// Spec-mode check if a virtual address is within the region.
     pub open spec fn spec_contains_vaddr(self, vaddr: SpecVAddr) -> bool {
         self.start@.0 <= vaddr.0 < self.start@.0 + (self.pages as nat) * SPEC_PAGE_SIZE
@@ -78,7 +78,7 @@ impl MemoryRegion {
         let self_end = self.mapper.spec_map(self.spec_end());
         let other_start = other.mapper.spec_map(other.start@);
         let other_end = other.mapper.spec_map(other.spec_end());
-        
+
         if self_start.0 <= other_start.0 {
             self_end.0 > other_start.0
         } else {
@@ -143,7 +143,7 @@ impl MemoryRegion {
         let self_end = self.mapper.map(self.end());
         let other_start = other.mapper.map(other.start);
         let other_end = other.mapper.map(other.end());
-        
+
         if self_start.0 <= other_start.0 {
             self_end.0 > other_start.0
         } else {

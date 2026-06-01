@@ -1,6 +1,6 @@
+use super::bitmap_impl::{BitAlloc, BitAlloc16, BitAllocView};
 use core::ops::Range;
 use vstd::{prelude::*, seq_lib::*};
-use super::bitmap_impl::{BitAlloc, BitAlloc16, BitAllocView};
 
 verus! {
 
@@ -100,7 +100,7 @@ pub trait BitmapAllocator {
             self@ == old(self)@.update(key as int, true),
             self.wf(),
     ;
-    
+
     broadcast proof fn lemma_view_len_is_cap(self)
         requires
             self.wf(),

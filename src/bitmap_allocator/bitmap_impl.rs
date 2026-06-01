@@ -5,9 +5,7 @@ use vstd::{prelude::*, seq_lib::*};
 /// Macro to get a specific bit from a u16 value.
 /// Returns true if the bit at the given index is 1, false otherwise.
 macro_rules! get_bit16_macro {
-    ($a:expr, $b:expr) => {{
-        (($a >> $b) & 0x1u16) == 1u16
-    }};
+    ($a:expr, $b:expr) => {{ (($a >> $b) & 0x1u16) == 1u16 }};
 }
 
 /// Verus-proof-wrapped version of `get_bit16_macro`.

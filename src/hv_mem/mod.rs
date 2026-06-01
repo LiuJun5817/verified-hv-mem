@@ -31,7 +31,7 @@ use crate::{
 };
 use core::marker::PhantomData;
 use protocol::{BudgetProtocol, ClosureProtocol, ZoneGhostProtocol};
-use spec::budget::zone_budget;
+use spec::budget::zone_regions;
 use vstd::invariant::InvariantPredicate;
 use vstd::{
     cell::{CellId, PCell, PointsTo},
@@ -546,7 +546,7 @@ impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
     pub fn insert_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
         requires
             self.invariants(),
-            zone_budget(zid as nat).contains(region),
+            zone_regions(zid as nat).contains(region),
         ensures
             res is Ok ==> self.invariants(),
     {

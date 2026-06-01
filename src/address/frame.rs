@@ -152,7 +152,7 @@ pub enum MemType {
 
 impl MemType {
     /// Convert to MemAttr.
-    /// 
+    ///
     /// TODO: need further check.
     pub fn to_attr(&self) -> MemAttr {
         match self {
