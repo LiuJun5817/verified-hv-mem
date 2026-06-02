@@ -1,6 +1,5 @@
 //! Executable page table implementation.
 use core::{alloc, marker::PhantomData};
-use std::alloc::Allocator;
 use vstd::prelude::*;
 use vstd::tokens::InstanceId;
 

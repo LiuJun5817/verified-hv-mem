@@ -8,6 +8,7 @@ pub mod page_table;
 pub mod global_allocator;
 pub mod hv_mem;
 pub mod sync;
+pub mod machine;
 
 verus! {
 
