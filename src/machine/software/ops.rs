@@ -7,15 +7,33 @@ verus! {
 
 /// Specification trait for hypervisor software state management.
 ///
-/// Any concrete type `T: View<V = SwView>` that implements this trait provides
-/// exec-level operations whose observable effect on the abstract view is
-/// exactly characterised by the matching [`SwView`] step predicate.
-pub trait SoftwareOps: View<V = SwView> {
+/// This is a **ghost contract**: a concrete type `T: View<V = SwView>`
+/// represents the hypervisor's abstract memory state, and each transition is a
+/// `proof fn` whose observable effect on the view is characterised by the
+/// matching [`SwView`] step predicate.
+///
+/// The transitions take `self` **by value** (returning the post-state `Self`)
+/// rather than `&mut self`: the implementing type is a pure-ghost value, and pure
+/// ghost values have no mutability semantics — a transition is modelled as a
+/// function `pre ↦ post`.  The implementing type is `BudgetSpec::State` itself
+/// (see `crate::refinement`), so `invariants()` is the state machine's real
+/// `invariant()` rather than a separate copy.
+///
+/// ## Granularity
+///
+/// Operations are **region-bulk** (`insert_region` / `remove_region`) plus VM
+/// lifecycle (`add_vm` / `remove_vm`), matching what the hypervisor realizes and
+/// what is derivable from the region-only budget state.  Per-page `map` / `unmap`
+/// are *not* trait methods: they are not realizable from region-only state.  They
+/// survive as the [`SwView`] step predicates that define a region step's meaning
+/// (`SwView::insert_region_step` is the composition of the per-page `map_step` /
+/// `assign_page_step`).
+pub trait SoftwareOps: View<V = SwView> + Sized {
     // ------------------------------------------------------------------
     // Invariant
     // ------------------------------------------------------------------
-    /// Internal consistency predicate.  Implementations must establish this
-    /// at construction and preserve it across all operations.
+    /// Internal consistency predicate.  Implementations must establish this at
+    /// construction and preserve it across all transitions.
     spec fn invariants(&self) -> bool;
 
     /// Invariants imply the abstract state is well-formed.
@@ -27,81 +45,76 @@ pub trait SoftwareOps: View<V = SwView> {
     ;
 
     // ------------------------------------------------------------------
-    // Stage-2 mapping management
+    // VM lifecycle
     // ------------------------------------------------------------------
-    /// Install (or replace) the stage-2 mapping for `(vm, gpa)`.
-    fn map(&mut self, vm: Ghost<VmId>, gpa: Ghost<GuestPage>, entry: Ghost<S2Entry>)
+    /// Register a fresh, empty VM.
+    proof fn add_vm(self, vm: VmId) -> (post: Self)
         requires
-            old(self).invariants(),
-            old(self)@.all_vms.contains(vm@),
-            old(self)@.owned_or_shared(vm@, entry@.page),
-        ensures
             self.invariants(),
-            SwView::map_step(old(self)@, self@, vm@, gpa@, entry@),
+            !self@.all_vms.contains(vm),
+        ensures
+            post.invariants(),
+            SwView::add_vm_step(self@, post@, vm),
     ;
 
-    /// Remove the stage-2 mapping for `(vm, gpa)`.
-    fn unmap(&mut self, vm: Ghost<VmId>, gpa: Ghost<GuestPage>)
+    /// Deregister a VM that owns no pages and has no stage-2 mappings.
+    proof fn remove_vm(self, vm: VmId) -> (post: Self)
         requires
-            old(self).invariants(),
-            old(self)@.s2_map.contains_key(VmPageKey::new(vm@, gpa@)),
-        ensures
             self.invariants(),
-            SwView::unmap_step(old(self)@, self@, vm@, gpa@),
-    ;
-
-    // ------------------------------------------------------------------
-    // Page ownership management
-    // ------------------------------------------------------------------
-    /// Transfer `page` from the hypervisor pool to `vm`.
-    fn assign_page(&mut self, vm: Ghost<VmId>, page: Ghost<PhysPage>)
-        requires
-            old(self).invariants(),
-            old(self)@.all_vms.contains(vm@),
-            old(self)@.hypervisor_owned.contains(page@),
+            self@.all_vms.contains(vm),
+            self@.vm_owned[vm] == Set::<PhysPage>::empty(),
+            forall|k: VmPageKey| #[trigger] self@.s2_map.contains_key(k) ==> k.vm != vm,
         ensures
-            self.invariants(),
-            SwView::assign_page_step(old(self)@, self@, vm@, page@),
-    ;
-
-    /// Reclaim `page` from `vm` back to the hypervisor pool.
-    fn reclaim_page(&mut self, vm: Ghost<VmId>, page: Ghost<PhysPage>)
-        requires
-            old(self).invariants(),
-            old(self)@.all_vms.contains(vm@),
-            old(self)@.vm_owned.contains_key(vm@) && old(self)@.vm_owned[vm@].contains(page@),
-        ensures
-            self.invariants(),
-            SwView::reclaim_page_step(old(self)@, self@, vm@, page@),
+            post.invariants(),
+            SwView::remove_vm_step(self@, post@, vm),
     ;
 
     // ------------------------------------------------------------------
-    // Page sharing management
+    // Region operations (assign + map / unmap + reclaim)
     // ------------------------------------------------------------------
-    /// Establish a symmetric sharing edge for `page` between `left` and `right`.
-    fn share_page(&mut self, left: Ghost<VmId>, right: Ghost<VmId>, page: Ghost<PhysPage>)
+    /// Precondition for `insert_region`
+    spec fn insert_region_pre(
+        self,
+        vm: VmId,
+        pages: Set<PhysPage>,
+        entries: Map<VmPageKey, S2Entry>,
+    ) -> bool;
+
+    /// Assign `pages` (drawn from the hypervisor pool) to `vm` and install the
+    /// stage-2 `entries` for them.
+    proof fn insert_region(
+        self,
+        vm: VmId,
+        pages: Set<PhysPage>,
+        entries: Map<VmPageKey, S2Entry>,
+    ) -> (post: Self)
         requires
-            old(self).invariants(),
-            left@ != right@,
-            old(self)@.all_vms.contains(left@) && old(self)@.all_vms.contains(right@),
-            old(self)@.vm_owned.contains_key(left@) && old(self)@.vm_owned[left@].contains(page@),
-        ensures
             self.invariants(),
-            SwView::share_page_step(old(self)@, self@, left@, right@, page@),
+            self@.all_vms.contains(vm),
+            Self::insert_region_pre(self, vm, pages, entries),
+            forall|p: PhysPage| #[trigger] pages.contains(p) ==> self@.hypervisor_owned.contains(p),
+            forall|k: VmPageKey| #[trigger] entries.contains_key(k) ==> k.vm == vm,
+        ensures
+            post.invariants(),
+            SwView::insert_region_step(self@, post@, vm, pages, entries),
     ;
 
-    /// Remove the symmetric sharing edge for `page` between `left` and `right`.
-    fn unshare_page(&mut self, left: Ghost<VmId>, right: Ghost<VmId>, page: Ghost<PhysPage>)
+    /// Precondition for `remove_region` (implementor-defined, e.g. "`pages`/`keys`
+    /// are exactly some region currently present in the zone").
+    spec fn remove_region_pre(self, vm: VmId, pages: Set<PhysPage>, keys: Set<VmPageKey>) -> bool;
+
+    /// Unmap the `keys` and reclaim `pages` from `vm` back to the hypervisor pool.
+    proof fn remove_region(self, vm: VmId, pages: Set<PhysPage>, keys: Set<VmPageKey>) -> (post:
+        Self)
         requires
-            old(self).invariants(),
-            ({
-                let edge = SharedPage { left: left@, right: right@, page: page@ };
-                old(self)@.shared_pages.contains(edge)
-                    && old(self)@.shared_pages.contains(edge.reverse())
-            }),
-        ensures
             self.invariants(),
-            SwView::unshare_page_step(old(self)@, self@, left@, right@, page@),
+            self@.all_vms.contains(vm),
+            Self::remove_region_pre(self, vm, pages, keys),
+            forall|p: PhysPage| #[trigger] pages.contains(p) ==> self@.vm_owned[vm].contains(p),
+            forall|k: VmPageKey| #[trigger] keys.contains(k) ==> k.vm == vm,
+        ensures
+            post.invariants(),
+            SwView::remove_region_step(self@, post@, vm, pages, keys),
     ;
 }
 

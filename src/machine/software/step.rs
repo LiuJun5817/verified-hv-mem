@@ -107,6 +107,74 @@ impl SwView {
         &&& s2.s2_map == s1.s2_map
         &&& s2.shared_pages == s1.shared_pages.remove(edge).remove(edge.reverse())
     }
+
+    // -----------------------------------------------------------------------
+    // Region-bulk and VM-lifecycle steps
+    //
+    // These are the operations the hypervisor actually realizes (region-bulk,
+    // ownership = inserted regions; cf. `crate::refinement`).  Each region step
+    // is the finite composition of the per-page steps above.
+    // -----------------------------------------------------------------------
+    /// Register a fresh, empty VM (counterpart of `HvMem::add_zone`).
+    pub open spec fn add_vm_step(s1: SwView, s2: SwView, vm: VmId) -> bool {
+        &&& !s1.all_vms.contains(vm)
+        &&& s2.all_vms == s1.all_vms.insert(vm)
+        &&& s2.hypervisor_owned == s1.hypervisor_owned
+        &&& s2.vm_owned == s1.vm_owned.insert(vm, Set::empty())
+        &&& s2.shared_pages == s1.shared_pages
+        &&& s2.s2_map == s1.s2_map
+    }
+
+    /// Deregister an empty VM (counterpart of `HvMem::remove_zone`).
+    pub open spec fn remove_vm_step(s1: SwView, s2: SwView, vm: VmId) -> bool {
+        &&& s1.all_vms.contains(vm)
+        &&& s1.vm_owned[vm] == Set::<PhysPage>::empty()
+        &&& (forall|k: VmPageKey| #[trigger] s1.s2_map.contains_key(k) ==> k.vm != vm)
+        &&& s2.all_vms == s1.all_vms.remove(vm)
+        &&& s2.hypervisor_owned == s1.hypervisor_owned
+        &&& s2.vm_owned == s1.vm_owned.remove(vm)
+        &&& s2.shared_pages == s1.shared_pages
+        &&& s2.s2_map == s1.s2_map
+    }
+
+    /// Bulk assign + map a region's pages to `vm` (counterpart of
+    /// `HvMem::insert_region`).  `pages` are the physical pages moved from the
+    /// hypervisor pool; `entries` are the installed stage-2 entries.
+    pub open spec fn insert_region_step(
+        s1: SwView,
+        s2: SwView,
+        vm: VmId,
+        pages: Set<PhysPage>,
+        entries: Map<VmPageKey, S2Entry>,
+    ) -> bool {
+        &&& s1.all_vms.contains(vm)
+        &&& (forall|p: PhysPage| #[trigger] pages.contains(p) ==> s1.hypervisor_owned.contains(p))
+        &&& (forall|k: VmPageKey| #[trigger] entries.contains_key(k) ==> k.vm == vm)
+        &&& s2.all_vms == s1.all_vms
+        &&& s2.hypervisor_owned == s1.hypervisor_owned.difference(pages)
+        &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].union(pages))
+        &&& s2.shared_pages == s1.shared_pages
+        &&& s2.s2_map == s1.s2_map.union_prefer_right(entries)
+    }
+
+    /// Bulk unmap + reclaim a region's pages from `vm` (counterpart of
+    /// `HvMem::remove_region`).
+    pub open spec fn remove_region_step(
+        s1: SwView,
+        s2: SwView,
+        vm: VmId,
+        pages: Set<PhysPage>,
+        keys: Set<VmPageKey>,
+    ) -> bool {
+        &&& s1.all_vms.contains(vm)
+        &&& (forall|p: PhysPage| #[trigger] pages.contains(p) ==> s1.vm_owned[vm].contains(p))
+        &&& (forall|k: VmPageKey| #[trigger] keys.contains(k) ==> k.vm == vm)
+        &&& s2.all_vms == s1.all_vms
+        &&& s2.hypervisor_owned == s1.hypervisor_owned.union(pages)
+        &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].difference(pages))
+        &&& s2.shared_pages == s1.shared_pages
+        &&& s2.s2_map == s1.s2_map.remove_keys(keys)
+    }
 }
 
 } // verus!
