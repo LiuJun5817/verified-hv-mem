@@ -1,4 +1,4 @@
-//! Layer 4 — the refinement: `impl SoftwareOps for BudgetSpec::State`.
+//! The refinement: `impl SoftwareOps for BudgetSpec::State`.
 //!
 //! This is where the contract is met.  The decisive point: `invariants()` *is*
 //! `BudgetSpec::State::invariant()` (the machine's real, inductively-proven
@@ -16,8 +16,7 @@
 //! `lemma_state_owned_pages_disjoint` (the cross-zone half of `ownership_wf`) is
 //! proven here from the real `invariant()` + the budget axioms.
 //!
-//! Layering: [`super::geometry`] → [`super::view`] → [`super::transition`] → this.
-use super::geometry::*;
+//! Depends on the helper modules [`super::view`] and [`super::transition`].
 use super::transition::*;
 use super::view::*;
 use crate::address::region::MemoryRegion;
@@ -74,13 +73,17 @@ impl SoftwareOps for BudgetSpec::State {
 
     proof fn add_vm(self, vm: VmId) -> (post: Self) {
         let empty_zone = GhostZone {
-            mem_set: SpecMemorySet { regions: Set::<MemoryRegion>::empty() },
+            mem_set: SpecMemorySet {
+                regions: Set::<MemoryRegion>::empty(),
+                mappings: Map::empty(),
+            },
         };
         let post = BudgetSpec::State {
             zone_ids: self.zone_ids.insert(vm.0),
             zones: self.zones.insert(vm.0, empty_zone),
         };
         assert(empty_zone.regions() =~= Set::<MemoryRegion>::empty());
+        assert(empty_zone.mem_set.mappings =~= Map::empty());
         assert(empty_zone.wf());
         lemma_zone_owned_pages_empty(empty_zone);
         lemma_zone_s2_entries_empty(vm.0, empty_zone);
@@ -305,21 +308,11 @@ impl SoftwareOps for BudgetSpec::State {
             zones: self.zones.insert(zid, new_zone),
         };
 
-        // ── post.invariant(): removing a region only shrinks the zone ──────
+        // ── post.invariant(): removing a present region keeps the zone wf ──
         assert(new_zone.regions() =~= self.zones[zid].regions().remove(r));
-        assert(new_zone.wf()) by {
-            assert forall|rr: MemoryRegion|
-                #![auto]
-                new_zone.mem_set.regions.contains(rr) implies rr.spec_valid() by {
-                assert(self.zones[zid].mem_set.regions.contains(rr));
-            }
-            assert forall|r1: MemoryRegion, r2: MemoryRegion|
-                new_zone.mem_set.regions.contains(r1) && new_zone.mem_set.regions.contains(r2) && r1
-                    != r2 implies !r1.spec_overlaps_vmem(r2) by {
-                assert(self.zones[zid].mem_set.regions.contains(r1)
-                    && self.zones[zid].mem_set.regions.contains(r2));
-            }
-        }
+        assert(self.zones[zid].contains_region(r));
+        self.zones[zid].lemma_remove_region_wf(r);
+        assert(new_zone.wf());
         assert(post.zones.dom() =~= post.zone_ids);
         assert forall|z: nat| #![auto] post.zones.contains_key(z) implies post.zones[z].wf() by {
             if z != zid {
@@ -383,6 +376,12 @@ pub proof fn lemma_state_owned_pages_disjoint(s: BudgetSpec::State)
         if zone_owned_pages(s.zones[zid2]).contains(p) {
             let gz1 = s.zones[zid1];
             let gz2 = s.zones[zid2];
+            assert(gz1.wf());
+            assert(gz2.wf());
+
+            // Recover backing regions from the exposed mappings (exact-dense soundness).
+            lemma_zone_owned_pages_region_witness(gz1, p);
+            lemma_zone_owned_pages_region_witness(gz2, p);
 
             let r1 = choose|r: MemoryRegion|
                 #![trigger gz1.regions().contains(r)]
@@ -398,8 +397,6 @@ pub proof fn lemma_state_owned_pages_disjoint(s: BudgetSpec::State)
             let i2 = choose|i: nat| 0 <= i < r2.pages && region_phys_page(r2, i) == p;
             assert(0 <= i2 < r2.pages && region_phys_page(r2, i2) == p);
 
-            assert(gz1.wf());
-            assert(gz2.wf());
             assert(r1.spec_valid());
             assert(r2.spec_valid());
 

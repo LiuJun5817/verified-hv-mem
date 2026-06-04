@@ -12,10 +12,9 @@
 //! # Chosen architecture (project from the state machine's own state)
 //!
 //! The abstract state **is** `BudgetSpec::State` — the state machine's logical
-//! state (`zone_ids` + the per-zone `GhostZone` region sets) — not a hand-written
-//! twin.  `SwView` is a spec function of it (`sw_view_of` / `<BudgetSpec::State as
-//! View>::view`), and the contract `invariants()` is the machine's real
-//! `invariant()`.
+//! state (`zone_ids` + the per-zone `GhostZone` region sets). `SwView` is a spec 
+//! function of it (`<BudgetSpec::State as View>::view`), and the contract 
+//! `invariants()` is the machine's real `invariant()`.
 //!
 //! ```text
 //!   SoftwareOps              ghost contract; invariants() == BudgetSpec invariant()
@@ -28,10 +27,10 @@
 //!   HvMem  (fires BudgetSpec transitions via BudgetProtocol, behind locks)
 //! ```
 //!
-//! ## Why this is connected (not a twin)
+//! ## Why this is connected
 //!
 //! - `invariants()` is `BudgetSpec::State::invariant()`.  `inv_implies_wf` proves
-//!   `invariant() ⟹ sw_view_of(self).wf()`.  The macro guarantees `invariant()` at
+//!   `invariant() ⟹ self@.wf()`.  The macro guarantees `invariant()` at
 //!   **every reachable state**, so every reachable state is `wf` (hence secure).
 //! - `HvMem` already fires the real `BudgetSpec` transitions (via `BudgetProtocol`),
 //!   so the state it drives is always a reachable `BudgetSpec::State` — the same
@@ -51,27 +50,32 @@
 //! *define* a region step's meaning.  `share_page` / `unshare_page` are **out of
 //! scope**: `shared_pages ≡ ∅`.
 //!
-//! # Module layout (four layers, bottom-up)
+//! # Module layout
+//!
+//! This is a **single** refinement layer (`BudgetSpec::State` → `SwView`); the
+//! three modules below are just an organizational split of that one proof, not
+//! separate refinement layers:
 //!
 //! | module          | role                                                          |
 //! |-----------------|---------------------------------------------------------------|
-//! | [`geometry`]    | page-unit reconciliation: a region's pages / guest pages / s2 entries |
-//! | [`view`]        | the abstraction relation R: `BudgetSpec::State` → `SwView`    |
+//! | [`view`]        | page-unit reconciliation + the abstraction relation R: `BudgetSpec::State` → `SwView` |
 //! | [`transition`]  | how the projection moves under each insert/remove transition  |
 //! | [`refine`]      | `impl SoftwareOps for BudgetSpec::State` (the contract proof)  |
 //!
 //! # Open obligations
 //!
-//! The refinement *glue* — `inv_implies_wf`, the four transition methods, the
-//! cross-zone disjointness lemma — is **proven**.  What remains are the isolated
-//! analytic lemmas in [`geometry`] / [`transition`]:
-//! - geometry: `lemma_same_phys_page_implies_pmem_overlap` (with the `Offset`-mapper
-//!   caveat) and `lemma_ghost_zone_insert_region_wf`;
-//! - the `Set`/`Map` deltas under a transition (`lemma_all_owned_*`,
-//!   `lemma_*_region_owned_pages`, and the `choose`-heavy `lemma_state_s2_map_*`).
+//! The refinement *glue* is **proven**: `inv_implies_wf`, the four transition
+//! methods (`add_vm` / `remove_vm` / `insert_region` / `remove_region`), the
+//! cross-zone disjointness lemma `lemma_state_owned_pages_disjoint`, and the
+//! `insert_region` owned-page delta `lemma_insert_region_owned_pages`.  These rest
+//! on isolated analytic lemmas whose bodies are still `admit()`:
+//! - [`view`]: `lemma_same_phys_page_implies_pmem_overlap` (with the `Offset`-mapper
+//!   caveat).
+//! - [`transition`]: `lemma_ghost_zone_insert_region_wf`; the `all_owned` / `s2_map`
+//!   deltas (`lemma_all_owned_*`, the `choose`-heavy `lemma_state_s2_map_*`); and
+//!   the `remove_region` owned-page delta `lemma_remove_region_owned_pages`.
 //! - **Model-internal admits** (outside this module): `machine::machine::refine`
-//!   (×7) and `machine::machine::security` (×2) remain `admit()`.
-pub mod geometry;
+//!   (×8) and `machine::machine::security` (×2) remain `admit()`.
 pub mod refine;
 pub mod transition;
 pub mod view;

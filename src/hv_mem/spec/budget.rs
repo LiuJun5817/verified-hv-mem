@@ -167,7 +167,7 @@ tokenized_state_machine! {
                 require(!pre.zone_ids.contains(zid));
                 update zone_ids = pre.zone_ids.insert(zid);
                 add zones += [zid => GhostZone {
-                    mem_set: SpecMemorySet { regions: Set::empty() },
+                    mem_set: SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
                 }];
             }
         }
@@ -277,43 +277,13 @@ tokenized_state_machine! {
                 if zid2 == zid {
                     assert(old_zone.wf());
                     assert(new_zone == old_zone.insert_region(region));
-                    assert(new_zone.mem_set.regions =~= old_zone.regions().insert(region));
-                    assert(new_zone.mem_set.wf()) by {
-                        // All regions valid: old from old_zone.wf(); new from zone_budget ⊆ all_regions.
-                        assert forall|r: MemoryRegion| #[trigger] new_zone.mem_set.regions.contains(r)
-                            implies r.spec_valid() by {
-                            if r == region {
-                                zone_budget_in_all_regions();
-                                assert(all_regions().contains(region));
-                                all_regions_valid();
-                            } else {
-                                assert(old_zone.mem_set.regions.contains(r));
-                            }
-                        };
-                        // No vmem overlap: old pairs from old_zone.wf();
-                        // region vs existing: !old_zone.mem_set.overlaps_vmem(region) (transition require).
-                        // spec_overlaps_vmem is NOT trivially symmetric, so use the lemma for r1==region.
-                        assert forall|r1: MemoryRegion, r2: MemoryRegion|
-                            #[trigger] new_zone.mem_set.regions.contains(r1) &&
-                            #[trigger] new_zone.mem_set.regions.contains(r2) && r1 != r2
-                            implies !r1.spec_overlaps_vmem(r2) by {
-                            if r1 == region {
-                                assert(old_zone.mem_set.regions.contains(r2));
-                                // !overlaps_vmem(region) + r2 ∈ old_zone => !r2.spec_overlaps_vmem(region)
-                                assert(!r2.spec_overlaps_vmem(region));
-                                // Symmetry: !region.spec_overlaps_vmem(r2)
-                                zone_budget_in_all_regions(); all_regions_valid();
-                                assert(region.spec_valid());
-                                assert(r2.spec_valid());
-                                region.lemma_overlaps_vmem_symmetric(r2);
-                            } else if r2 == region {
-                                assert(old_zone.mem_set.regions.contains(r1));
-                                // !overlaps_vmem(region) + r1 ∈ old_zone => !r1.spec_overlaps_vmem(region)
-                            } else {
-                                assert(old_zone.mem_set.regions.contains(r1) && old_zone.mem_set.regions.contains(r2));
-                            }
-                        };
-                    };
+                    // `region` is valid (in budget ⊆ all_regions, which are valid);
+                    // the transition requires non-overlap and non-membership, so the
+                    // GhostZone wf-preservation lemma discharges `new_zone.wf()`.
+                    zone_budget_in_all_regions();
+                    all_regions_valid();
+                    assert(region.spec_valid());
+                    old_zone.lemma_insert_region_wf(region);
                     assert(new_zone.wf());
                 } else {
                     assert(post.zones[zid2] == pre.zones[zid2]);
@@ -352,16 +322,9 @@ tokenized_state_machine! {
                 if zid2 == zid {
                     assert(old_zone.wf());
                     assert(new_zone == old_zone.remove_region(region));
-                    assert forall|r: MemoryRegion| #[trigger] new_zone.regions().contains(r)
-                        implies r.spec_valid() by {
-                        assert(old_zone.regions().contains(r));
-                    };
-                    assert forall|r1: MemoryRegion, r2: MemoryRegion|
-                        new_zone.regions().contains(r1) && new_zone.regions().contains(r2) && r1 != r2
-                        implies !r1.spec_overlaps_vmem(r2) by {
-                        assert(old_zone.regions().contains(r1) && old_zone.regions().contains(r2));
-                    };
-                    assert(new_zone.mem_set.wf());
+                    // transition requires `region` is present; the wf-preservation
+                    // lemma discharges `new_zone.wf()`.
+                    old_zone.lemma_remove_region_wf(region);
                     assert(new_zone.wf());
                 } else {
                     assert(post.zones[zid2] == pre.zones[zid2]);

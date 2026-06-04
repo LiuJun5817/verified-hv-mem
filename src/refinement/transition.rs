@@ -1,5 +1,5 @@
-//! Layer 3 — transition lemmas: how the `SwView` projection moves under each
-//! `BudgetSpec` transition.
+//! Transition lemmas: how the `SwView` projection moves under each `BudgetSpec`
+//! transition.
 //!
 //! `refine`'s `insert_region` / `remove_region` proofs need to know exactly how
 //! the projection ([`super::view`]) changes when a region is added to / removed
@@ -12,8 +12,8 @@
 //!   deltas (set algebra), and the `choose`-heavy `s2_map` `Map` equalities.
 //!   Each is a *true* statement (the remove ones require `region_pmem_exclusive`,
 //!   without which they are false); their bodies are `admit()` pending proof.
-use super::geometry::*;
 use super::view::*;
+use crate::address::addr::SpecVAddr;
 use crate::address::region::MemoryRegion;
 use crate::hv_mem::spec::budget::BudgetSpec;
 use crate::hv_mem::spec::GhostZone;
@@ -24,44 +24,85 @@ verus! {
 
 // ───────────────────────── insert_region (gz ↦ gz.insert_region(r)) ──────────
 /// Inserting `r` extends a zone's owned-page set by exactly `r`'s pages.
+///
+/// Reasoning is on the exposed mapping: the new page table is the old one
+/// unioned with `r`'s dense mappings, whose key domains are disjoint (the new
+/// region is vmem-disjoint from every existing one), so the backed-page set is
+/// the union of the two.
 pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion)
+    requires
+        gz.wf(),
+        region.spec_valid(),
+        !gz.mem_set.overlaps_vmem(region),
     ensures
         zone_owned_pages(gz.insert_region(region)) =~= zone_owned_pages(gz).union(
             region_pages(region),
         ),
 {
     let new_gz = gz.insert_region(region);
-    assert(new_gz.regions() =~= gz.regions().insert(region));
-    assert(new_gz.regions().contains(region));
+    let om = gz.mem_set.mappings;
+    let rm = region.spec_mappings();
+    assert(new_gz.mem_set.mappings == om.union_prefer_right(rm));
+
+    // Key domains are disjoint: an existing mapping key is some existing region's
+    // page vaddr, which is vmem-disjoint from every page of `region`.
+    assert forall|v: SpecVAddr| om.contains_key(v) implies !rm.contains_key(v) by {
+        if rm.contains_key(v) {
+            region.lemma_mappings_sound(v);
+            let j = choose|j: nat| 0 <= j < region.pages && v == region.spec_page_vaddr(j);
+            let f = om[v];
+            assert(om.contains_pair(v, f));
+            let (r2, i2) = choose|r2: MemoryRegion, i2: nat|
+                gz.regions().contains(r2) && 0 <= i2 < r2.pages && v == r2.spec_page_vaddr(i2) && f
+                    == r2.spec_frame(i2);
+            assert(gz.regions().contains(r2));
+            assert(!r2.spec_overlaps_vmem(region));
+            MemoryRegion::lemma_pages_disjoint(r2, region, i2, j);  // r2 page i2 != region page j == v
+        }
+    }
+
     assert forall|p: PhysPage|
         zone_owned_pages(new_gz).contains(p) <==> (zone_owned_pages(gz).contains(p) || region_pages(
             region,
         ).contains(p)) by {
-        // (⟹) a backing region in `new` is either an old region or `region`.
+        // (⟹) the backing key is either `region`'s (a region page) or the old map's.
         if zone_owned_pages(new_gz).contains(p) {
-            let r = choose|r: MemoryRegion|
-                #![trigger new_gz.regions().contains(r)]
-                new_gz.regions().contains(r) && region_owns_page(r, p);
-            assert(new_gz.regions().contains(r) && region_owns_page(r, p));
-            if r == region {
-                assert(region_pages(region).contains(p));
+            let v = choose|v: SpecVAddr|
+                new_gz.mem_set.mappings.contains_key(v) && frame_phys_page(
+                    new_gz.mem_set.mappings[v],
+                ) == p;
+            if rm.contains_key(v) {
+                region.lemma_mappings_sound(v);
+                let i = choose|i: nat|
+                    0 <= i < region.pages && v == region.spec_page_vaddr(i) && rm[v]
+                        == region.spec_frame(i);
+                assert(new_gz.mem_set.mappings[v] == rm[v]);
+                assert(region_phys_page(region, i) == p);
+                assert(region_owns_page(region, p));  // witness i
             } else {
-                assert(gz.regions().contains(r));
-                assert(zone_owned_pages(gz).contains(p));  // witness r
+                assert(om.contains_key(v) && new_gz.mem_set.mappings[v] == om[v]);
+                assert(zone_owned_pages(gz).contains(p));  // witness v
             }
         }
-        // (⟸ old) an old backing region is still in `new`.
+        // (⟸ old) an old backing key survives the (domain-disjoint) union unchanged.
+
         if zone_owned_pages(gz).contains(p) {
-            let r = choose|r: MemoryRegion|
-                #![trigger gz.regions().contains(r)]
-                gz.regions().contains(r) && region_owns_page(r, p);
-            assert(new_gz.regions().contains(r) && region_owns_page(r, p));
-            assert(zone_owned_pages(new_gz).contains(p));  // witness r
+            let v = choose|v: SpecVAddr| om.contains_key(v) && frame_phys_page(om[v]) == p;
+            assert(!rm.contains_key(v));
+            assert(new_gz.mem_set.mappings.contains_key(v) && new_gz.mem_set.mappings[v] == om[v]);
+            assert(zone_owned_pages(new_gz).contains(p));  // witness v
         }
-        // (⟸ region) `region` itself backs p and is in `new`.
+        // (⟸ region) a page of `region` is mapped in the union to `region`'s frame.
+
         if region_pages(region).contains(p) {
-            assert(region_owns_page(region, p));
-            assert(zone_owned_pages(new_gz).contains(p));  // witness region
+            let i = choose|i: nat| 0 <= i < region.pages && region_phys_page(region, i) == p;
+            region.lemma_mappings_contains_pair(i);
+            let v = region.spec_page_vaddr(i);
+            assert(rm.contains_pair(v, region.spec_frame(i)));
+            assert(new_gz.mem_set.mappings.contains_key(v) && new_gz.mem_set.mappings[v]
+                == region.spec_frame(i));
+            assert(frame_phys_page(region.spec_frame(i)) == p);
+            assert(zone_owned_pages(new_gz).contains(p));  // witness v
         }
     }
 }
