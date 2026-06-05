@@ -3,21 +3,18 @@
 //!
 //! `refine`'s `insert_region` / `remove_region` proofs need to know exactly how
 //! the projection ([`super::view`]) changes when a region is added to / removed
-//! from a zone.  Each lemma here states one such delta.
+//! from a zone.  Each lemma here states one such delta — for the per-zone
+//! `owned_pages` / `s2_entries` and their lifts to the whole-state `all_owned` /
+//! `state_s2_map`.
 //!
 //! Well-formedness preservation is **not** restated here: `refine` fires the real
-//! `BudgetSpec` transition via `BudgetSpec::take_step::*`, which yields
-//! `post.invariant()` (hence each zone's `wf()`) from the macro's own inductiveness.
+//! transition via `BudgetSpec::take_step::*`, which yields `post.invariant()`
+//! (hence each zone's `wf()`) from the macro's own inductiveness.
 //!
-//! All deltas in this module are **proven**.  Each owned-page / `s2_map` delta is
-//! established per zone on the exposed mapping (the insert side unions `r`'s dense
-//! keys, the remove side deletes them) and then lifted over the `zones` map.  The
-//! remove side relies on `region_pmem_exclusive` for *physical* pages (a page is
-//! freed only if no other region backs it) and on cross-zone disjointness to lift
-//! that to the whole state; the `s2_map` (vaddr-keyed) deltas need neither, since
-//! distinct regions are vmem-disjoint.  All deltas are fully proven — the physical
-//! reasoning ([`lemma_same_phys_page_implies_pmem_overlap`] in [`super::view`])
-//! is structural (page-aligned `pstart` + linear frames), no `admit()`.
+//! The physical-page deltas additionally need `region_pmem_exclusive` (a page is
+//! freed only if no other region backs it) and cross-zone disjointness; the
+//! vaddr-keyed `s2_map` deltas need neither, since distinct regions are
+//! vmem-disjoint.
 use super::view::*;
 use crate::address::addr::SpecVAddr;
 use crate::address::frame::SpecFrame;
@@ -31,11 +28,6 @@ verus! {
 
 // ───────────────────────── insert_region (gz ↦ gz.insert_region(r)) ──────────
 /// Inserting `r` extends a zone's owned-page set by exactly `r`'s pages.
-///
-/// Reasoning is on the exposed mapping: the new page table is the old one
-/// unioned with `r`'s dense mappings, whose key domains are disjoint (the new
-/// region is vmem-disjoint from every existing one), so the backed-page set is
-/// the union of the two.
 pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion)
     requires
         gz.wf(),
@@ -115,11 +107,9 @@ pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion
     }
 }
 
-/// `all_owned_pages` grows by exactly the inserted region's pages.
-///
-/// Only zone `zid` changes; its owned-page delta is [`lemma_insert_region_owned_pages`],
-/// and the union over zones lifts that delta to the whole state.
-pub proof fn lemma_all_owned_insert_region(zones: Map<nat, GhostZone>, zid: nat, r: MemoryRegion)
+/// `all_owned_pages` grows by exactly the inserted region's pages (the
+/// whole-state lift of [`lemma_insert_region_owned_pages`]).
+pub proof fn lemma_insert_region_all_owned(zones: Map<nat, GhostZone>, zid: nat, r: MemoryRegion)
     requires
         zones.contains_key(zid),
         zones[zid].wf(),
@@ -171,8 +161,7 @@ pub proof fn lemma_all_owned_insert_region(zones: Map<nat, GhostZone>, zid: nat,
     }
 }
 
-/// A zone's stage-2 entries gain exactly the inserted region's entries (the
-/// per-zone dual of [`lemma_insert_region_owned_pages`], on guest-page keys).
+/// A zone's stage-2 entries gain exactly the inserted region's entries.
 pub proof fn lemma_insert_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRegion)
     requires
         gz.wf(),
@@ -214,7 +203,7 @@ pub proof fn lemma_insert_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRe
 }
 
 /// The state's `s2_map` gains exactly the inserted region's entries.
-pub proof fn lemma_state_s2_map_insert_region(
+pub proof fn lemma_insert_region_state_s2_map(
     pre: BudgetSpec::State,
     post: BudgetSpec::State,
     zid: nat,
@@ -258,16 +247,10 @@ pub proof fn lemma_state_s2_map_insert_region(
 }
 
 // ───────────────────────── remove_region (gz ↦ gz.remove_region(r)) ──────────
-// NOTE: the page/owned deltas below require `region_pmem_exclusive` — removing
-// `r` only frees a page if no *other* region in the zone also backs it.  Without
-// that hypothesis these are false; it is established by `remove_region_pre`.
 /// Owned pages shrink by exactly the removed region's pages.
 ///
-/// Dual to [`lemma_insert_region_owned_pages`], reasoning on the exposed mapping:
-/// removal deletes exactly `r`'s dense keys.  A surviving key still backs its old
-/// physical page (so nothing else is lost), and a deleted key's page is not backed
-/// by any *other* region — that is precisely `region_pmem_exclusive`, via
-/// [`lemma_same_phys_page_implies_pmem_overlap`].
+/// Needs `region_pmem_exclusive`: removing `r` frees a page only if no *other*
+/// region in the zone also backs it.
 pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
     requires
         gz.wf(),
@@ -335,13 +318,10 @@ pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
     }
 }
 
-/// `all_owned_pages` shrinks by exactly the removed region's pages.
-///
-/// Zone `zid`'s delta is [`lemma_remove_region_owned_pages`].  Lifting it needs
-/// that no *other* zone owns `r`'s pages: `r`'s pages are owned by `zid` (dense
-/// completeness), so cross-zone disjointness ([`lemma_state_owned_pages_disjoint`])
-/// keeps every other zone clear of them.
-pub proof fn lemma_all_owned_remove_region(pre: BudgetSpec::State, zid: nat, r: MemoryRegion)
+/// `all_owned_pages` shrinks by exactly the removed region's pages (the
+/// whole-state lift of [`lemma_remove_region_owned_pages`], using cross-zone
+/// disjointness so no other zone owns `r`'s pages).
+pub proof fn lemma_remove_region_all_owned(pre: BudgetSpec::State, zid: nat, r: MemoryRegion)
     requires
         pre.invariant(),
         pre.zones.contains_key(zid),
@@ -408,11 +388,9 @@ pub proof fn lemma_all_owned_remove_region(pre: BudgetSpec::State, zid: nat, r: 
     }
 }
 
-/// A zone's stage-2 entries lose exactly the removed region's keys (the per-zone
-/// dual of [`lemma_remove_region_owned_pages`], on guest-page keys).
-///
-/// No `region_pmem_exclusive` is needed here: keys are vaddrs, and distinct
-/// regions are vmem-disjoint (`gz.wf()`), so `r`'s keys are uniquely `r`'s.
+/// A zone's stage-2 entries lose exactly the removed region's keys (no
+/// `region_pmem_exclusive` needed: keys are vaddrs and distinct regions are
+/// vmem-disjoint).
 pub proof fn lemma_remove_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRegion)
     requires
         gz.wf(),
@@ -446,7 +424,7 @@ pub proof fn lemma_remove_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRe
 }
 
 /// The state's `s2_map` loses exactly the removed region's keys.
-pub proof fn lemma_state_s2_map_remove_region(
+pub proof fn lemma_remove_region_state_s2_map(
     pre: BudgetSpec::State,
     post: BudgetSpec::State,
     zid: nat,

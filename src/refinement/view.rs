@@ -1,29 +1,24 @@
 //! The abstraction relation R: project `BudgetSpec::State` → `SwView`.
 //!
-//! The abstract state is the state machine's own `BudgetSpec::State` (its
-//! `zone_ids` and per-zone `GhostZone` region sets) — **not** a hand-written
-//! twin.  `<BudgetSpec::State as View>::view` maps it to the
-//! security model's `SwView`.  Because the projection runs on the machine's real
-//! state, the contract invariant in [`super::refine`] can be the machine's real
-//! `invariant()`, and the global `SwView` step shape is available without
-//! serializing anything (the runtime authority stays in the sharded tokens).
+//! `<BudgetSpec::State as View>::view` maps the state machine's own state (its
+//! `zone_ids` and per-zone `GhostZone` region sets) to the security model's
+//! `SwView`.  Projecting the machine's real state lets [`super::refine`] use the
+//! machine's real `invariant()` as the contract invariant.
 //!
-//! This module also owns the page-unit reconciliation between the byte-addressed
-//! implementation and the machine's page-numbered model (`region_phys_page`,
-//! `region_guest_page`, `region_pages`, `region_s2_entries`, ...), the per-zone
-//! sets (`zone_owned_pages`, `zone_s2_entries`), the global views
-//! (`all_budget_pages`, `all_owned_pages`, `hypervisor_pool`, `state_s2_map`),
-//! and the small "facts about the projection" lemmas the refinement needs.
+//! This module defines the projection and its building blocks:
+//! - per-region geometry (`region_phys_page`, `region_guest_page`,
+//!   `region_pages`, `region_s2_entries`);
+//! - per-zone projections (`zone_owned_pages`, `zone_s2_entries`);
+//! - global views (`all_budget_pages`, `all_owned_pages`, `hypervisor_pool`,
+//!   `state_s2_map`);
+//! - the `View` impl and the supporting projection lemmas.
 //!
 //! ## Page-unit reconciliation
 //!
-//! The hypervisor implementation addresses memory in *bytes* with
-//! `SPEC_PAGE_SIZE = 0x1000` (4 KiB) pages.  The machine model numbers *pages*,
-//! where one page is `PAGE_WORDS = 512` words; since `usize` is 8 bytes
-//! (`global layout` in `lib.rs`), a machine page is `512 * 8 = 4096` bytes —
-//! exactly `SPEC_PAGE_SIZE`.  Hence a machine `PhysPage` is
-//! `paddr_bytes / SPEC_PAGE_SIZE` and a machine `GuestPage` is
-//! `vaddr_bytes / SPEC_PAGE_SIZE`.
+//! The implementation addresses memory in *bytes* (`SPEC_PAGE_SIZE = 0x1000`); the
+//! machine model numbers *pages* of `PAGE_WORDS = 512` words = 4096 bytes =
+//! `SPEC_PAGE_SIZE`.  So a `PhysPage` is `paddr / SPEC_PAGE_SIZE` and a `GuestPage`
+//! is `vaddr / SPEC_PAGE_SIZE`.
 use crate::address::addr::SpecVAddr;
 use crate::address::frame::{MemAttr, SpecFrame};
 use crate::address::region::{MemoryRegion, SPEC_PAGE_SIZE};
@@ -98,14 +93,36 @@ pub open spec fn region_pmem_exclusive(gz: GhostZone, r: MemoryRegion) -> bool {
         gz.regions().contains(rr) && rr != r ==> !rr.spec_overlaps_pmem(r)
 }
 
-/// Two regions that back the same physical page overlap in physical memory.
-///
-/// Relates `region_phys_page` equality to `MemoryRegion::spec_overlaps_pmem`.
-/// The new `MemoryRegion` lays its frames out linearly from a page-aligned
-/// physical base (`spec_page_paddr(i) == pstart + i*ps`), so a shared physical
-/// page index means the two page-aligned physical blocks share a whole page,
-/// hence their byte intervals overlap.  No linearity axiom is needed — it is a
-/// structural property of `pstart` + `spec_valid` (page-aligned base).
+/// The physical page backing region page `i` is **linear** in `i`: the region's
+/// page-aligned base page (`pstart / ps`) plus `i`.  Holds by construction
+/// (`spec_frame(i).base == pstart + i*ps`); the single place the page↔byte
+/// (`div_mod`) reasoning lives.
+pub proof fn lemma_region_phys_page_linear(r: MemoryRegion, i: nat)
+    requires
+        r.spec_valid(),
+        0 <= i < r.pages,
+    ensures
+        r.pstart@.0 == (r.pstart@.0 / SPEC_PAGE_SIZE) * SPEC_PAGE_SIZE,
+        region_phys_page(r, i).0 == r.pstart@.0 / SPEC_PAGE_SIZE + i,
+{
+    let ps = SPEC_PAGE_SIZE;
+    let a = r.pstart@.0;
+    let q = a / ps;
+    assert(a % ps == 0);  // spec_valid ⇒ pstart page-aligned
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(a as int, ps as int);
+    assert(a == q * ps);
+    // region_phys_page(r,i).0 == spec_frame(i).base.0 / ps == (a + i*ps)/ps == q + i.
+    assert(r.spec_frame(i).base.0 == a + i * ps);
+    assert((a + i * ps) / ps == q + i) by (nonlinear_arith)
+        requires
+            a == q * ps,
+            ps > 0,
+    ;
+}
+
+/// Two regions that back the same physical page overlap in physical memory:
+/// via [`lemma_region_phys_page_linear`] the shared index gives `q1 + i1 == q2 + i2`
+/// (page bases line up), so the page-aligned byte intervals overlap.
 pub proof fn lemma_same_phys_page_implies_pmem_overlap(
     r1: MemoryRegion,
     i1: nat,
@@ -124,45 +141,20 @@ pub proof fn lemma_same_phys_page_implies_pmem_overlap(
     let ps = SPEC_PAGE_SIZE;
     let a1 = r1.pstart@.0;
     let a2 = r2.pstart@.0;
-
-    // Frame bases are linear by construction: spec_frame(i).base == pstart + i*ps.
-    assert(r1.spec_frame(i1).base.0 == a1 + i1 * ps);
-    assert(r2.spec_frame(i2).base.0 == a2 + i2 * ps);
-
-    // Page-aligned physical bases (spec_valid): a = q*ps.
     let q1 = a1 / ps;
     let q2 = a2 / ps;
-    assert(a1 % ps == 0 && a2 % ps == 0);
-    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(a1 as int, ps as int);
-    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(a2 as int, ps as int);
-    assert(a1 == q1 * ps);
-    assert(a2 == q2 * ps);
 
-    // region_phys_page(r, i).0 == q + i, and the hypothesis gives q1+i1 == q2+i2.
-    assert((a1 + i1 * ps) / ps == q1 + i1) by (nonlinear_arith)
-        requires
-            a1 == q1 * ps,
-            ps > 0,
-    ;
-    assert((a2 + i2 * ps) / ps == q2 + i2) by (nonlinear_arith)
-        requires
-            a2 == q2 * ps,
-            ps > 0,
-    ;
-    assert(region_phys_page(r1, i1).0 == q1 + i1);
-    assert(region_phys_page(r2, i2).0 == q2 + i2);
+    // Page bases line up: region_phys_page(rk, ik).0 == qk + ik (linearity), and
+    // the two are equal by hypothesis — so q1 + i1 == q2 + i2 (and ak == qk*ps).
+    lemma_region_phys_page_linear(r1, i1);
+    lemma_region_phys_page_linear(r2, i2);
     assert(q1 + i1 == q2 + i2);
 
-    // spec_overlaps_pmem compares the byte intervals [pstart, pstart + pages*ps).
-    let ss = a1;
-    let se = a1 + r1.pages as nat * ps;
-    let os = a2;
-    let oe = a2 + r2.pages as nat * ps;
-    if ss <= os {
-        assert(se > os) by (nonlinear_arith)
+    // spec_overlaps_pmem == overlap(a1, pages1*ps, a2, pages2*ps): page-aligned
+    // intervals whose page bases line up cannot miss each other.
+    if a1 <= a2 {
+        assert(a2 < a1 + r1.pages as nat * ps) by (nonlinear_arith)
             requires
-                se == a1 + r1.pages as nat * ps,
-                os == a2,
                 a1 == q1 * ps,
                 a2 == q2 * ps,
                 ps > 0,
@@ -171,10 +163,8 @@ pub proof fn lemma_same_phys_page_implies_pmem_overlap(
                 i2 >= 0,
         ;
     } else {
-        assert(oe > ss) by (nonlinear_arith)
+        assert(a1 < a2 + r2.pages as nat * ps) by (nonlinear_arith)
             requires
-                oe == a2 + r2.pages as nat * ps,
-                ss == a1,
                 a1 == q1 * ps,
                 a2 == q2 * ps,
                 ps > 0,
@@ -206,9 +196,7 @@ pub open spec fn frame_s2_entry(f: SpecFrame) -> S2Entry {
 }
 
 /// Round-trip: the mapped vaddr of a region page is the page-aligned image of its
-/// guest page — `gpa_to_vaddr ∘ region_guest_page = spec_page_vaddr`.  Holds
-/// because a valid region starts page-aligned, so every page vaddr is a multiple
-/// of `SPEC_PAGE_SIZE`.
+/// guest page — `gpa_to_vaddr ∘ region_guest_page = spec_page_vaddr`.
 pub proof fn lemma_gpa_vaddr_roundtrip(r: MemoryRegion, i: nat)
     requires
         r.spec_valid(),
@@ -432,8 +420,7 @@ pub proof fn lemma_zone_s2_target_owned(zid: nat, gz: GhostZone)
     }
 }
 
-/// A page owned by the zone is backed by some region of it (recovers a region
-/// witness from the exposed mapping, using exact-dense soundness).
+/// A page owned by the zone is backed by some region of it.
 pub proof fn lemma_zone_owned_pages_region_witness(gz: GhostZone, p: PhysPage)
     requires
         gz.wf(),
@@ -479,11 +466,9 @@ pub proof fn lemma_zone_s2_entries_empty(zid: nat, gz: GhostZone)
     }
 }
 
-/// Cross-zone physical-page disjointness, proven from the **real** `invariant()`
-/// (`inv_zone_within_budget` + `inv_zones_wf`) plus the budget axioms.
-///
-/// Lives here (rather than in [`super::refine`]) so both the contract proof and
-/// the [`super::transition`] deltas can use it.
+/// Cross-zone physical-page disjointness: distinct active zones own disjoint
+/// physical pages.  Proven from the `invariant()` plus the budget axioms; shared
+/// by the contract proof and the [`super::transition`] deltas.
 pub proof fn lemma_state_owned_pages_disjoint(s: BudgetSpec::State)
     requires
         s.invariant(),
@@ -541,7 +526,6 @@ pub proof fn lemma_state_owned_pages_disjoint(s: BudgetSpec::State)
             all_regions_disjoint();
             assert(!r1.spec_overlaps_pmem(r2));
 
-            // pmem-linearity is now structural (page-aligned `pstart` + linear frames).
             lemma_same_phys_page_implies_pmem_overlap(r1, i1, r2, i2);
             assert(r1.spec_overlaps_pmem(r2));
             assert(false);
