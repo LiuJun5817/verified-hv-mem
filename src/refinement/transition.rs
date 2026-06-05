@@ -17,13 +17,13 @@
 //! that to the whole state; the `s2_map` (vaddr-keyed) deltas need neither, since
 //! distinct regions are vmem-disjoint.  All deltas are fully proven — the physical
 //! reasoning ([`lemma_same_phys_page_implies_pmem_overlap`] in [`super::view`])
-//! rests on the trusted `all_regions_pmem_linear` axiom, no `admit()`.
+//! is structural (page-aligned `pstart` + linear frames), no `admit()`.
 use super::view::*;
 use crate::address::addr::SpecVAddr;
 use crate::address::frame::SpecFrame;
 use crate::address::region::MemoryRegion;
-use crate::hv_mem::spec::budget::{zone_budget, zone_budget_in_all_regions, BudgetSpec};
-use crate::hv_mem::spec::{all_regions, all_regions_pmem_linear, GhostZone};
+use crate::hv_mem::spec::budget::BudgetSpec;
+use crate::hv_mem::spec::GhostZone;
 use crate::machine::types::*;
 use vstd::prelude::*;
 
@@ -273,7 +273,6 @@ pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
         gz.wf(),
         gz.contains_region(r),
         region_pmem_exclusive(gz, r),
-        forall|rr: MemoryRegion| #[trigger] gz.regions().contains(rr) ==> rr.pmem_linear(),
     ensures
         zone_owned_pages(gz.remove_region(r)) =~= zone_owned_pages(gz).difference(region_pages(r)),
 {
@@ -309,7 +308,6 @@ pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
                 assert(r2.spec_valid());
                 assert(!r2.spec_overlaps_pmem(r));  // region_pmem_exclusive
                 assert(gz.regions().contains(r));  // from contains_region(r)
-                assert(r2.pmem_linear() && r.pmem_linear());  // forall precondition
                 lemma_same_phys_page_implies_pmem_overlap(r2, i2, r, i);
                 assert(false);
             }
@@ -357,15 +355,6 @@ pub proof fn lemma_all_owned_remove_region(pre: BudgetSpec::State, zid: nat, r: 
     let zones = pre.zones;
     let zones2 = zones.insert(zid, zones[zid].remove_region(r));
     assert(zones[zid].wf());  // inv_zones_wf
-    // zone's regions ⊆ budget ⊆ all_regions ⇒ pmem_linear.
-    all_regions_pmem_linear();
-    zone_budget_in_all_regions();
-    assert forall|rr: MemoryRegion| #[trigger]
-        zones[zid].regions().contains(rr) implies rr.pmem_linear() by {
-        assert(zones[zid].contains_region(rr));  // inv_zone_within_budget ⇒ in budget
-        assert(zone_budget(zid).contains(rr));
-        assert(all_regions().contains(rr));
-    }
     lemma_remove_region_owned_pages(zones[zid], r);
     // zone_owned_pages(zones2[zid]) == zone_owned_pages(zones[zid]) \ region_pages(r)
     lemma_state_owned_pages_disjoint(pre);

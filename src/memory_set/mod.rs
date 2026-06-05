@@ -66,7 +66,7 @@ impl SpecMemorySet {
 
     /// Check if a region starts at the given virtual address is mapped in the memory set.
     pub open spec fn has_region_starting_at(&self, v: SpecVAddr) -> bool {
-        exists|r: MemoryRegion| self.regions.contains(r) && #[trigger] r.start@ == v
+        exists|r: MemoryRegion| self.regions.contains(r) && #[trigger] r.vstart@ == v
     }
 
     /// Check if a region overlaps with any existing region in virtual address space.
@@ -95,11 +95,36 @@ impl SpecMemorySet {
     /// Remove a region starting at the given virtual address from the memory set, returning the new memory set.
     pub open spec fn remove_region(&self, start: SpecVAddr) -> Self {
         let removed = choose|r: MemoryRegion| #[trigger]
-            self.regions.contains(r) && r.start@ == start;
+            self.regions.contains(r) && r.vstart@ == start;
         Self {
             regions: self.regions.remove(removed),
             mappings: self.mappings.remove_keys(removed.spec_mappings().dom()),
         }
+    }
+
+    /// Lemma. Inserting a new region into the memory set preserves well-formedness.
+    pub proof fn lemma_insert_region_preserves_wf(self, region: MemoryRegion)
+        requires
+            self.wf(),
+            region.spec_valid(),
+            !self.overlaps_vmem(region),
+        ensures
+            self.insert_region(region).wf(),
+    {
+        // TODO
+        admit();
+    }
+
+    /// Lemma. Removing a region from the memory set preserves well-formedness.
+    pub proof fn lemma_remove_region_preserves_wf(self, start: SpecVAddr)
+        requires
+            self.wf(),
+            self.has_region_starting_at(start),
+        ensures
+            self.remove_region(start).wf(),
+    {
+        // TODO
+        admit();
     }
 }
 

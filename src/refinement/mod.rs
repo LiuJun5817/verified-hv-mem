@@ -66,7 +66,7 @@
 //! |-----------------|---------------------------------------------------------------|
 //! | [`view`]        | page-unit reconciliation + the abstraction relation R: `BudgetSpec::State` → `SwView` |
 //! | [`transition`]  | how the projection moves under each insert/remove transition  |
-//! | [`refine`]      | `impl SoftwareOps for BudgetSpec::State` (the contract proof)  |
+//! | [`refine`]      | `impl SoftwareOps for BudgetSpec::State` (the contract proof) |
 //!
 //! # Open obligations
 //!
@@ -76,13 +76,14 @@
 //! [`transition`] delta (the `all_owned` / `s2_map` insert and remove lemmas).
 //!
 //! The proofs bottom out on the project's **trusted region axioms** (in
-//! `hv_mem::spec::closure`, alongside `all_regions_valid` / `all_regions_disjoint`):
-//! - `all_regions_pmem_linear` — every configured region is physically linear
-//!   (`Offset`-mapped without address-space wrap; see `MemoryRegion::pmem_linear`
-//!   and `hv_mem::config`).  This is what makes
-//!   `lemma_same_phys_page_implies_pmem_overlap` — and hence every owned-page delta
-//!   and the disjointness proof — go through: a shared physical page index of two
-//!   page-aligned physical blocks forces their byte intervals to overlap.
+//! `hv_mem::spec::closure`): `all_regions_valid` / `all_regions_disjoint`.
+//! Physical linearity is no longer an axiom — the refactored `MemoryRegion`
+//! carries an explicit page-aligned physical base `pstart` and lays its frames
+//! out linearly (`spec_page_paddr(i) == pstart + i*ps`).  That is what makes
+//! `lemma_same_phys_page_implies_pmem_overlap` — and hence every owned-page delta
+//! and the disjointness proof — go through structurally: a shared physical page
+//! index of two page-aligned physical blocks forces their byte intervals to
+//! overlap.
 //!
 //! **Model-internal admits** (outside this module) are unchanged:
 //! `machine::machine::refine` (×8) and `machine::machine::security` (×2).

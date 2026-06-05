@@ -263,19 +263,15 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
                 // M invariant — precondition mem_set.invariants().
                 assert(content.mem_set_perm@.mem_contents->Init_0.invariants());
                 // alloc_inst_id — precondition mem_set.inst_id() == self.lock.k@.alloc_inst_id.
-                assert(
-                    content.mem_set_perm@.mem_contents->Init_0.inst_id()
-                        == self.lock.k@.alloc_inst_id
-                );
+                assert(content.mem_set_perm@.mem_contents->Init_0.inst_id()
+                    == self.lock.k@.alloc_inst_id);
                 // zone_id — precondition on guard.token@.zone_state, equal to content.zone_state.
                 assert(content.zone_state.zone_id() == self.lock.k@.zone_id);
                 // zone_state wf — precondition on guard.token@.zone_state.
                 assert(content.zone_state.wf(self.lock.k@.mem_inst_id));
                 // ghost/exec linking: both sides equal mem_set@ after PCell::put.
-                assert(
-                    content.zone_state.ghost_zone().mem_set
-                        == content.mem_set_perm@.mem_contents->Init_0@
-                );
+                assert(content.zone_state.ghost_zone().mem_set
+                    == content.mem_set_perm@.mem_contents->Init_0@);
             };
         }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
@@ -348,7 +344,7 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, BudgetProtocol> = token.get();
 
-        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.start) {
+        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
@@ -401,12 +397,12 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, BudgetProtocol> = token.get();
 
-        if !mem_set.has_region_starting_at(region.start) {
+        if !mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
         let ghost old_mem_set = mem_set@;
-        mem_set.remove(allocator, region.start);
+        mem_set.remove(allocator, region.vstart);
 
         proof {
             let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state } = content;
@@ -417,13 +413,18 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             assert(zone_state.ghost_zone().mem_set == old_mem_set);
             // The exec check guarantees a region starts at region.start, so the ghost
             // zone also has one — they are in sync by the linking invariant.
-            assert(zone_state.ghost_zone().mem_set.has_region_starting_at(region.start@));
+            assert(zone_state.ghost_zone().mem_set.has_region_starting_at(region.vstart@));
             // Derive the ghost region from the zone's own view; no assume needed.
             let ghost ghost_region = choose|r: MemoryRegion| #[trigger]
-                zone_state.ghost_zone().mem_set.regions.contains(r) && r.start@ == region.start@;
+                zone_state.ghost_zone().mem_set.regions.contains(r) && r.vstart@ == region.vstart@;
             assert(zone_state.ghost_zone().contains_region(ghost_region));
-            let tracked new_zone_state = BudgetProtocol::remove_region(gs, zone_state, ghost_region);
-            content = ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
+            let tracked new_zone_state = BudgetProtocol::remove_region(
+                gs,
+                zone_state,
+                ghost_region,
+            );
+            content =
+            ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
             // Linking invariant: new ghost_zone mirrors the updated exec mem_set.
             // new_zone_state.ghost_zone() == old_ghost_zone.remove_region(ghost_region)
             // and M::remove ensures mem_set@.regions == old_mem_set.regions.remove(ghost_region),
@@ -521,11 +522,11 @@ impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, ClosureProtocol> = token.get();
-        if !mem_set.has_region_starting_at(region.start) {
+        if !mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
-        mem_set.remove(allocator, region.start);
+        mem_set.remove(allocator, region.vstart);
         proof {
             let tracked ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state } = content;
             let tracked new_zone_state = ClosureProtocol::remove_region(gs, zone_state, region);

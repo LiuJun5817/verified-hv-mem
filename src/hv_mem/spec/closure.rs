@@ -40,15 +40,6 @@ pub axiom fn all_regions_disjoint()
                 ==> !r1.spec_overlaps_pmem(r2),
 ;
 
-/// Axiom: all regions in `all_regions()` are physically linear (offset-mapped
-/// without address-space wrap), so their frames form contiguous page-aligned
-/// blocks.  Guaranteed by configuration (the toolchain only builds `Offset`
-/// mappers; see `hv_mem::config`), like `all_regions_valid` / `all_regions_disjoint`.
-pub axiom fn all_regions_pmem_linear()
-    ensures
-        forall|r: MemoryRegion| #[trigger] all_regions().contains(r) ==> r.pmem_linear(),
-;
-
 // Assumption-1 state machine: tracks the global region closure across all zones.
 tokenized_state_machine! {
     ClosureSpec {
@@ -190,16 +181,19 @@ tokenized_state_machine! {
                 assert(zone.wf());
                 assert({
                     let paddr = zone.mem_set.translate(v);
+                    // Same predicate as `contains_vaddr` / `translate`, so the same
+                    // region witness is chosen.
                     let r = choose|r: MemoryRegion|
-                        #[trigger] zone.regions().contains(r) && r.spec_contains_vaddr(v);
+                        zone.mem_set.regions.contains(r) && #[trigger] r.spec_contains_vaddr(v);
                     r.spec_contains_paddr(paddr)
                 }) by {
                     // inv_zones_wf => zone.wf() => zone.mem_set.wf()
                     let paddr = zone.mem_set.translate(v);
                     assert(zone.mem_set.wf());
-                    assert(exists|r: MemoryRegion| #[trigger] zone.regions().contains(r) && r.spec_contains_vaddr(v));
-                    let r = choose|r: MemoryRegion| #[trigger]
-                        zone.regions().contains(r) && r.spec_contains_vaddr(v);
+                    assert(zone.mem_set.contains_vaddr(v));  // from require
+                    let r = choose|r: MemoryRegion|
+                        zone.mem_set.regions.contains(r) && #[trigger] r.spec_contains_vaddr(v);
+                    assert(zone.mem_set.regions.contains(r) && r.spec_contains_vaddr(v));
                     assert(r.spec_valid());
                     r.lemma_contains_vaddr_implies_contains_paddr(v);
                     assert(r.spec_contains_paddr(paddr));

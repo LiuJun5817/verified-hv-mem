@@ -13,8 +13,8 @@ use vstd::{prelude::*, tokens::InstanceId};
 
 pub use budget::{BudgetSpec, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken};
 pub use closure::{
-    all_regions, all_regions_disjoint, all_regions_pmem_linear, all_regions_valid,
-    ClosureRegionToken, ClosureSpec, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
+    all_regions, all_regions_disjoint, all_regions_valid, ClosureRegionToken, ClosureSpec,
+    ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
 };
 
 verus! {

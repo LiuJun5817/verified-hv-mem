@@ -30,7 +30,7 @@ use crate::address::region::{MemoryRegion, SPEC_PAGE_SIZE};
 use crate::hv_mem::spec::budget::{
     zone_budget, zone_budget_in_all_regions, zone_budget_pairwise_disjoint, BudgetSpec,
 };
-use crate::hv_mem::spec::{all_regions, all_regions_disjoint, all_regions_pmem_linear, GhostZone};
+use crate::hv_mem::spec::{all_regions, all_regions_disjoint, GhostZone};
 use crate::machine::software::SwView;
 use crate::machine::types::*;
 use vstd::prelude::*;
@@ -101,9 +101,11 @@ pub open spec fn region_pmem_exclusive(gz: GhostZone, r: MemoryRegion) -> bool {
 /// Two regions that back the same physical page overlap in physical memory.
 ///
 /// Relates `region_phys_page` equality to `MemoryRegion::spec_overlaps_pmem`.
-/// Both regions are `pmem_linear` (page-aligned base, one frame per page in
-/// order), so a shared physical page index means their page-aligned physical
-/// blocks share a whole page, hence their byte intervals overlap.
+/// The new `MemoryRegion` lays its frames out linearly from a page-aligned
+/// physical base (`spec_page_paddr(i) == pstart + i*ps`), so a shared physical
+/// page index means the two page-aligned physical blocks share a whole page,
+/// hence their byte intervals overlap.  No linearity axiom is needed — it is a
+/// structural property of `pstart` + `spec_valid` (page-aligned base).
 pub proof fn lemma_same_phys_page_implies_pmem_overlap(
     r1: MemoryRegion,
     i1: nat,
@@ -113,8 +115,6 @@ pub proof fn lemma_same_phys_page_implies_pmem_overlap(
     requires
         r1.spec_valid(),
         r2.spec_valid(),
-        r1.pmem_linear(),
-        r2.pmem_linear(),
         0 <= i1 < r1.pages,
         0 <= i2 < r2.pages,
         region_phys_page(r1, i1) == region_phys_page(r2, i2),
@@ -122,18 +122,14 @@ pub proof fn lemma_same_phys_page_implies_pmem_overlap(
         r1.spec_overlaps_pmem(r2),
 {
     let ps = SPEC_PAGE_SIZE;
-    let a1 = r1.mapper.spec_map(r1.start@).0;
-    let a2 = r2.mapper.spec_map(r2.start@).0;
+    let a1 = r1.pstart@.0;
+    let a2 = r2.pstart@.0;
 
-    // Frame bases are linear (pmem_linear at i1, i2, and at the ends pages1/pages2).
+    // Frame bases are linear by construction: spec_frame(i).base == pstart + i*ps.
     assert(r1.spec_frame(i1).base.0 == a1 + i1 * ps);
     assert(r2.spec_frame(i2).base.0 == a2 + i2 * ps);
-    assert(r1.spec_end() == r1.start@.offset(r1.pages as nat * ps));
-    assert(r2.spec_end() == r2.start@.offset(r2.pages as nat * ps));
-    assert(r1.mapper.spec_map(r1.spec_end()).0 == a1 + r1.pages as nat * ps);
-    assert(r2.mapper.spec_map(r2.spec_end()).0 == a2 + r2.pages as nat * ps);
 
-    // Page-aligned physical bases: a = q*ps.
+    // Page-aligned physical bases (spec_valid): a = q*ps.
     let q1 = a1 / ps;
     let q2 = a2 / ps;
     assert(a1 % ps == 0 && a2 % ps == 0);
@@ -157,11 +153,11 @@ pub proof fn lemma_same_phys_page_implies_pmem_overlap(
     assert(region_phys_page(r2, i2).0 == q2 + i2);
     assert(q1 + i1 == q2 + i2);
 
-    // spec_overlaps_pmem compares the byte intervals [a, a + pages*ps).
-    let ss = r1.mapper.spec_map(r1.start@).0;
-    let se = r1.mapper.spec_map(r1.spec_end()).0;
-    let os = r2.mapper.spec_map(r2.start@).0;
-    let oe = r2.mapper.spec_map(r2.spec_end()).0;
+    // spec_overlaps_pmem compares the byte intervals [pstart, pstart + pages*ps).
+    let ss = a1;
+    let se = a1 + r1.pages as nat * ps;
+    let os = a2;
+    let oe = a2 + r2.pages as nat * ps;
     if ss <= os {
         assert(se > os) by (nonlinear_arith)
             requires
@@ -221,9 +217,9 @@ pub proof fn lemma_gpa_vaddr_roundtrip(r: MemoryRegion, i: nat)
         gpa_to_vaddr(region_guest_page(r, i)) == r.spec_page_vaddr(i),
 {
     let ps = SPEC_PAGE_SIZE;
-    let s = r.start@.0;
+    let s = r.vstart@.0;
     let x = r.spec_page_vaddr(i).0;
-    assert(r.start@.aligned(ps));  // spec_valid ⇒ start page-aligned
+    assert(r.vstart@.aligned(ps));  // spec_valid ⇒ start page-aligned
     assert(s % ps == 0);
     assert(x == s + i * ps);  // spec_page_vaddr(i) = start.offset(i*ps)
     vstd::arithmetic::div_mod::lemma_fundamental_div_mod(s as int, ps as int);
@@ -545,7 +541,7 @@ pub proof fn lemma_state_owned_pages_disjoint(s: BudgetSpec::State)
             all_regions_disjoint();
             assert(!r1.spec_overlaps_pmem(r2));
 
-            all_regions_pmem_linear();  // r1, r2 ∈ all_regions ⇒ pmem_linear
+            // pmem-linearity is now structural (page-aligned `pstart` + linear frames).
             lemma_same_phys_page_implies_pmem_overlap(r1, i1, r2, i2);
             assert(r1.spec_overlaps_pmem(r2));
             assert(false);

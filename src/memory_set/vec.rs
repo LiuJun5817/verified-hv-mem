@@ -9,6 +9,7 @@
 //! `self.pt@.mappings`, the two coincide on `mappings`; we deliberately keep both
 //! spellings to mark which layer each statement is reasoning about.
 use super::*;
+use crate::address::addr::PAddr;
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 use crate::page_table::{PTConstants, PageTable};
 use vstd::prelude::*;
@@ -67,16 +68,16 @@ impl<PT, A> VecMemorySet<PT, A> where PT: PageTable<A>, A: BitmapAllocator {
             forall|i: int, j: int|
                 #![auto]
                 0 <= i < self.regions.len() && 0 <= j < self.regions.len() && i != j
-                    ==> self.regions[i].start@ != self.regions[j].start@,
+                    ==> self.regions[i].vstart@ != self.regions[j].vstart@,
     {
         if exists|i: int, j: int|
             #![auto]
             0 <= i < self.regions.len() && 0 <= j < self.regions.len() && i != j
-                && self.regions[i].start@ == self.regions[j].start@ {
+                && self.regions[i].vstart@ == self.regions[j].vstart@ {
             let (i, j) = choose|i: int, j: int|
                 #![auto]
                 0 <= i < self.regions.len() && 0 <= j < self.regions.len() && i != j
-                    && self.regions[i].start@ == self.regions[j].start@;
+                    && self.regions[i].vstart@ == self.regions[j].vstart@;
             assert(self.regions[i].spec_valid());
             assert(self.regions[j].spec_valid());
             assert(self.regions[i].spec_overlaps_vmem(self.regions[j]));
@@ -156,10 +157,10 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
             invariant
                 0 <= i <= self.regions.len(),
                 self.invariants(),
-                forall|j: int| #![auto] 0 <= j < i ==> self.regions[j].start@ != v@,
+                forall|j: int| #![auto] 0 <= j < i ==> self.regions[j].vstart@ != v@,
         {
             let r = &self.regions[i];
-            if r.start.0 == v.0 {
+            if r.vstart.0 == v.0 {
                 return true;
             }
         }
@@ -222,21 +223,21 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                         )),
             decreases region.pages - i,
         {
-            let vbase = VAddr(region.start.0 + i * PAGE_SIZE);
-            let paddr = region.mapper.map(vbase);
+            let vbase = VAddr(region.vstart.0 + i * PAGE_SIZE);
+            let paddr = PAddr(region.pstart.0 + i * PAGE_SIZE);
             // TODO: support huge pages
             let frame = Frame { base: paddr, size: FrameSize::Size4K, attr: region.attr.clone() };
 
             proof {
-                assert(vbase@.within(region.start@, region.pages as nat * SPEC_PAGE_SIZE));
+                assert(vbase@.within(region.vstart@, region.pages as nat * SPEC_PAGE_SIZE));
                 // vbase not within any existing region
                 assert forall|j: int| #![auto] 0 <= j < self.regions.len() implies !vbase@.within(
-                    self.regions[j].start@,
+                    self.regions[j].vstart@,
                     self.regions[j].pages as nat * SPEC_PAGE_SIZE,
                 ) by {
                     let r = self.regions[j];
                     assert(!region.spec_overlaps_vmem(r));
-                    if vbase@.within(r.start@, r.pages as nat * SPEC_PAGE_SIZE) {
+                    if vbase@.within(r.vstart@, r.pages as nat * SPEC_PAGE_SIZE) {
                         assert(region.spec_overlaps_vmem(r));
                     }
                 };
@@ -246,17 +247,17 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     0 <= j < self.regions.len() ==> !SpecVAddr::overlap(
                         vbase@,
                         frame.size.as_nat(),
-                        self.regions[j].start@,
+                        self.regions[j].vstart@,
                         self.regions[j].pages as nat * SPEC_PAGE_SIZE,
                     ));
                 if i > 0 {
                     // vbase not within the already mapped part of the new region
-                    assert(!vbase@.within(region.start@, (i - 1) as nat * SPEC_PAGE_SIZE));
+                    assert(!vbase@.within(region.vstart@, (i - 1) as nat * SPEC_PAGE_SIZE));
                     // (vbase, frame) does not overlap with the already mapped part of the new region
                     assert(!SpecVAddr::overlap(
                         vbase@,
                         frame.size.as_nat(),
-                        region.start@,
+                        region.vstart@,
                         (i - 1) as nat * SPEC_PAGE_SIZE,
                     ));
                 }
@@ -507,12 +508,12 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                 len == self.regions.len(),
                 0 <= i <= self.regions.len(),
                 *self == *old(self),
-                forall|j: int| 0 <= j < i ==> #[trigger] self.regions[j].start@ != start@,
+                forall|j: int| 0 <= j < i ==> #[trigger] self.regions[j].vstart@ != start@,
             ensures
-                i < len ==> self.regions[i as int].start@ == start@,
+                i < len ==> self.regions[i as int].vstart@ == start@,
             decreases len - i,
         {
-            if self.regions[i].start.0 == start.0 {
+            if self.regions[i].vstart.0 == start.0 {
                 break ;
             }
             i += 1;
@@ -523,12 +524,12 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
         proof {
             self.lemma_region_start_unique();
             assert(i == choose|i: int|
-                0 <= i < self.regions.len() && #[trigger] self.regions[i].start@ == start@);
+                0 <= i < self.regions.len() && #[trigger] self.regions[i].vstart@ == start@);
         }
 
         let ridx = i;
         let region = &self.regions[ridx];
-        assert(region.start@ == start@);
+        assert(region.vstart@ == start@);
         assert(self.has_mapping_for(*region));
 
         let mut i = 0;
@@ -576,7 +577,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                             == region.spec_frame(j),
             decreases region.pages - i,
         {
-            let vaddr = VAddr(region.start.0 + i * PAGE_SIZE);
+            let vaddr = VAddr(region.vstart.0 + i * PAGE_SIZE);
             proof {
                 assert(vaddr@.0 % SPEC_PAGE_SIZE == 0);
                 assert(self.pt@.mappings.contains_pair(

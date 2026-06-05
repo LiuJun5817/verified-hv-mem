@@ -22,7 +22,7 @@ use super::transition::*;
 use super::view::*;
 use crate::address::region::MemoryRegion;
 use crate::hv_mem::spec::budget::{zone_budget, zone_budget_in_all_regions, BudgetSpec};
-use crate::hv_mem::spec::{all_regions, all_regions_pmem_linear, all_regions_valid, GhostZone};
+use crate::hv_mem::spec::{all_regions, all_regions_valid, GhostZone};
 use crate::machine::software::{SoftwareOps, SwView};
 use crate::machine::types::*;
 use crate::memory_set::SpecMemorySet;
@@ -251,15 +251,6 @@ impl SoftwareOps for BudgetSpec::State {
             pages.contains(pp) ==> all_budget_pages().contains(pp));
 
         assert(self.zones[zid].wf());
-        // zone's regions ⊆ budget ⊆ all_regions ⇒ pmem_linear.
-        all_regions_pmem_linear();
-        zone_budget_in_all_regions();
-        assert forall|rr: MemoryRegion| #[trigger]
-            self.zones[zid].regions().contains(rr) implies rr.pmem_linear() by {
-            assert(self.zones[zid].contains_region(rr));  // inv_zone_within_budget ⇒ in budget
-            assert(zone_budget(zid).contains(rr));
-            assert(all_regions().contains(rr));
-        }
         lemma_remove_region_owned_pages(self.zones[zid], r);
         lemma_all_owned_remove_region(self, zid, r);
         lemma_state_s2_map_remove_region(self, post, zid, r);
