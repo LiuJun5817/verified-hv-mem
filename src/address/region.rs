@@ -86,6 +86,21 @@ impl MemoryRegion {
         }
     }
 
+    /// Physical linearity: the region's frames occupy a contiguous, page-aligned
+    /// physical block — its physical base `map(start)` is page-aligned, and page
+    /// `i` (for `0 ≤ i ≤ pages`) lands at `map(start) + i·PAGE`.  This is what an
+    /// `Offset` mapper realizes when it does not wrap the address space; the
+    /// configuration only ever builds such mappers (see `hv_mem::config`).  It is a
+    /// trusted modeling assumption for `all_regions()` (see `all_regions_pmem_linear`),
+    /// in the same spirit as `spec_valid` / `all_regions_disjoint`.
+    pub open spec fn pmem_linear(self) -> bool {
+        &&& self.mapper.spec_map(self.start@).0 % SPEC_PAGE_SIZE == 0
+        &&& forall|i: nat|
+            0 <= i <= self.pages ==> #[trigger] self.mapper.spec_map(
+                self.start@.offset(i * SPEC_PAGE_SIZE),
+            ).0 == self.mapper.spec_map(self.start@).0 + i * SPEC_PAGE_SIZE
+    }
+
     // ---------------------------------------------------------------------------
     // Region geometry: which page / frame a region maps each of its pages to.
     //

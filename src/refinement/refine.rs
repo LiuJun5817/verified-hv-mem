@@ -13,17 +13,16 @@
 //!   single budget region, then assemble the `SwView` step from the projection
 //!   deltas in [`super::transition`].
 //!
-//! `lemma_state_owned_pages_disjoint` (the cross-zone half of `ownership_wf`) is
-//! proven here from the real `invariant()` + the budget axioms.
+//! `lemma_state_owned_pages_disjoint` (the cross-zone half of `ownership_wf`) lives
+//! in [`super::view`] so the transition deltas can share it; it is proven from the
+//! real `invariant()` + the budget axioms.
 //!
 //! Depends on the helper modules [`super::view`] and [`super::transition`].
 use super::transition::*;
 use super::view::*;
 use crate::address::region::MemoryRegion;
-use crate::hv_mem::spec::budget::{
-    zone_budget, zone_budget_in_all_regions, zone_budget_pairwise_disjoint, BudgetSpec,
-};
-use crate::hv_mem::spec::{all_regions, all_regions_disjoint, all_regions_valid, GhostZone};
+use crate::hv_mem::spec::budget::{zone_budget, zone_budget_in_all_regions, BudgetSpec};
+use crate::hv_mem::spec::{all_regions, all_regions_pmem_linear, all_regions_valid, GhostZone};
 use crate::machine::software::{SoftwareOps, SwView};
 use crate::machine::types::*;
 use crate::memory_set::SpecMemorySet;
@@ -41,30 +40,28 @@ impl SoftwareOps for BudgetSpec::State {
         ensures
             #[trigger] self@.wf(),
     {
-        let s = *self;
         let sw = self.view();
-
         // sharing_wf: vacuous (shared_pages ≡ ∅).
         assert(sw.shared_pages =~= Set::<SharedPage>::empty());
         assert(sw.sharing_wf());
 
         // ownership_wf: dom; cross-zone disjointness; vm-vs-hypervisor disjointness.
         assert(sw.vm_owned.dom() =~= sw.all_vms);
-        lemma_state_owned_pages_disjoint(s);
+        lemma_state_owned_pages_disjoint(*self);
         assert forall|vm: VmId, page: PhysPage|
             sw.all_vms.contains(vm) && #[trigger] sw.vm_owned[vm].contains(
                 page,
             ) implies !sw.hypervisor_owned.contains(page) by {
             // vm.0 ∈ zones.dom (inv_zone_ids) and page ∈ zone_owned ⇒ all_owned ⇒ not in pool.
-            assert(s.zones.contains_key(vm.0));
-            lemma_zone_owned_in_all_owned(s.zones, vm.0, page);
+            assert(self.zones.contains_key(vm.0));
+            lemma_zone_owned_in_all_owned(self.zones, vm.0, page);
         }
         assert(sw.ownership_wf());
 
         // translation_wf.
         assert forall|key: VmPageKey| #[trigger] sw.s2_map.contains_key(key) implies (
         sw.all_vms.contains(key.vm) && sw.owned_or_shared(key.vm, sw.s2_map[key].page)) by {
-            lemma_zone_s2_target_owned(key.vm.0, s.zones[key.vm.0]);
+            lemma_zone_s2_target_owned(key.vm.0, self.zones[key.vm.0]);
         }
         assert(sw.translation_wf());
 
@@ -72,44 +69,22 @@ impl SoftwareOps for BudgetSpec::State {
     }
 
     proof fn add_vm(self, vm: VmId) -> (post: Self) {
+        // Fire the real macro transition `add_zone`.  Its enabling condition
+        // (`!zone_ids.contains(vm.0)` plus the sharded `!zones.contains_key(vm.0)`)
+        // follows from the method precondition `!self@.all_vms.contains(vm)` and
+        // `invariant()` (inv_zone_ids); the returned `post` carries `post.invariant()`
+        // for free — the macro's own `add_zone_inductive`.
         let empty_zone = GhostZone {
             mem_set: SpecMemorySet {
                 regions: Set::<MemoryRegion>::empty(),
                 mappings: Map::empty(),
             },
         };
-        let post = BudgetSpec::State {
-            zone_ids: self.zone_ids.insert(vm.0),
-            zones: self.zones.insert(vm.0, empty_zone),
-        };
-        assert(empty_zone.regions() =~= Set::<MemoryRegion>::empty());
-        assert(empty_zone.mem_set.mappings =~= Map::empty());
-        assert(empty_zone.wf());
+        let post = BudgetSpec::take_step::add_zone(self, vm.0);
+        // Read back the deterministic post shape from the transition relation.
+        assert(post.zones == self.zones.insert(vm.0, empty_zone));
         lemma_zone_owned_pages_empty(empty_zone);
         lemma_zone_s2_entries_empty(vm.0, empty_zone);
-        // post.invariant(): only the (vacuous) new zone is added.
-        assert(post.zones.dom() =~= post.zone_ids);
-        assert forall|zid: nat|
-            #![auto]
-            post.zones.contains_key(zid) implies post.zones[zid].wf() by {
-            if zid != vm.0 {
-                assert(self.zones.contains_key(zid) && self.zones[zid].wf());
-            }
-        }
-        assert forall|zid: nat, r: MemoryRegion|
-            #![auto]
-            post.zones.contains_key(zid) && post.zones[zid].contains_region(r) implies zone_budget(
-            zid,
-        ).contains(r) by {
-            if zid == vm.0 {
-                assert(post.zones[zid].regions() =~= Set::<MemoryRegion>::empty());
-            } else {
-                assert(self.zones.contains_key(zid) && self.zones[zid].contains_region(r));
-            }
-        }
-        zone_budget_in_all_regions();
-        zone_budget_pairwise_disjoint();
-        assert(post.invariant());
         // add_vm_step: the new zone contributes nothing, so all_owned is unchanged.
         assert(!self.zones.dom().contains(vm.0));
         assert(all_owned_pages(post.zones) =~= all_owned_pages(self.zones)) by {
@@ -142,29 +117,14 @@ impl SoftwareOps for BudgetSpec::State {
     }
 
     proof fn remove_vm(self, vm: VmId) -> (post: Self) {
-        let post = BudgetSpec::State {
-            zone_ids: self.zone_ids.remove(vm.0),
-            zones: self.zones.remove(vm.0),
-        };
-        // post.invariant(): removing a zone only shrinks the maps.
-        assert(post.zones.dom() =~= post.zone_ids);
-        assert forall|zid: nat|
-            #![auto]
-            post.zones.contains_key(zid) implies post.zones[zid].wf() by {
-            assert(self.zones.contains_key(zid) && self.zones[zid].wf());
-        }
-        assert forall|zid: nat, r: MemoryRegion|
-            #![auto]
-            post.zones.contains_key(zid) && post.zones[zid].contains_region(r) implies zone_budget(
-            zid,
-        ).contains(r) by {
-            assert(self.zones.contains_key(zid) && self.zones[zid].contains_region(r));
-        }
-        zone_budget_in_all_regions();
-        zone_budget_pairwise_disjoint();
-        assert(post.invariant());
-        // remove_vm_step: the removed zone owned nothing, so all_owned is unchanged.
-        assert(self@.vm_owned[vm] == Set::<PhysPage>::empty());  // precondition
+        // Fire the real macro transition `remove_zone`.  Its enabling condition
+        // (`zones.contains_key(vm.0)`) follows from `self@.all_vms.contains(vm)` and
+        // `invariant()` (inv_zone_ids); `post.invariant()` comes from the macro.
+        let post = BudgetSpec::take_step::remove_zone(self, vm.0);
+        assert(post.zone_ids == self.zone_ids.remove(vm.0));
+        assert(post.zones == self.zones.remove(vm.0));
+        // remove_vm_step: the removed zone owned nothing (precondition), so all_owned
+        // is unchanged.
         assert(zone_owned_pages(self.zones[vm.0]) =~= Set::<PhysPage>::empty());
         assert(all_owned_pages(post.zones) =~= all_owned_pages(self.zones)) by {
             assert forall|pp: PhysPage|
@@ -222,47 +182,20 @@ impl SoftwareOps for BudgetSpec::State {
             zone_budget(zid).contains(r) && pages == region_pages(r) && entries
                 == region_s2_entries(zid, r) && !self.zones[zid].contains_region(r)
                 && !self.zones[zid].mem_set.overlaps_vmem(r);
-        assert(zone_budget(zid).contains(r) && pages == region_pages(r) && entries
-            == region_s2_entries(zid, r) && !self.zones[zid].contains_region(r)
-            && !self.zones[zid].mem_set.overlaps_vmem(r));
         // r is valid (budget ⊆ all_regions, all_regions valid).
         zone_budget_in_all_regions();
         all_regions_valid();
         assert(all_regions().contains(r) && r.spec_valid());
 
         assert(self.zones.contains_key(zid));
-        assert(self.zones[zid].wf());
-        let new_zone = self.zones[zid].insert_region(r);
-        let post = BudgetSpec::State {
-            zone_ids: self.zone_ids,
-            zones: self.zones.insert(zid, new_zone),
-        };
-
-        // ── post.invariant() ───────────────────────────────────────────────
-        lemma_ghost_zone_insert_region_wf(self.zones[zid], r);
-        assert(new_zone.wf());
-        assert(new_zone.regions() =~= self.zones[zid].regions().insert(r));
-        assert(post.zones.dom() =~= post.zone_ids);
-        assert forall|z: nat| #![auto] post.zones.contains_key(z) implies post.zones[z].wf() by {
-            if z != zid {
-                assert(self.zones.contains_key(z) && self.zones[z].wf());
-            }
-        }
-        assert forall|z: nat, rr: MemoryRegion|
-            #![auto]
-            post.zones.contains_key(z) && post.zones[z].contains_region(rr) implies zone_budget(
-            z,
-        ).contains(rr) by {
-            if z == zid {
-                if rr != r {
-                    assert(self.zones[zid].contains_region(rr));
-                }
-            } else {
-                assert(self.zones.contains_key(z) && self.zones[z].contains_region(rr));
-            }
-        }
-        zone_budget_pairwise_disjoint();
-        assert(post.invariant());
+        // Fire the real macro transition `insert_region`.  Its enabling condition
+        // (`zone_budget(zid).contains(r)`, `!contains_region(r)`, `!overlaps_vmem(r)`)
+        // is exactly the `choose` facts above; `post.invariant()` — hence the new
+        // zone's `wf()` via the macro's `insert_region_inductive` — comes for free.
+        let post = BudgetSpec::take_step::insert_region(self, zid, r);
+        // Read back the deterministic post shape from the transition relation.
+        assert(post.zone_ids == self.zone_ids);
+        assert(post.zones == self.zones.insert(zid, self.zones[zid].insert_region(r)));
 
         // ── insert_region_step ─────────────────────────────────────────────
         lemma_insert_region_owned_pages(self.zones[zid], r);
@@ -297,42 +230,17 @@ impl SoftwareOps for BudgetSpec::State {
             #![auto]
             self.zones[zid].contains_region(r) && pages == region_pages(r) && keys
                 == region_s2_entries(zid, r).dom() && region_pmem_exclusive(self.zones[zid], r);
-        assert(self.zones[zid].contains_region(r) && pages == region_pages(r) && keys
-            == region_s2_entries(zid, r).dom() && region_pmem_exclusive(self.zones[zid], r));
 
         assert(self.zones.contains_key(zid));
-        assert(self.zones[zid].wf());
-        let new_zone = self.zones[zid].remove_region(r);
-        let post = BudgetSpec::State {
-            zone_ids: self.zone_ids,
-            zones: self.zones.insert(zid, new_zone),
-        };
-
-        // ── post.invariant(): removing a present region keeps the zone wf ──
-        assert(new_zone.regions() =~= self.zones[zid].regions().remove(r));
-        assert(self.zones[zid].contains_region(r));
-        self.zones[zid].lemma_remove_region_wf(r);
-        assert(new_zone.wf());
-        assert(post.zones.dom() =~= post.zone_ids);
-        assert forall|z: nat| #![auto] post.zones.contains_key(z) implies post.zones[z].wf() by {
-            if z != zid {
-                assert(self.zones.contains_key(z) && self.zones[z].wf());
-            }
-        }
-        assert forall|z: nat, rr: MemoryRegion|
-            #![auto]
-            post.zones.contains_key(z) && post.zones[z].contains_region(rr) implies zone_budget(
-            z,
-        ).contains(rr) by {
-            if z == zid {
-                assert(self.zones[zid].contains_region(rr));
-            } else {
-                assert(self.zones.contains_key(z) && self.zones[z].contains_region(rr));
-            }
-        }
-        zone_budget_in_all_regions();
-        zone_budget_pairwise_disjoint();
-        assert(post.invariant());
+        // Fire the real macro transition `remove_region`.  Its enabling condition
+        // (`zones.contains_key(zid)`, `contains_region(r)`) is given by the `choose`
+        // above; `post.invariant()` comes from the macro's `remove_region_inductive`.
+        // (`region_pmem_exclusive` is *not* part of the transition — it is a
+        // refinement-side hypothesis for the page delta, supplied via `remove_region_pre`.)
+        let post = BudgetSpec::take_step::remove_region(self, zid, r);
+        // Read back the deterministic post shape from the transition relation.
+        assert(post.zone_ids == self.zone_ids);
+        assert(post.zones == self.zones.insert(zid, self.zones[zid].remove_region(r)));
 
         // ── remove_region_step ─────────────────────────────────────────────
         // `pages` lie in some budget (so they are budget pages) — needed for the
@@ -342,6 +250,16 @@ impl SoftwareOps for BudgetSpec::State {
         assert(forall|pp: PhysPage| #[trigger]
             pages.contains(pp) ==> all_budget_pages().contains(pp));
 
+        assert(self.zones[zid].wf());
+        // zone's regions ⊆ budget ⊆ all_regions ⇒ pmem_linear.
+        all_regions_pmem_linear();
+        zone_budget_in_all_regions();
+        assert forall|rr: MemoryRegion| #[trigger]
+            self.zones[zid].regions().contains(rr) implies rr.pmem_linear() by {
+            assert(self.zones[zid].contains_region(rr));  // inv_zone_within_budget ⇒ in budget
+            assert(zone_budget(zid).contains(rr));
+            assert(all_regions().contains(rr));
+        }
         lemma_remove_region_owned_pages(self.zones[zid], r);
         lemma_all_owned_remove_region(self, zid, r);
         lemma_state_s2_map_remove_region(self, post, zid, r);
@@ -351,72 +269,6 @@ impl SoftwareOps for BudgetSpec::State {
         assert(post@.hypervisor_owned =~= self@.hypervisor_owned.union(pages));
         assert(SwView::remove_region_step(self@, post@, vm, pages, keys));
         post
-    }
-}
-
-/// Cross-zone physical-page disjointness, proven from the **real** `invariant()`
-/// (`inv_zone_within_budget` + `inv_zones_wf`) plus the budget axioms.
-pub proof fn lemma_state_owned_pages_disjoint(s: BudgetSpec::State)
-    requires
-        s.invariant(),
-    ensures
-        forall|zid1: nat, zid2: nat, p: PhysPage|
-            #![trigger zone_owned_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
-            s.zones.contains_key(zid1) && s.zones.contains_key(zid2) && zid1 != zid2
-                && zone_owned_pages(s.zones[zid1]).contains(p) ==> !zone_owned_pages(
-                s.zones[zid2],
-            ).contains(p),
-{
-    assert forall|zid1: nat, zid2: nat, p: PhysPage|
-        #![trigger zone_owned_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
-        s.zones.contains_key(zid1) && s.zones.contains_key(zid2) && zid1 != zid2
-            && zone_owned_pages(s.zones[zid1]).contains(p) implies !zone_owned_pages(
-        s.zones[zid2],
-    ).contains(p) by {
-        if zone_owned_pages(s.zones[zid2]).contains(p) {
-            let gz1 = s.zones[zid1];
-            let gz2 = s.zones[zid2];
-            assert(gz1.wf());
-            assert(gz2.wf());
-
-            // Recover backing regions from the exposed mappings (exact-dense soundness).
-            lemma_zone_owned_pages_region_witness(gz1, p);
-            lemma_zone_owned_pages_region_witness(gz2, p);
-
-            let r1 = choose|r: MemoryRegion|
-                #![trigger gz1.regions().contains(r)]
-                gz1.regions().contains(r) && region_owns_page(r, p);
-            assert(gz1.regions().contains(r1) && region_owns_page(r1, p));
-            let i1 = choose|i: nat| 0 <= i < r1.pages && region_phys_page(r1, i) == p;
-            assert(0 <= i1 < r1.pages && region_phys_page(r1, i1) == p);
-
-            let r2 = choose|r: MemoryRegion|
-                #![trigger gz2.regions().contains(r)]
-                gz2.regions().contains(r) && region_owns_page(r, p);
-            assert(gz2.regions().contains(r2) && region_owns_page(r2, p));
-            let i2 = choose|i: nat| 0 <= i < r2.pages && region_phys_page(r2, i) == p;
-            assert(0 <= i2 < r2.pages && region_phys_page(r2, i2) == p);
-
-            assert(r1.spec_valid());
-            assert(r2.spec_valid());
-
-            assert(gz1.contains_region(r1));
-            assert(gz2.contains_region(r2));
-            assert(zone_budget(zid1).contains(r1));
-            assert(zone_budget(zid2).contains(r2));
-
-            zone_budget_pairwise_disjoint();
-            assert(!zone_budget(zid2).contains(r1));
-            assert(r1 != r2);
-            zone_budget_in_all_regions();
-            assert(all_regions().contains(r1) && all_regions().contains(r2));
-            all_regions_disjoint();
-            assert(!r1.spec_overlaps_pmem(r2));
-
-            lemma_same_phys_page_implies_pmem_overlap(r1, i1, r2, i2);
-            assert(r1.spec_overlaps_pmem(r2));
-            assert(false);
-        }
     }
 }
 

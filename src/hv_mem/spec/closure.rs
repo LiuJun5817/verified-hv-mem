@@ -40,6 +40,15 @@ pub axiom fn all_regions_disjoint()
                 ==> !r1.spec_overlaps_pmem(r2),
 ;
 
+/// Axiom: all regions in `all_regions()` are physically linear (offset-mapped
+/// without address-space wrap), so their frames form contiguous page-aligned
+/// blocks.  Guaranteed by configuration (the toolchain only builds `Offset`
+/// mappers; see `hv_mem::config`), like `all_regions_valid` / `all_regions_disjoint`.
+pub axiom fn all_regions_pmem_linear()
+    ensures
+        forall|r: MemoryRegion| #[trigger] all_regions().contains(r) ==> r.pmem_linear(),
+;
+
 // Assumption-1 state machine: tracks the global region closure across all zones.
 tokenized_state_machine! {
     ClosureSpec {

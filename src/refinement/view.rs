@@ -27,8 +27,10 @@
 use crate::address::addr::SpecVAddr;
 use crate::address::frame::{MemAttr, SpecFrame};
 use crate::address::region::{MemoryRegion, SPEC_PAGE_SIZE};
-use crate::hv_mem::spec::budget::{zone_budget, BudgetSpec};
-use crate::hv_mem::spec::GhostZone;
+use crate::hv_mem::spec::budget::{
+    zone_budget, zone_budget_in_all_regions, zone_budget_pairwise_disjoint, BudgetSpec,
+};
+use crate::hv_mem::spec::{all_regions, all_regions_disjoint, all_regions_pmem_linear, GhostZone};
 use crate::machine::software::SwView;
 use crate::machine::types::*;
 use vstd::prelude::*;
@@ -98,10 +100,10 @@ pub open spec fn region_pmem_exclusive(gz: GhostZone, r: MemoryRegion) -> bool {
 
 /// Two regions that back the same physical page overlap in physical memory.
 ///
-/// The one remaining arithmetic obligation of the page-unit reconciliation: it
-/// relates `region_phys_page` equality to `MemoryRegion::spec_overlaps_pmem`.
-/// (Holds for `Offset` mappers; a `Fixed` mapper has an empty pmem image, so the
-/// regions would need to be `Offset` — see the project notes.)
+/// Relates `region_phys_page` equality to `MemoryRegion::spec_overlaps_pmem`.
+/// Both regions are `pmem_linear` (page-aligned base, one frame per page in
+/// order), so a shared physical page index means their page-aligned physical
+/// blocks share a whole page, hence their byte intervals overlap.
 pub proof fn lemma_same_phys_page_implies_pmem_overlap(
     r1: MemoryRegion,
     i1: nat,
@@ -111,13 +113,81 @@ pub proof fn lemma_same_phys_page_implies_pmem_overlap(
     requires
         r1.spec_valid(),
         r2.spec_valid(),
+        r1.pmem_linear(),
+        r2.pmem_linear(),
         0 <= i1 < r1.pages,
         0 <= i2 < r2.pages,
         region_phys_page(r1, i1) == region_phys_page(r2, i2),
     ensures
         r1.spec_overlaps_pmem(r2),
 {
-    admit();
+    let ps = SPEC_PAGE_SIZE;
+    let a1 = r1.mapper.spec_map(r1.start@).0;
+    let a2 = r2.mapper.spec_map(r2.start@).0;
+
+    // Frame bases are linear (pmem_linear at i1, i2, and at the ends pages1/pages2).
+    assert(r1.spec_frame(i1).base.0 == a1 + i1 * ps);
+    assert(r2.spec_frame(i2).base.0 == a2 + i2 * ps);
+    assert(r1.spec_end() == r1.start@.offset(r1.pages as nat * ps));
+    assert(r2.spec_end() == r2.start@.offset(r2.pages as nat * ps));
+    assert(r1.mapper.spec_map(r1.spec_end()).0 == a1 + r1.pages as nat * ps);
+    assert(r2.mapper.spec_map(r2.spec_end()).0 == a2 + r2.pages as nat * ps);
+
+    // Page-aligned physical bases: a = q*ps.
+    let q1 = a1 / ps;
+    let q2 = a2 / ps;
+    assert(a1 % ps == 0 && a2 % ps == 0);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(a1 as int, ps as int);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(a2 as int, ps as int);
+    assert(a1 == q1 * ps);
+    assert(a2 == q2 * ps);
+
+    // region_phys_page(r, i).0 == q + i, and the hypothesis gives q1+i1 == q2+i2.
+    assert((a1 + i1 * ps) / ps == q1 + i1) by (nonlinear_arith)
+        requires
+            a1 == q1 * ps,
+            ps > 0,
+    ;
+    assert((a2 + i2 * ps) / ps == q2 + i2) by (nonlinear_arith)
+        requires
+            a2 == q2 * ps,
+            ps > 0,
+    ;
+    assert(region_phys_page(r1, i1).0 == q1 + i1);
+    assert(region_phys_page(r2, i2).0 == q2 + i2);
+    assert(q1 + i1 == q2 + i2);
+
+    // spec_overlaps_pmem compares the byte intervals [a, a + pages*ps).
+    let ss = r1.mapper.spec_map(r1.start@).0;
+    let se = r1.mapper.spec_map(r1.spec_end()).0;
+    let os = r2.mapper.spec_map(r2.start@).0;
+    let oe = r2.mapper.spec_map(r2.spec_end()).0;
+    if ss <= os {
+        assert(se > os) by (nonlinear_arith)
+            requires
+                se == a1 + r1.pages as nat * ps,
+                os == a2,
+                a1 == q1 * ps,
+                a2 == q2 * ps,
+                ps > 0,
+                q1 + i1 == q2 + i2,
+                i1 < r1.pages,
+                i2 >= 0,
+        ;
+    } else {
+        assert(oe > ss) by (nonlinear_arith)
+            requires
+                oe == a2 + r2.pages as nat * ps,
+                ss == a1,
+                a1 == q1 * ps,
+                a2 == q2 * ps,
+                ps > 0,
+                q1 + i1 == q2 + i2,
+                i2 < r2.pages,
+                i1 >= 0,
+        ;
+    }
+    assert(r1.spec_overlaps_pmem(r2));
 }
 
 // ───────────────────── mapping → machine-page helpers ───────────────────────
@@ -137,6 +207,110 @@ pub open spec fn frame_phys_page(f: SpecFrame) -> PhysPage {
 /// The stage-2 entry a mapped frame induces.
 pub open spec fn frame_s2_entry(f: SpecFrame) -> S2Entry {
     S2Entry { page: frame_phys_page(f), access: attr_to_perms(f.attr), generation: 0 }
+}
+
+/// Round-trip: the mapped vaddr of a region page is the page-aligned image of its
+/// guest page — `gpa_to_vaddr ∘ region_guest_page = spec_page_vaddr`.  Holds
+/// because a valid region starts page-aligned, so every page vaddr is a multiple
+/// of `SPEC_PAGE_SIZE`.
+pub proof fn lemma_gpa_vaddr_roundtrip(r: MemoryRegion, i: nat)
+    requires
+        r.spec_valid(),
+        0 <= i < r.pages,
+    ensures
+        gpa_to_vaddr(region_guest_page(r, i)) == r.spec_page_vaddr(i),
+{
+    let ps = SPEC_PAGE_SIZE;
+    let s = r.start@.0;
+    let x = r.spec_page_vaddr(i).0;
+    assert(r.start@.aligned(ps));  // spec_valid ⇒ start page-aligned
+    assert(s % ps == 0);
+    assert(x == s + i * ps);  // spec_page_vaddr(i) = start.offset(i*ps)
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(s as int, ps as int);
+    assert(s == ps * (s / ps));
+    assert(x == (s / ps + i) * ps) by (nonlinear_arith)
+        requires
+            x == s + i * ps,
+            s == ps * (s / ps),
+    ;
+    assert((x / ps) == s / ps + i) by (nonlinear_arith)
+        requires
+            x == (s / ps + i) * ps,
+            ps > 0,
+    ;
+    assert((x / ps) * ps == x) by (nonlinear_arith)
+        requires
+            x == (s / ps + i) * ps,
+            (x / ps) == s / ps + i,
+    ;
+    // region_guest_page(r,i).0 == x/ps and gpa_to_vaddr(g).0 == g.0*ps
+    assert(gpa_to_vaddr(region_guest_page(r, i)).0 == x);
+}
+
+/// `gpa_to_vaddr` is injective (it is multiplication by the page size).
+pub proof fn lemma_gpa_to_vaddr_injective(g1: GuestPage, g2: GuestPage)
+    requires
+        gpa_to_vaddr(g1) == gpa_to_vaddr(g2),
+    ensures
+        g1 == g2,
+{
+    assert(g1.0 * SPEC_PAGE_SIZE == g2.0 * SPEC_PAGE_SIZE);
+    assert(g1.0 == g2.0) by (nonlinear_arith)
+        requires
+            g1.0 * SPEC_PAGE_SIZE == g2.0 * SPEC_PAGE_SIZE,
+            SPEC_PAGE_SIZE == 0x1000nat,
+    ;
+}
+
+/// A region maps guest page `gpa` iff its dense page table has a key at the
+/// corresponding vaddr — the bridge between the gpa-keyed `region_s2_entries` and
+/// the vaddr-keyed `spec_mappings`.
+pub proof fn lemma_region_gpa_mapped_iff(r: MemoryRegion, gpa: GuestPage)
+    requires
+        r.spec_valid(),
+    ensures
+        r.spec_mappings().contains_key(gpa_to_vaddr(gpa)) <==> region_owns_gpa(r, gpa),
+{
+    let v = gpa_to_vaddr(gpa);
+    if region_owns_gpa(r, gpa) {
+        let i = choose|i: nat| 0 <= i < r.pages && region_guest_page(r, i) == gpa;
+        lemma_gpa_vaddr_roundtrip(r, i);
+        assert(v == r.spec_page_vaddr(i));
+        r.lemma_mappings_contains_pair(i);
+    }
+    if r.spec_mappings().contains_key(v) {
+        r.lemma_mappings_sound(v);
+        let i = choose|i: nat|
+            0 <= i < r.pages && v == r.spec_page_vaddr(i) && r.spec_mappings()[v] == r.spec_frame(
+                i,
+            );
+        lemma_gpa_vaddr_roundtrip(r, i);  // gpa_to_vaddr(region_guest_page(r,i)) == v == gpa_to_vaddr(gpa)
+        lemma_gpa_to_vaddr_injective(region_guest_page(r, i), gpa);
+        assert(region_owns_gpa(r, gpa));  // witness i
+    }
+}
+
+/// The stage-2 entry a region installs for `k` equals the entry induced by the
+/// frame its dense page table maps at `k`'s vaddr.
+pub proof fn lemma_region_s2_value(zid: nat, r: MemoryRegion, k: VmPageKey)
+    requires
+        r.spec_valid(),
+        k.vm == VmId(zid),
+        region_owns_gpa(r, k.gpa),
+    ensures
+        region_s2_entries(zid, r).contains_key(k),
+        region_s2_entries(zid, r)[k] == frame_s2_entry(r.spec_mappings()[gpa_to_vaddr(k.gpa)]),
+{
+    let v = gpa_to_vaddr(k.gpa);
+    assert(region_s2_entries(zid, r).contains_key(k));
+    // the map value chooses j with region_guest_page(r, j) == k.gpa.
+    let j = choose|j: nat| 0 <= j < r.pages && region_guest_page(r, j) == k.gpa;
+    assert(0 <= j < r.pages && region_guest_page(r, j) == k.gpa);
+    assert(region_s2_entries(zid, r)[k] == frame_s2_entry(r.spec_frame(j)));
+    lemma_gpa_vaddr_roundtrip(r, j);
+    assert(v == r.spec_page_vaddr(j));
+    r.lemma_mappings_contains_pair(j);
+    assert(r.spec_mappings()[v] == r.spec_frame(j));
 }
 
 // ─────────────────────────── per-zone projections ───────────────────────────
@@ -271,7 +445,7 @@ pub proof fn lemma_zone_owned_pages_region_witness(gz: GhostZone, p: PhysPage)
     ensures
         exists|r: MemoryRegion| #[trigger] gz.regions().contains(r) && region_owns_page(r, p),
 {
-    let v = choose|v: SpecVAddr|
+    let v = choose|v: SpecVAddr| #[trigger]
         gz.mem_set.mappings.contains_key(v) && frame_phys_page(gz.mem_set.mappings[v]) == p;
     let f = gz.mem_set.mappings[v];
     assert(gz.mem_set.mappings.contains_pair(v, f));
@@ -306,6 +480,76 @@ pub proof fn lemma_zone_s2_entries_empty(zid: nat, gz: GhostZone)
 {
     assert forall|k: VmPageKey| !zone_s2_entries(zid, gz).contains_key(k) by {
         // key predicate needs a mapped vaddr; there is none.
+    }
+}
+
+/// Cross-zone physical-page disjointness, proven from the **real** `invariant()`
+/// (`inv_zone_within_budget` + `inv_zones_wf`) plus the budget axioms.
+///
+/// Lives here (rather than in [`super::refine`]) so both the contract proof and
+/// the [`super::transition`] deltas can use it.
+pub proof fn lemma_state_owned_pages_disjoint(s: BudgetSpec::State)
+    requires
+        s.invariant(),
+    ensures
+        forall|zid1: nat, zid2: nat, p: PhysPage|
+            #![trigger zone_owned_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
+            s.zones.contains_key(zid1) && s.zones.contains_key(zid2) && zid1 != zid2
+                && zone_owned_pages(s.zones[zid1]).contains(p) ==> !zone_owned_pages(
+                s.zones[zid2],
+            ).contains(p),
+{
+    assert forall|zid1: nat, zid2: nat, p: PhysPage|
+        #![trigger zone_owned_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
+        s.zones.contains_key(zid1) && s.zones.contains_key(zid2) && zid1 != zid2
+            && zone_owned_pages(s.zones[zid1]).contains(p) implies !zone_owned_pages(
+        s.zones[zid2],
+    ).contains(p) by {
+        if zone_owned_pages(s.zones[zid2]).contains(p) {
+            let gz1 = s.zones[zid1];
+            let gz2 = s.zones[zid2];
+            assert(gz1.wf());
+            assert(gz2.wf());
+
+            // Recover backing regions from the exposed mappings (exact-dense soundness).
+            lemma_zone_owned_pages_region_witness(gz1, p);
+            lemma_zone_owned_pages_region_witness(gz2, p);
+
+            let r1 = choose|r: MemoryRegion|
+                #![trigger gz1.regions().contains(r)]
+                gz1.regions().contains(r) && region_owns_page(r, p);
+            assert(gz1.regions().contains(r1) && region_owns_page(r1, p));
+            let i1 = choose|i: nat| 0 <= i < r1.pages && region_phys_page(r1, i) == p;
+            assert(0 <= i1 < r1.pages && region_phys_page(r1, i1) == p);
+
+            let r2 = choose|r: MemoryRegion|
+                #![trigger gz2.regions().contains(r)]
+                gz2.regions().contains(r) && region_owns_page(r, p);
+            assert(gz2.regions().contains(r2) && region_owns_page(r2, p));
+            let i2 = choose|i: nat| 0 <= i < r2.pages && region_phys_page(r2, i) == p;
+            assert(0 <= i2 < r2.pages && region_phys_page(r2, i2) == p);
+
+            assert(r1.spec_valid());
+            assert(r2.spec_valid());
+
+            assert(gz1.contains_region(r1));
+            assert(gz2.contains_region(r2));
+            assert(zone_budget(zid1).contains(r1));
+            assert(zone_budget(zid2).contains(r2));
+
+            zone_budget_pairwise_disjoint();
+            assert(!zone_budget(zid2).contains(r1));
+            assert(r1 != r2);
+            zone_budget_in_all_regions();
+            assert(all_regions().contains(r1) && all_regions().contains(r2));
+            all_regions_disjoint();
+            assert(!r1.spec_overlaps_pmem(r2));
+
+            all_regions_pmem_linear();  // r1, r2 ∈ all_regions ⇒ pmem_linear
+            lemma_same_phys_page_implies_pmem_overlap(r1, i1, r2, i2);
+            assert(r1.spec_overlaps_pmem(r2));
+            assert(false);
+        }
     }
 }
 
