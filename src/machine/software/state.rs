@@ -1,5 +1,6 @@
 use vstd::prelude::*;
 
+use super::Region;
 use crate::machine::types::*;
 
 verus! {
@@ -24,6 +25,16 @@ pub ghost struct SwView {
 }
 
 impl SwView {
+    // ------------------------------------------------------------------
+    // Trusted abstract predicate (uninterpreted)
+    // ------------------------------------------------------------------
+    /// Whether `region` is a unit assignable to its VM *in this state*.
+    /// Uninterpreted at the machine level — an implementation characterizes it (via
+    /// its region budget, a runtime check, …) with a refinement axiom (see
+    /// `crate::refinement::view::axiom_assignable_from_budget`).  Being
+    /// state-dependent, the machine model makes no region-budget assumption of its own.
+    pub uninterp spec fn is_region_assignable(self, region: Region) -> bool;
+
     // ------------------------------------------------------------------
     // Derived predicates
     // ------------------------------------------------------------------

@@ -6,18 +6,22 @@
 //!
 //! Each transition method fires the matching `BudgetSpec` macro transition via
 //! `BudgetSpec::take_step::*` (which supplies `post.invariant()`) and then proves
-//! the corresponding `SwView` step.  `insert_region` / `remove_region` use the
-//! precondition hooks `insert_region_pre` / `remove_region_pre` to pin
-//! `pages`/`entries` to a single budget region, then assemble the step from the
-//! projection deltas in [`super::transition`].
+//! the corresponding `SwView` step.  `insert_region` / `remove_region` take a
+//! machine-level [`Region`] argument: the trusted bridge
+//! [`super::view::axiom_assignable_from_budget`] recovers the budget
+//! `MemoryRegion` it abstracts, the projection-equality lemmas in [`super::view`]
+//! identify their pages/entries, and the deltas in [`super::transition`] assemble
+//! the step.  The transition guards (`!contains_region` / `!overlaps_vmem` for
+//! insert, `contains_region` / pmem-exclusivity for remove) are *derived* from the
+//! closed `SwView::*_enabled` preconditions.
 //!
 //! Builds on [`super::view`] and [`super::transition`].
 use super::transition::*;
 use super::view::*;
 use crate::address::region::MemoryRegion;
 use crate::hv_mem::spec::budget::{zone_budget, zone_budget_in_all_regions, BudgetSpec};
-use crate::hv_mem::spec::{all_regions, all_regions_valid, GhostZone};
-use crate::machine::software::{SoftwareOps, SwView};
+use crate::hv_mem::spec::{all_regions, all_regions_disjoint, all_regions_valid, GhostZone};
+use crate::machine::software::{Region, SoftwareOps, SwView};
 use crate::machine::types::*;
 use crate::memory_set::SpecMemorySet;
 use vstd::prelude::*;
@@ -140,101 +144,152 @@ impl SoftwareOps for BudgetSpec::State {
         post
     }
 
-    /// `pages`/`entries` are exactly some not-yet-present budget region of `vm`.
-    open spec fn insert_region_pre(
-        self,
-        vm: VmId,
-        pages: Set<PhysPage>,
-        entries: Map<VmPageKey, S2Entry>,
-    ) -> bool {
-        exists|r: MemoryRegion|
-            #![trigger zone_budget(vm.0).contains(r)]
-            zone_budget(vm.0).contains(r) && pages == region_pages(r) && entries
-                == region_s2_entries(vm.0, r) && !self.zones[vm.0].contains_region(r)
-                && !self.zones[vm.0].mem_set.overlaps_vmem(r)
-    }
-
-    proof fn insert_region(
-        self,
-        vm: VmId,
-        pages: Set<PhysPage>,
-        entries: Map<VmPageKey, S2Entry>,
-    ) -> (post: Self) {
+    proof fn insert_region(self, region: Region) -> (post: Self) {
+        let vm = region.vm;
         let zid = vm.0;
-        // The witnessing budget region from the precondition hook.
+        assert(vm == VmId(zid));
+        assert(self.zone_ids.contains(zid));  // view: all_vms ⟺ zone_ids
+        assert(self.zones.contains_key(zid));  // invariant: zone_ids ⊆ zones.dom
+
+        // (1) Recover the budget region via the trusted environment bridge.
+        axiom_assignable_from_budget(self, region);
         let r = choose|r: MemoryRegion|
-            #![auto]
-            zone_budget(zid).contains(r) && pages == region_pages(r) && entries
-                == region_s2_entries(zid, r) && !self.zones[zid].contains_region(r)
-                && !self.zones[zid].mem_set.overlaps_vmem(r);
-        // r is valid (budget ⊆ all_regions, all_regions valid).
+            zone_budget(zid).contains(r) && region_to_abstract(zid, r) == region;
         zone_budget_in_all_regions();
         all_regions_valid();
         assert(all_regions().contains(r) && r.spec_valid());
 
-        assert(self.zones.contains_key(zid));
-        // Fire the `insert_region` macro transition; `post.invariant()` comes from the macro.
+        // (2) Projection equalities: the abstract region projects to `r`'s pages/entries.
+        lemma_region_to_abstract_pages(zid, r);
+        lemma_region_to_abstract_entries(zid, r);
+        assert(region.pages() == region_pages(r));
+        assert(region.entries() == region_s2_entries(zid, r));
+
+        // (3) The transition guards, derived from `insert_region_enabled`.
+        let gz = self.zones[zid];
+        assert(gz.wf());  // inv_zones_wf
+        let p0 = region.phys_page(0);
+        assert(region.wf());  // enabled ⇒ count > 0
+        assert(region.pages().contains(p0));
+        // !contains_region(r): r's pages are free, but a contained region's pages are owned.
+        if gz.contains_region(r) {
+            lemma_region_in_zone_owns_pages(gz, r);
+            assert(zone_owned_pages(gz).contains(p0));
+            lemma_zone_owned_in_all_owned(self.zones, zid, p0);  // p0 ∈ all_owned
+            assert(self@.hypervisor_owned.contains(p0));  // enabled
+            assert(self@.hypervisor_owned == hypervisor_pool(self.zones));  // pool = budget \ owned
+            assert(false);
+        }
+        // !overlaps_vmem(r): an overlapping zone region shares a gpa, which is mapped.
+
+        if gz.mem_set.overlaps_vmem(r) {
+            let r2 = choose|r2: MemoryRegion|
+                gz.mem_set.regions.contains(r2) && r2.spec_overlaps_vmem(r);
+            assert(r2.spec_valid());  // mem_set.wf ⇒ regions valid
+            lemma_vmem_overlap_implies_shared_gpa(r2, r);
+            let g = choose|g: GuestPage| region_owns_gpa(r2, g) && region_owns_gpa(r, g);
+            assert(gz.contains_region(r2));
+            lemma_region_in_zone_maps_gpa(gz, r2, g);
+            let k = VmPageKey { vm, gpa: g };
+            assert(zone_s2_entries(zid, gz).contains_key(k));  // ⇒ k ∈ self@.s2_map
+            assert(region.entries().contains_key(k));  // region_owns_gpa(r, g)
+            assert(!self@.s2_map.contains_key(k));  // enabled freshness — contradiction
+            assert(false);
+        }
+        // (4) Fire the `insert_region` macro transition; `post.invariant()` from the macro.
+
         let post = BudgetSpec::take_step::insert_region(self, zid, r);
         assert(post.zone_ids == self.zone_ids);
         assert(post.zones == self.zones.insert(zid, self.zones[zid].insert_region(r)));
 
-        // ── insert_region_step ─────────────────────────────────────────────
+        // (5) Projection deltas ⇒ the SwView step.
         lemma_insert_region_owned_pages(self.zones[zid], r);
         lemma_insert_region_all_owned(self.zones, zid, r);
         lemma_insert_region_state_s2_map(self, post, zid, r);
         assert(post@.all_vms =~= self@.all_vms);
-        assert(post@.vm_owned =~= self@.vm_owned.insert(vm, self@.vm_owned[vm].union(pages)));
-        assert(post@.s2_map =~= self@.s2_map.union_prefer_right(entries));
-        assert(post@.hypervisor_owned =~= self@.hypervisor_owned.difference(pages));
-        assert(SwView::insert_region_step(self@, post@, vm, pages, entries));
+        assert(post@.vm_owned =~= self@.vm_owned.insert(
+            vm,
+            self@.vm_owned[vm].union(region.pages()),
+        ));
+        assert(post@.s2_map =~= self@.s2_map.union_prefer_right(region.entries()));
+        assert(post@.hypervisor_owned =~= self@.hypervisor_owned.difference(region.pages()));
+        assert(SwView::insert_region_step(self@, post@, region));
         post
     }
 
-    /// `pages`/`keys` are exactly some region currently present in `vm`'s zone.
-    open spec fn remove_region_pre(
-        self,
-        vm: VmId,
-        pages: Set<PhysPage>,
-        keys: Set<VmPageKey>,
-    ) -> bool {
-        exists|r: MemoryRegion|
-            #![trigger self.zones[vm.0].contains_region(r)]
-            self.zones[vm.0].contains_region(r) && pages == region_pages(r) && keys
-                == region_s2_entries(vm.0, r).dom() && region_pmem_exclusive(self.zones[vm.0], r)
-    }
-
-    proof fn remove_region(self, vm: VmId, pages: Set<PhysPage>, keys: Set<VmPageKey>) -> (post:
-        Self) {
+    proof fn remove_region(self, region: Region) -> (post: Self) {
+        let vm = region.vm;
         let zid = vm.0;
-        let r = choose|r: MemoryRegion|
-            #![auto]
-            self.zones[zid].contains_region(r) && pages == region_pages(r) && keys
-                == region_s2_entries(zid, r).dom() && region_pmem_exclusive(self.zones[zid], r);
-
+        assert(vm == VmId(zid));
+        assert(self.zone_ids.contains(zid));
         assert(self.zones.contains_key(zid));
-        // Fire the `remove_region` macro transition; `post.invariant()` comes from the
-        // macro.  (`region_pmem_exclusive` is not part of the transition — it is a
-        // refinement-side hypothesis for the page delta, supplied via `remove_region_pre`.)
+
+        // (1) Recover the budget region via the trusted environment bridge.
+        axiom_assignable_from_budget(self, region);
+        let r = choose|r: MemoryRegion|
+            zone_budget(zid).contains(r) && region_to_abstract(zid, r) == region;
+        zone_budget_in_all_regions();
+        all_regions_valid();
+        all_regions_disjoint();
+        assert(all_regions().contains(r) && r.spec_valid());
+
+        // (2) Projection equalities.
+        lemma_region_to_abstract_pages(zid, r);
+        lemma_region_to_abstract_entries(zid, r);
+        assert(region.pages() == region_pages(r));
+        assert(region.entries() == region_s2_entries(zid, r));
+
+        // (3) `r` is present in the zone: one of its (owned) pages is backed by a zone
+        // region, which must be `r` itself since distinct `all_regions` are pmem-disjoint.
+        let gz = self.zones[zid];
+        assert(gz.wf());
+        let p0 = region.phys_page(0);
+        assert(region.wf());
+        assert(region.pages().contains(p0));
+        assert(self@.vm_owned[vm].contains(p0));  // enabled ⇒ region.pages() ⊆ vm_owned
+        assert(self@.vm_owned[vm] == zone_owned_pages(gz));  // view
+        lemma_zone_owned_pages_region_witness(gz, p0);
+        let r2 = choose|rr: MemoryRegion| gz.regions().contains(rr) && region_owns_page(rr, p0);
+        assert(gz.contains_region(r2));
+        assert(zone_budget(zid).contains(r2));  // inv: zone regions ⊆ budget
+        assert(all_regions().contains(r2) && r2.spec_valid());
+        if r2 != r {
+            let i2 = choose|i: nat| 0 <= i < r2.pages && region_phys_page(r2, i) == p0;
+            let ir = choose|i: nat| 0 <= i < r.pages && region_phys_page(r, i) == p0;
+            lemma_same_phys_page_implies_pmem_overlap(r2, i2, r, ir);
+            assert(!r2.spec_overlaps_pmem(r));  // all_regions_disjoint
+            assert(false);
+        }
+        assert(gz.contains_region(r));
+
+        // pmem-exclusivity holds for any budget region: distinct `all_regions` are disjoint.
+        assert(region_pmem_exclusive(gz, r)) by {
+            assert forall|rr: MemoryRegion|
+                gz.regions().contains(rr) && rr != r implies !rr.spec_overlaps_pmem(r) by {
+                assert(gz.contains_region(rr));  // fires the budget inv
+                assert(zone_budget(zid).contains(rr));  // inv
+                assert(all_regions().contains(rr));
+            }
+        }
+
+        // (4) Fire the `remove_region` macro transition; `post.invariant()` from the macro.
         let post = BudgetSpec::take_step::remove_region(self, zid, r);
         assert(post.zone_ids == self.zone_ids);
         assert(post.zones == self.zones.insert(zid, self.zones[zid].remove_region(r)));
 
-        // ── remove_region_step ─────────────────────────────────────────────
-        // `pages` are budget pages — needed for the hypervisor-pool union algebra.
-        assert(zone_budget(zid).contains(r));
-        lemma_region_pages_in_all_budget(zid, r);
-        assert(forall|pp: PhysPage| #[trigger]
-            pages.contains(pp) ==> all_budget_pages().contains(pp));
-
-        assert(self.zones[zid].wf());
+        // (5) Projection deltas ⇒ the SwView step.
+        lemma_region_pages_in_all_budget(zid, r);  // r's pages are budget pages (pool algebra)
         lemma_remove_region_owned_pages(self.zones[zid], r);
         lemma_remove_region_all_owned(self, zid, r);
         lemma_remove_region_state_s2_map(self, post, zid, r);
         assert(post@.all_vms =~= self@.all_vms);
-        assert(post@.vm_owned =~= self@.vm_owned.insert(vm, self@.vm_owned[vm].difference(pages)));
-        assert(post@.s2_map =~= self@.s2_map.remove_keys(keys));
-        assert(post@.hypervisor_owned =~= self@.hypervisor_owned.union(pages));
-        assert(SwView::remove_region_step(self@, post@, vm, pages, keys));
+        assert(post@.vm_owned =~= self@.vm_owned.insert(
+            vm,
+            self@.vm_owned[vm].difference(region.pages()),
+        ));
+        assert(post@.s2_map =~= self@.s2_map.remove_keys(region.entries().dom()));
+        assert(post@.hypervisor_owned =~= self@.hypervisor_owned.union(region.pages()));
+        assert(SwView::remove_region_step(self@, post@, region));
         post
     }
 }

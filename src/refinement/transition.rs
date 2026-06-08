@@ -1,20 +1,10 @@
-//! Transition lemmas: how the `SwView` projection moves under each `BudgetSpec`
-//! transition.
+//! Transition lemmas: how the `SwView` projection ([`super::view`]) moves under
+//! each `BudgetSpec` region transition.
 //!
-//! `refine`'s `insert_region` / `remove_region` proofs need to know exactly how
-//! the projection ([`super::view`]) changes when a region is added to / removed
-//! from a zone.  Each lemma here states one such delta — for the per-zone
-//! `owned_pages` / `s2_entries` and their lifts to the whole-state `all_owned` /
-//! `state_s2_map`.
-//!
-//! Well-formedness preservation is **not** restated here: `refine` fires the real
-//! transition via `BudgetSpec::take_step::*`, which yields `post.invariant()`
-//! (hence each zone's `wf()`) from the macro's own inductiveness.
-//!
-//! The physical-page deltas additionally need `region_pmem_exclusive` (a page is
-//! freed only if no other region backs it) and cross-zone disjointness; the
-//! vaddr-keyed `s2_map` deltas need neither, since distinct regions are
-//! vmem-disjoint.
+//! Each lemma states one delta — how a zone's `owned_pages` / `s2_entries` (and
+//! their whole-state lifts `all_owned` / `state_s2_map`) change when a region is
+//! inserted into or removed from a zone.  These are the deltas `refine` assembles
+//! into the `SwView` `insert_region_step` / `remove_region_step`.
 use super::view::*;
 use crate::address::addr::SpecVAddr;
 use crate::address::frame::SpecFrame;
@@ -43,8 +33,7 @@ pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion
     let rm = region.spec_mappings();
     assert(new_gz.mem_set.mappings == om.union_prefer_right(rm));
 
-    // Key domains are disjoint: an existing mapping key is some existing region's
-    // page vaddr, which is vmem-disjoint from every page of `region`.
+    // Key domains are disjoint.
     assert forall|v: SpecVAddr| om.contains_key(v) implies !rm.contains_key(v) by {
         if rm.contains_key(v) {
             region.lemma_mappings_sound(v);
@@ -64,7 +53,7 @@ pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion
         zone_owned_pages(new_gz).contains(p) <==> (zone_owned_pages(gz).contains(p) || region_pages(
             region,
         ).contains(p)) by {
-        // (⟹) the backing key is either `region`'s (a region page) or the old map's.
+        // (⟹)
         if zone_owned_pages(new_gz).contains(p) {
             let v = choose|v: SpecVAddr| #[trigger]
                 new_gz.mem_set.mappings.contains_key(v) && frame_phys_page(
@@ -83,7 +72,7 @@ pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion
                 assert(zone_owned_pages(gz).contains(p));  // witness v
             }
         }
-        // (⟸ old) an old backing key survives the (domain-disjoint) union unchanged.
+        // (⟸ old)
 
         if zone_owned_pages(gz).contains(p) {
             let v = choose|v: SpecVAddr| #[trigger]
@@ -92,7 +81,7 @@ pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion
             assert(new_gz.mem_set.mappings.contains_key(v) && new_gz.mem_set.mappings[v] == om[v]);
             assert(zone_owned_pages(new_gz).contains(p));  // witness v
         }
-        // (⟸ region) a page of `region` is mapped in the union to `region`'s frame.
+        // (⟸ region)
 
         if region_pages(region).contains(p) {
             let i = choose|i: nat| 0 <= i < region.pages && region_phys_page(region, i) == p;
@@ -122,12 +111,11 @@ pub proof fn lemma_insert_region_all_owned(zones: Map<nat, GhostZone>, zid: nat,
 {
     let zones2 = zones.insert(zid, zones[zid].insert_region(r));
     lemma_insert_region_owned_pages(zones[zid], r);
-    // zone_owned_pages(zones2[zid]) == zone_owned_pages(zones[zid]) ∪ region_pages(r)
 
     assert forall|p: PhysPage|
         all_owned_pages(zones2).contains(p) <==> (all_owned_pages(zones).contains(p)
             || region_pages(r).contains(p)) by {
-        // (⟹) the witnessing zone is either `zid` (old owned ∪ region) or unchanged.
+        // (⟹)
         if all_owned_pages(zones2).contains(p) {
             let z = choose|z: nat| #[trigger]
                 zones2.contains_key(z) && zone_owned_pages(zones2[z]).contains(p);
@@ -141,7 +129,7 @@ pub proof fn lemma_insert_region_all_owned(zones: Map<nat, GhostZone>, zid: nat,
                 lemma_zone_owned_in_all_owned(zones, z, p);
             }
         }
-        // (⟸ old) an old owner survives; zone `zid` only grows.
+        // (⟸ old)
 
         if all_owned_pages(zones).contains(p) {
             let z = choose|z: nat| #[trigger]
@@ -153,7 +141,7 @@ pub proof fn lemma_insert_region_all_owned(zones: Map<nat, GhostZone>, zid: nat,
                 lemma_zone_owned_in_all_owned(zones2, z, p);
             }
         }
-        // (⟸ region) a region page is owned by the (grown) zone `zid`.
+        // (⟸ region)
 
         if region_pages(r).contains(p) {
             lemma_zone_owned_in_all_owned(zones2, zid, p);
@@ -247,10 +235,8 @@ pub proof fn lemma_insert_region_state_s2_map(
 }
 
 // ───────────────────────── remove_region (gz ↦ gz.remove_region(r)) ──────────
-/// Owned pages shrink by exactly the removed region's pages.
-///
-/// Needs `region_pmem_exclusive`: removing `r` frees a page only if no *other*
-/// region in the zone also backs it.
+/// Owned pages shrink by exactly the removed region's pages (needs
+/// `region_pmem_exclusive`).
 pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
     requires
         gz.wf(),
@@ -269,7 +255,7 @@ pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
     assert forall|p: PhysPage|
         zone_owned_pages(new_gz).contains(p) <==> (zone_owned_pages(gz).contains(p)
             && !region_pages(r).contains(p)) by {
-        // (⟹) a surviving key keeps its old page and that page is not `r`'s.
+        // (⟹)
         if zone_owned_pages(new_gz).contains(p) {
             let v = choose|v: SpecVAddr| #[trigger]
                 nm.contains_key(v) && frame_phys_page(nm[v]) == p;
@@ -295,8 +281,7 @@ pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
                 assert(false);
             }
         }
-        // (⟸) an old key whose page is not `r`'s survives the key removal.
-
+        // (⟸)
         if zone_owned_pages(gz).contains(p) && !region_pages(r).contains(p) {
             let v = choose|v: SpecVAddr| #[trigger]
                 om.contains_key(v) && frame_phys_page(om[v]) == p;
@@ -319,8 +304,7 @@ pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
 }
 
 /// `all_owned_pages` shrinks by exactly the removed region's pages (the
-/// whole-state lift of [`lemma_remove_region_owned_pages`], using cross-zone
-/// disjointness so no other zone owns `r`'s pages).
+/// whole-state lift of [`lemma_remove_region_owned_pages`]).
 pub proof fn lemma_remove_region_all_owned(pre: BudgetSpec::State, zid: nat, r: MemoryRegion)
     requires
         pre.invariant(),
@@ -336,10 +320,9 @@ pub proof fn lemma_remove_region_all_owned(pre: BudgetSpec::State, zid: nat, r: 
     let zones2 = zones.insert(zid, zones[zid].remove_region(r));
     assert(zones[zid].wf());  // inv_zones_wf
     lemma_remove_region_owned_pages(zones[zid], r);
-    // zone_owned_pages(zones2[zid]) == zone_owned_pages(zones[zid]) \ region_pages(r)
     lemma_state_owned_pages_disjoint(pre);
 
-    // Every page of `r` is owned by `zid` (dense completeness of the mapping).
+    // Every page of `r` is owned by `zid`.
     assert forall|p: PhysPage|
         #![trigger region_pages(r).contains(p)]
         region_pages(r).contains(p) implies zone_owned_pages(zones[zid]).contains(p) by {
@@ -374,7 +357,6 @@ pub proof fn lemma_remove_region_all_owned(pre: BudgetSpec::State, zid: nat, r: 
             }
         }
         // (⟸)
-
         if all_owned_pages(zones).contains(p) && !region_pages(r).contains(p) {
             let z = choose|z: nat| #[trigger]
                 zones.contains_key(z) && zone_owned_pages(zones[z]).contains(p);
@@ -388,9 +370,7 @@ pub proof fn lemma_remove_region_all_owned(pre: BudgetSpec::State, zid: nat, r: 
     }
 }
 
-/// A zone's stage-2 entries lose exactly the removed region's keys (no
-/// `region_pmem_exclusive` needed: keys are vaddrs and distinct regions are
-/// vmem-disjoint).
+/// A zone's stage-2 entries lose exactly the removed region's keys.
 pub proof fn lemma_remove_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRegion)
     requires
         gz.wf(),

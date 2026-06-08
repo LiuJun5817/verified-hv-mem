@@ -27,8 +27,7 @@
 //! Because the contract invariant is the inductive `invariant()`, every reachable
 //! state `HvMem` drives projects to a `wf` (hence secure) `SwView`.  The contract
 //! methods fire the real macro transitions via `BudgetSpec::take_step::*`, so each
-//! post-state — and its `invariant()` — comes from the state machine rather than
-//! being hand-built.
+//! post-state — and its `invariant()` — comes from the state machine itself.
 //!
 //! # Operation correspondence
 //!
