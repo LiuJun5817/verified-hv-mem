@@ -1,17 +1,17 @@
-//! Proof obligations for the `SwView` state machine — **SKETCH**.
+//! Proof obligations for the `SwView` state machine.
 //!
-//! Statements only: every proof body below is an [`admit`]`()` placeholder, to be
-//! discharged in future work.  Only **two** granularities exist — atomic per-page
-//! steps and region steps — so there is a single decomposition.  Families, in
-//! dependency order:
+//! `wf` is an inductive invariant: per-page, lifecycle, and region steps all
+//! preserve it (proved below).  The only outstanding obligations are the two
+//! **region → per-page trace** lemmas, which realize each region step as a trace
+//! of atomic per-page steps — the bridge that will let a region operation inherit
+//! the machine-level security result proved per-page in `crate::machine::machine`
+//! (`SW + HW ⟹ Machine`).  They stay `admit()` until that layer is built.
 //!
-//! 1. **per-page `wf`-preservation** — each primitive step keeps the `wf`
-//!    invariant.  These are the genuine base cases.
-//! 2. **region → per-page trace** — each region step (set algebra) is realized by
-//!    a trace of atomic per-page steps, every intermediate state `wf`.  This is
-//!    the bridge that lets a region operation inherit the machine-level security
-//!    result proved per-page in `crate::machine::machine` (`SW + HW ⟹ Machine`).
-//! 3. **region `wf`-preservation** — corollary of the trace lemmas.
+//! Families, in dependency order:
+//! 1. **per-page `wf`-preservation** — each primitive step keeps `wf` (base cases).
+//! 2. **lifecycle `wf`-preservation** — `add_vm` / `remove_vm`.
+//! 3. **region → per-page trace** — the decomposition (still `admit()`).
+//! 4. **region `wf`-preservation** — proved directly by set/map algebra.
 use vstd::prelude::*;
 
 use super::{Region, SwView};
@@ -33,7 +33,16 @@ pub proof fn lemma_map_step_preserves_wf(
     ensures
         s2.wf(),
 {
-    admit();  // TODO: translation_wf — new entry targets an owned/shared page.
+    // Only `s2_map` changes: `ownership_wf` / `sharing_wf` carry over unchanged.
+    let key = VmPageKey::new(vm, gpa);
+    assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
+        k.vm,
+    ) && s2.owned_or_shared(k.vm, s2.s2_map[k].page)) by {
+        if k != key {
+            assert(s1.s2_map.contains_key(k));
+        }
+    }
+    assert(s2.wf());
 }
 
 pub proof fn lemma_unmap_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId, gpa: GuestPage)
@@ -43,7 +52,13 @@ pub proof fn lemma_unmap_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId, gpa
     ensures
         s2.wf(),
 {
-    admit();  // TODO: removing a key only shrinks s2_map.
+    // `s2_map` only shrinks; every surviving key kept its (valid) target.
+    assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
+        k.vm,
+    ) && s2.owned_or_shared(k.vm, s2.s2_map[k].page)) by {
+        assert(s1.s2_map.contains_key(k));
+    }
+    assert(s2.wf());
 }
 
 pub proof fn lemma_assign_page_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId, page: PhysPage)
@@ -53,7 +68,47 @@ pub proof fn lemma_assign_page_step_preserves_wf(s1: SwView, s2: SwView, vm: VmI
     ensures
         s2.wf(),
 {
-    admit();  // TODO: page leaves the pool ⇒ ownership stays disjoint.
+    // `page` is free, so it lies in no VM's ownership set.
+    assert(s1.hypervisor_owned.contains(page));
+    assert(s2.vm_owned.dom() =~= s2.all_vms);
+    assert(forall|w: VmId| #[trigger] s1.all_vms.contains(w) ==> !s1.vm_owned[w].contains(page));
+    // Pairwise disjointness: only `vm`'s set grows, and just by the free `page`.
+    assert forall|a: VmId, b: VmId| #[trigger]
+        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies (forall|
+        p: PhysPage,
+    | #[trigger]
+        s2.vm_owned[a].contains(p) ==> !s2.vm_owned[b].contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[a].contains(p) implies !s2.vm_owned[b].contains(p) by {
+            if a == vm {
+                if p != page {
+                    assert(s1.vm_owned[vm].contains(p));
+                }
+            } else if b == vm {
+                if p != page {
+                    assert(s1.vm_owned[a].contains(p));
+                }
+            }
+        }
+    }
+    // vm-vs-hypervisor: `vm` gained `page`, which left the pool.
+    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
+     #[trigger]
+        s2.vm_owned[w].contains(p) ==> !s2.hypervisor_owned.contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[w].contains(p) implies !s2.hypervisor_owned.contains(p) by {
+            if w != vm || p != page {
+                assert(s1.vm_owned[w].contains(p));
+            }
+        }
+    }
+    // `s2_map` unchanged; targets stay owned-or-shared since ownership only grew.
+    assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
+        k.vm,
+    ) && s2.owned_or_shared(k.vm, s2.s2_map[k].page)) by {
+        assert(s1.s2_map.contains_key(k));
+    }
+    assert(s2.wf());
 }
 
 pub proof fn lemma_reclaim_page_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId, page: PhysPage)
@@ -66,7 +121,38 @@ pub proof fn lemma_reclaim_page_step_preserves_wf(s1: SwView, s2: SwView, vm: Vm
     ensures
         s2.wf(),
 {
-    admit();  // TODO: quiescence ⇒ translation_wf survives the reclaim.
+    // `page` was owned by `vm` alone, so it lies in no *other* VM's set.
+    assert(s2.vm_owned.dom() =~= s2.all_vms);
+    assert(forall|w: VmId| #[trigger]
+        s1.all_vms.contains(w) && w != vm ==> !s1.vm_owned[w].contains(page));
+    // Pairwise disjointness: ownership only shrinks (`vm` loses `page`).
+    assert forall|a: VmId, b: VmId| #[trigger]
+        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies (forall|
+        p: PhysPage,
+    | #[trigger]
+        s2.vm_owned[a].contains(p) ==> !s2.vm_owned[b].contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[a].contains(p) implies !s2.vm_owned[b].contains(p) by {
+            assert(s1.vm_owned[a].contains(p));  // s2[a] ⊆ s1[a]
+        }
+    }
+    // vm-vs-hypervisor: `page` re-enters the pool but is owned by no one in `s2`.
+    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
+     #[trigger]
+        s2.vm_owned[w].contains(p) ==> !s2.hypervisor_owned.contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[w].contains(p) implies !s2.hypervisor_owned.contains(p) by {
+            assert(s1.vm_owned[w].contains(p));  // s2[w] ⊆ s1[w]
+            assert(p != page);  // `page` is no longer owned by any VM
+        }
+    }
+    // Quiescence: no surviving translation targets `page`, so all targets stay owned.
+    assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
+        k.vm,
+    ) && s2.owned_or_shared(k.vm, s2.s2_map[k].page)) by {
+        assert(s1.s2_map.contains_key(k));
+    }
+    assert(s2.wf());
 }
 
 // ─────────────────────────── lifecycle wf-preservation ──────────────────────
@@ -78,7 +164,42 @@ pub proof fn lemma_add_vm_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId)
     ensures
         s2.wf(),
 {
-    admit();
+    // The new VM owns nothing; `all_vms` only grows.
+    assert(s2.vm_owned.dom() =~= s2.all_vms);
+    assert forall|a: VmId, b: VmId| #[trigger]
+        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies (forall|
+        p: PhysPage,
+    | #[trigger]
+        s2.vm_owned[a].contains(p) ==> !s2.vm_owned[b].contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[a].contains(p) implies !s2.vm_owned[b].contains(p) by {
+            if a != vm && b != vm {
+                assert(s1.vm_owned[a].contains(p));
+            }
+        }
+    }
+    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
+     #[trigger]
+        s2.vm_owned[w].contains(p) ==> !s2.hypervisor_owned.contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[w].contains(p) implies !s2.hypervisor_owned.contains(p) by {
+            if w != vm {
+                assert(s1.vm_owned[w].contains(p));
+            }
+        }
+    }
+    assert forall|e: SharedPage| #[trigger] s2.shared_pages.contains(e) implies (e.left != e.right
+        && s2.all_vms.contains(e.left) && s2.all_vms.contains(e.right) && s2.shared_pages.contains(
+        e.reverse(),
+    )) by {
+        assert(s1.shared_pages.contains(e));
+    }
+    assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
+        k.vm,
+    ) && s2.owned_or_shared(k.vm, s2.s2_map[k].page)) by {
+        assert(s1.s2_map.contains_key(k));
+    }
+    assert(s2.wf());
 }
 
 pub proof fn lemma_remove_vm_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId)
@@ -89,7 +210,39 @@ pub proof fn lemma_remove_vm_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId)
     ensures
         s2.wf(),
 {
-    admit();
+    // `vm` (owning nothing, mapping nothing, sharing nothing) is dropped; the rest
+    // of the state is unchanged, so every clause carries over to the smaller `all_vms`.
+    assert(s2.vm_owned.dom() =~= s2.all_vms);
+    assert forall|a: VmId, b: VmId| #[trigger]
+        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies (forall|
+        p: PhysPage,
+    | #[trigger]
+        s2.vm_owned[a].contains(p) ==> !s2.vm_owned[b].contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[a].contains(p) implies !s2.vm_owned[b].contains(p) by {
+            assert(s1.vm_owned[a].contains(p));
+        }
+    }
+    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
+     #[trigger]
+        s2.vm_owned[w].contains(p) ==> !s2.hypervisor_owned.contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[w].contains(p) implies !s2.hypervisor_owned.contains(p) by {
+            assert(s1.vm_owned[w].contains(p));
+        }
+    }
+    assert forall|e: SharedPage| #[trigger] s2.shared_pages.contains(e) implies (e.left != e.right
+        && s2.all_vms.contains(e.left) && s2.all_vms.contains(e.right) && s2.shared_pages.contains(
+        e.reverse(),
+    )) by {
+        assert(s1.shared_pages.contains(e));
+    }
+    assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
+        k.vm,
+    ) && s2.owned_or_shared(k.vm, s2.s2_map[k].page)) by {
+        assert(s1.s2_map.contains_key(k));
+    }
+    assert(s2.wf());
 }
 
 // ───────────────────── region → per-page step trace ─────────────────────────
@@ -135,6 +288,7 @@ pub proof fn lemma_insert_region_trace(s1: SwView, s2: SwView, region: Region)
         SwView::insert_region_step(s1, s2, region),
     ensures
         exists|trace: Seq<SwView>|
+            #![auto]
             {
                 &&& trace.len() == 2 * region.count + 1
                 &&& trace[0] == s1
@@ -161,6 +315,7 @@ pub proof fn lemma_remove_region_trace(s1: SwView, s2: SwView, region: Region)
         SwView::remove_region_step(s1, s2, region),
     ensures
         exists|trace: Seq<SwView>|
+            #![auto]
             {
                 &&& trace.len() == 2 * region.count + 1
                 &&& trace[0] == s1
@@ -179,8 +334,7 @@ pub proof fn lemma_remove_region_trace(s1: SwView, s2: SwView, region: Region)
 }
 
 // ─────────────────────────── region wf-preservation ─────────────────────────
-// Corollaries of the trace lemmas: `s2 == trace.last()` and every trace state is
-// `wf`, so in particular `s2.wf()`.
+// Proved directly by set/map algebra (the trace lemmas are not needed for `wf`).
 pub proof fn lemma_insert_region_step_preserves_wf(s1: SwView, s2: SwView, region: Region)
     requires
         s1.wf(),
@@ -189,7 +343,67 @@ pub proof fn lemma_insert_region_step_preserves_wf(s1: SwView, s2: SwView, regio
     ensures
         s2.wf(),
 {
-    admit();
+    let vm = region.vm;
+    let pages = region.pages();
+    let entries = region.entries();
+    // `pages` are free in `s1` (enabled), hence in no VM's ownership set.
+    assert forall|w: VmId, p: PhysPage|
+        s1.all_vms.contains(w) && pages.contains(p) implies !s1.vm_owned[w].contains(p) by {
+        assert(s1.hypervisor_owned.contains(p));  // enabled: pages ⊆ hypervisor_owned
+    }
+    // Each region entry targets one of `region`'s (now `vm`-owned) pages.
+    assert forall|k: VmPageKey| #[trigger] entries.contains_key(k) implies pages.contains(
+        entries[k].page,
+    ) by {}
+
+    // ownership_wf
+    assert(s2.vm_owned.dom() =~= s2.all_vms);
+    assert forall|a: VmId, b: VmId| #[trigger]
+        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies (forall|
+        p: PhysPage,
+    | #[trigger]
+        s2.vm_owned[a].contains(p) ==> !s2.vm_owned[b].contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[a].contains(p) implies !s2.vm_owned[b].contains(p) by {
+            if a == vm {
+                if !pages.contains(p) {
+                    assert(s1.vm_owned[vm].contains(p));  // p came from s1's set
+                }
+            } else if b == vm {
+                assert(s1.vm_owned[a].contains(p));
+            }
+        }
+    }
+    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
+     #[trigger]
+        s2.vm_owned[w].contains(p) ==> !s2.hypervisor_owned.contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[w].contains(p) implies !s2.hypervisor_owned.contains(p) by {
+            if w != vm || !pages.contains(p) {
+                assert(s1.vm_owned[w].contains(p));
+            }
+        }
+    }
+    // sharing_wf: shared_pages and all_vms unchanged.
+    assert forall|e: SharedPage| #[trigger] s2.shared_pages.contains(e) implies (e.left != e.right
+        && s2.all_vms.contains(e.left) && s2.all_vms.contains(e.right) && s2.shared_pages.contains(
+        e.reverse(),
+    )) by {
+        assert(s1.shared_pages.contains(e));
+    }
+    // translation_wf
+    assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
+        k.vm,
+    ) && s2.owned_or_shared(k.vm, s2.s2_map[k].page)) by {
+        if entries.contains_key(k) {
+            // new entry: k.vm == vm, target ∈ pages ⊆ s2.vm_owned[vm]
+            assert(pages.contains(entries[k].page));
+        } else {
+            // surviving entry: target stays owned (ownership only grew)
+            assert(s1.s2_map.contains_key(k));
+        }
+    }
+    assert(s2.wf());
 }
 
 pub proof fn lemma_remove_region_step_preserves_wf(s1: SwView, s2: SwView, region: Region)
@@ -200,7 +414,53 @@ pub proof fn lemma_remove_region_step_preserves_wf(s1: SwView, s2: SwView, regio
     ensures
         s2.wf(),
 {
-    admit();
+    let vm = region.vm;
+    let pages = region.pages();
+    // After the reclaim no VM owns any of `pages`: `vm` gave them up, and (by `s1`
+    // pairwise disjointness, since `pages ⊆ vm_owned[vm]`) no other VM had them.
+    assert forall|w: VmId, p: PhysPage|
+        s2.all_vms.contains(w) && pages.contains(p) implies !s2.vm_owned[w].contains(p) by {
+        if w != vm {
+            assert(s1.vm_owned[vm].contains(p));  // enabled: pages ⊆ vm_owned[vm]
+        }
+    }
+    // ownership_wf
+    assert(s2.vm_owned.dom() =~= s2.all_vms);
+    assert forall|a: VmId, b: VmId| #[trigger]
+        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies (forall|
+        p: PhysPage,
+    | #[trigger]
+        s2.vm_owned[a].contains(p) ==> !s2.vm_owned[b].contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[a].contains(p) implies !s2.vm_owned[b].contains(p) by {
+            assert(s1.vm_owned[a].contains(p));  // s2[a] ⊆ s1[a]
+        }
+    }
+    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
+     #[trigger]
+        s2.vm_owned[w].contains(p) ==> !s2.hypervisor_owned.contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.vm_owned[w].contains(p) implies !s2.hypervisor_owned.contains(p) by {
+            assert(s1.vm_owned[w].contains(p));  // s2[w] ⊆ s1[w], so p ∉ s1.hypervisor_owned
+            // and p ∉ pages (no VM owns a reclaimed page), so p ∉ s1.hyp ∪ pages
+        }
+    }
+    // sharing_wf
+    assert forall|e: SharedPage| #[trigger] s2.shared_pages.contains(e) implies (e.left != e.right
+        && s2.all_vms.contains(e.left) && s2.all_vms.contains(e.right) && s2.shared_pages.contains(
+        e.reverse(),
+    )) by {
+        assert(s1.shared_pages.contains(e));
+    }
+    // translation_wf: a surviving key is not in `region.entries()`, so by
+    // pmem-exclusivity its target is not a reclaimed page and stays owned.
+    assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
+        k.vm,
+    ) && s2.owned_or_shared(k.vm, s2.s2_map[k].page)) by {
+        assert(s1.s2_map.contains_key(k) && !region.entries().contains_key(k));
+        assert(!pages.contains(s2.s2_map[k].page));  // pmem-exclusivity
+    }
+    assert(s2.wf());
 }
 
 } // verus!
