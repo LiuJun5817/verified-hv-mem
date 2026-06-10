@@ -30,16 +30,11 @@ pub uninterp spec fn zone_regions(zid: nat) -> Set<MemoryRegion>;
 /// Static configured GIC region.
 pub uninterp spec fn gic_region() -> MemoryRegion;
 
-/// Axiom: all configured zone regions are valid memory regions.
-pub axiom fn zone_regions_valid()
+/// Axiom: all configured regions are valid memory regions.
+pub axiom fn all_regions_valid()
     ensures
         forall|zid: nat, r: MemoryRegion| #[trigger]
             zone_regions(zid).contains(r) ==> r.spec_valid(),
-;
-
-/// Axiom: all configured GIC regions are valid memory regions.
-pub axiom fn gic_region_valid()
-    ensures
         gic_region().spec_valid(),
 ;
 
@@ -190,7 +185,7 @@ tokenized_state_machine! {
         transition! {
             iommu_insert_region(zid: nat, region: MemoryRegion) {
                 remove zones -= [zid => let zone];
-                require(zone_regions(zid).contains(region));
+                require(zone_regions(zid).contains(region) || region == gic_region());
                 require(!zone.iommu_mem_set.regions.contains(region));
                 require(!zone.iommu_mem_set.overlaps_vmem(region));
                 add zones += [zid => zone.iommu_insert_region(region)];
@@ -285,7 +280,7 @@ tokenized_state_machine! {
                         assert forall|r: MemoryRegion| #[trigger] new_zone.cpu_mem_set.regions.contains(r)
                             implies r.spec_valid() by {
                             if r == region {
-                                zone_regions_valid();
+                                all_regions_valid();
                             } else {
                                 assert(old_zone.cpu_mem_set.regions.contains(r));
                             }
@@ -301,7 +296,7 @@ tokenized_state_machine! {
                                 assert(old_zone.cpu_mem_set.regions.contains(r2));
                                 assert(!r2.spec_overlaps_vmem(region));
                                 // Symmetry: !region.spec_overlaps_vmem(r2)
-                                zone_regions_valid();
+                                all_regions_valid();
                                 assert(region.spec_valid());
                                 assert(r2.spec_valid());
                                 region.lemma_overlaps_vmem_symmetric(r2);
@@ -415,7 +410,7 @@ tokenized_state_machine! {
                         assert forall|r: MemoryRegion| #[trigger] new_zone.iommu_mem_set.regions.contains(r)
                             implies r.spec_valid() by {
                             if r == region {
-                                zone_regions_valid();
+                                all_regions_valid();
                             } else {
                                 assert(old_zone.iommu_mem_set.regions.contains(r));
                             }
@@ -427,7 +422,7 @@ tokenized_state_machine! {
                             if r1 == region {
                                 assert(old_zone.iommu_mem_set.regions.contains(r2));
                                 assert(!r2.spec_overlaps_vmem(region));
-                                zone_regions_valid();
+                                all_regions_valid();
                                 assert(region.spec_valid());
                                 assert(r2.spec_valid());
                                 region.lemma_overlaps_vmem_symmetric(r2);

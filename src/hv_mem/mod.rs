@@ -31,7 +31,7 @@ use crate::{
 };
 use core::marker::PhantomData;
 use protocol::{BudgetProtocol, ClosureProtocol, ZoneGhostProtocol};
-use spec::budget::zone_regions;
+use spec::budget::{zone_regions, gic_region};
 use vstd::invariant::InvariantPredicate;
 use vstd::{
     cell::{CellId, PCell, PointsTo},
@@ -270,10 +270,12 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
             //                global_wf(new_gs)
         }
 
-        // ── Step 3: assemble the new Zone with an empty MemorySet ─────────────
-        let mem_set = M::new(&self.allocator, pt_constants);
+        // ── Step 3: assemble the new Zone with empty CPU/IOMMU MemorySets ────
+        let cpu_mem_set = M::new(&self.allocator, pt_constants.clone());
+        let iommu_mem_set = M::new(&self.allocator, pt_constants);
         let new_zone = Zone::<PT, M, A, P>::new(
-            mem_set,
+            cpu_mem_set,
+            iommu_mem_set,
             zid,
             Ghost(mem_inst_id),
             Ghost(self.allocator.inst_id()),
@@ -409,19 +411,26 @@ impl<PT, M, A, P> HvMem<PT, M, A, P> where
         let ghost old_zones = zones@;
         let zone = zones.swap_remove(i);
 
-        // ── Step 4: extract zone token and M from the zone ────────────────────
+        // ── Step 4: extract zone token and both exec memory sets from the zone ──
         // `zone` is an exclusively-owned value here (no Arc copies exist), so
         // acquiring the write lock cannot deadlock.
         let zone_guard = zone.lock.lock_write();
         let RwWriteGuard { handle: zone_handle, token: zone_token } = zone_guard;
         let tracked mut zone_content: ZoneRwContent<M, P> = zone_token.get();
-        // Take M out of the zone's PCell so it is properly dropped below.
-        let _mem_set: M = zone.mem_set.take(Tracked(&mut zone_content.mem_set_perm));
-        // _mem_set is dropped at end of scope.
+        // Take both mem_sets out of the zone's PCells so they are properly dropped below.
+        let _cpu_mem_set: M = zone.cpu_mem_set.take(Tracked(&mut zone_content.cpu_mem_set_perm));
+        let _iommu_mem_set: M = zone.iommu_mem_set.take(Tracked(
+            &mut zone_content.iommu_mem_set_perm,
+        ));
+        // `_cpu_mem_set` and `_iommu_mem_set` are dropped at end of scope.
 
         // ── Step 5: advance protocol ghost state ───────────────────────────────
         proof {
-            let tracked ZoneRwContent::<M, P> { mem_set_perm: _, zone_state } = zone_content;
+            let tracked ZoneRwContent::<M, P> {
+                cpu_mem_set_perm: _,
+                iommu_mem_set_perm: _,
+                zone_state,
+            } = zone_content;
             P::remove_zone(&mut content.global_state, zone_state);
             // zone_handle (writer token) is consumed here via assume — the zone is
             // being destroyed so there is no need to formally unlock it.
@@ -650,6 +659,91 @@ impl<PT, M, A> HvMem<PT, M, A, BudgetProtocol> where
         self.lock.unlock_read(guard);
         res
     }
+
+    /// Insert `region` into zone `zid`'s IOMMU-visible set using only the HvMem read lock.
+    pub fn insert_iommu_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+        requires
+            self.invariants(),
+            zone_regions(zid as nat).contains(region) || region == gic_region(),
+        ensures
+            res is Ok ==> self.invariants(),
+    {
+        if !region.valid() {
+            return Err(());
+        }
+
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } =
+            content;
+        let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
+
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant_except_break
+                i <= zones.len(),
+                self.invariants(),
+                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
+                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
+            ensures
+                i < zones.len() ==> zones[i as int].zone_id == zid && zones[i as int].wf(),
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                break ;
+            }
+            i += 1;
+        }
+        if i >= zones.len() {
+            self.lock.unlock_read(guard);
+            return Err(());
+        }
+
+        let res = zones[i].insert_iommu_region(&self.allocator, Tracked(&global_state), region);
+        self.lock.unlock_read(guard);
+        res
+    }
+
+    /// Remove `region` from zone `zid`'s IOMMU-visible set using only the HvMem read lock.
+    pub fn remove_iommu_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+        requires
+            self.invariants(),
+        ensures
+            res is Ok ==> self.invariants(),
+    {
+        if !region.valid() {
+            return Err(());
+        }
+
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol> { zone_list_perm, global_state } =
+            content;
+        let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
+
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant
+                i <= zones.len(),
+                self.invariants(),
+                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
+                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                break ;
+            }
+            i += 1;
+        }
+        if i == zones.len() {
+            self.lock.unlock_read(guard);
+            return Err(());
+        }
+
+        let res = zones[i].remove_iommu_region(&self.allocator, Tracked(&global_state), region);
+        self.lock.unlock_read(guard);
+        res
+    }
 }
 
 /// Concrete `ClosureProtocol` implementation: `insert_region` and `remove_region`
@@ -803,6 +897,126 @@ impl<PT, M, A> HvMem<PT, M, A, ClosureProtocol> where
         );
 
         // ── Step 5: restore zone list and release HvMem write lock ────────────
+        self.zone_mem_list.put(Tracked(&mut hvm_content.zone_list_perm), zones);
+        proof {
+            assume(HvMemPred::<PT, M, A, ClosureProtocol>::inv(self.lock.k@, hvm_content));
+        }
+        self.lock.unlock_write(RwWriteGuard { handle: hvm_handle, token: Tracked(hvm_content) });
+        res
+    }
+
+    /// Insert a physical memory region into the zone's IOMMU-visible set.
+    pub fn insert_iommu_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+        requires
+            self.invariants(),
+        ensures
+            res is Ok ==> self.invariants(),
+    {
+        proof {
+            admit();
+        }
+
+        if !region.valid() {
+            return Err(());
+        }
+
+        let guard = self.lock.lock_write();
+        let RwWriteGuard { handle: hvm_handle, token: hvm_token } = guard;
+        let tracked mut hvm_content: HvMemRwContent<PT, M, A, ClosureProtocol> = hvm_token.get();
+        let mut zones = self.zone_mem_list.take(Tracked(&mut hvm_content.zone_list_perm));
+
+        let mut idx_opt: Option<usize> = None;
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant
+                i <= zones.len(),
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                idx_opt = Some(i);
+                break ;
+            }
+            i += 1;
+        }
+
+        if idx_opt.is_none() {
+            self.zone_mem_list.put(Tracked(&mut hvm_content.zone_list_perm), zones);
+            proof {
+                assume(HvMemPred::<PT, M, A, ClosureProtocol>::inv(self.lock.k@, hvm_content));
+            }
+            self.lock.unlock_write(
+                RwWriteGuard { handle: hvm_handle, token: Tracked(hvm_content) },
+            );
+            return Err(());
+        }
+        let idx = idx_opt.unwrap();
+
+        let res = zones[idx].insert_iommu_region(
+            &self.allocator,
+            Tracked(&mut hvm_content.global_state),
+            region,
+        );
+
+        self.zone_mem_list.put(Tracked(&mut hvm_content.zone_list_perm), zones);
+        proof {
+            assume(HvMemPred::<PT, M, A, ClosureProtocol>::inv(self.lock.k@, hvm_content));
+        }
+        self.lock.unlock_write(RwWriteGuard { handle: hvm_handle, token: Tracked(hvm_content) });
+        res
+    }
+
+    /// Remove a physical memory region from the zone's IOMMU-visible set.
+    pub fn remove_iommu_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+        requires
+            self.invariants(),
+        ensures
+            res is Ok ==> self.invariants(),
+    {
+        proof {
+            admit();
+        }
+
+        if !region.valid() {
+            return Err(());
+        }
+
+        let guard = self.lock.lock_write();
+        let RwWriteGuard { handle: hvm_handle, token: hvm_token } = guard;
+        let tracked mut hvm_content: HvMemRwContent<PT, M, A, ClosureProtocol> = hvm_token.get();
+        let mut zones = self.zone_mem_list.take(Tracked(&mut hvm_content.zone_list_perm));
+
+        let mut idx_opt: Option<usize> = None;
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant
+                i <= zones.len(),
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                idx_opt = Some(i);
+                break ;
+            }
+            i += 1;
+        }
+
+        if idx_opt.is_none() {
+            self.zone_mem_list.put(Tracked(&mut hvm_content.zone_list_perm), zones);
+            proof {
+                assume(HvMemPred::<PT, M, A, ClosureProtocol>::inv(self.lock.k@, hvm_content));
+            }
+            self.lock.unlock_write(
+                RwWriteGuard { handle: hvm_handle, token: Tracked(hvm_content) },
+            );
+            return Err(());
+        }
+        let idx = idx_opt.unwrap();
+
+        let res = zones[idx].remove_iommu_region(
+            &self.allocator,
+            Tracked(&mut hvm_content.global_state),
+            region,
+        );
+
         self.zone_mem_list.put(Tracked(&mut hvm_content.zone_list_perm), zones);
         proof {
             assume(HvMemPred::<PT, M, A, ClosureProtocol>::inv(self.lock.k@, hvm_content));

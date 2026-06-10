@@ -7,7 +7,7 @@
 //! map-sharded token is updated, so **no global HvMem write lock is required**.
 use super::super::spec::{
     GhostZone,
-    budget::{BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken, zone_regions},
+    budget::{BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken, zone_regions, gic_region},
 };
 use super::{ZoneGhostProtocol, ZoneStateOps};
 use crate::address::region::MemoryRegion;
@@ -166,7 +166,7 @@ impl BudgetProtocol {
     ) -> (tracked new_zt: BudgetZoneState)
         requires
             zt.wf(gs.mem_inst_id()),
-            zone_regions(zt.zone_id()).contains(region),
+            zone_regions(zt.zone_id()).contains(region) || region == gic_region(),
             !zt.ghost_zone().iommu_mem_set.overlaps_vmem(region),
             !zt.ghost_zone().iommu_mem_set.regions.contains(region),
         ensures

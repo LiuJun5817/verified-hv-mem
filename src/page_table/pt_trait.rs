@@ -31,6 +31,15 @@ pub struct PTConstants {
     pub arch: PTArch,
 }
 
+impl Clone for PTConstants {
+    fn clone(&self) -> (res: Self)
+        ensures
+            res@ == self@,
+    {
+        PTConstants { arch: self.arch.clone() }
+    }
+}
+
 impl PTConstants {
     /// View as `PTConstants`
     pub open spec fn view(self) -> SpecPTConstants {
