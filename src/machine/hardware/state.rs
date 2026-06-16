@@ -22,4 +22,17 @@ pub ghost struct HwView {
     pub active_vm: Map<CpuId, VmId>,
 }
 
+impl HwView {
+    /// Hardware well-formedness: every pending invalidation refers to a TLB entry
+    /// that is actually cached.
+    ///
+    /// This is the pure-hardware invariant.  Cross-cutting TLB coherence
+    /// (`tlb_safe`) additionally relates the TLB to the software `s2_map`, so it
+    /// lives at the assembled `MachineState` rather than here.
+    pub open spec fn wf(&self) -> bool {
+        forall|key: TlbKey| #[trigger]
+            self.pending_invalidations.contains(key) ==> self.tlb.contains_key(key)
+    }
+}
+
 } // verus!

@@ -104,22 +104,17 @@ pub enum HypervisorOp {
     SharePage(VmId, VmId, PhysPage),
     UnsharePage(VmId, VmId, PhysPage),
     ContextSwitch(CpuId, VmId),
-    IssueTlbInvalidation(VmId, GuestPage),
+    AddVm(VmId),
+    RemoveVm(VmId),
 }
 
-#[derive(PartialEq, Eq, Structural, Copy, Clone)]
-pub enum HardwareMmuOp {
-    TlbFill(CpuId, VmId, GuestPage),
-    TlbInvalidate(CpuId, VmId, GuestPage),
-    ShootdownAck(CpuId, VmId, GuestPage),
-}
-
+/// A guest VM step and a hypervisor step are the two machine actions.  TLB
+/// management is folded into the hypervisor `Map`/`Unmap` steps (a SW–HW cowork),
+/// so there is no standalone hardware-MMU action.
 #[derive(PartialEq, Eq, Structural, Copy, Clone)]
 pub enum MachineAction {
-    SubjectVm(VmMemOp),
-    EnvironmentVm(VmId, VmMemOp),
+    Vm(VmId, VmMemOp),
     Hypervisor(HypervisorOp),
-    HardwareMmu(HardwareMmuOp),
 }
 
 impl GuestWordAddr {
@@ -181,17 +176,6 @@ impl SharedPage {
 impl TlbEntry {
     pub open spec fn as_s2_entry(self) -> S2Entry {
         S2Entry { page: self.page, access: self.access, generation: self.generation }
-    }
-}
-
-impl MachineAction {
-    pub open spec fn entity(self) -> Entity {
-        match self {
-            MachineAction::SubjectVm(_) => Entity::SubjectVm,
-            MachineAction::EnvironmentVm(vm, _) => Entity::EnvironmentVm(vm),
-            MachineAction::Hypervisor(_) => Entity::Hypervisor,
-            MachineAction::HardwareMmu(_) => Entity::HardwareMmu,
-        }
     }
 }
 

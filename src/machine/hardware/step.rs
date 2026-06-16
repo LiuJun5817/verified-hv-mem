@@ -18,7 +18,12 @@ impl HwView {
     ///
     /// Called alongside a software map/unmap step.  The actual TLB shootdown
     /// is performed later via [`tlbi_step`].
-    pub open spec fn pending_invalidation_step(s1: HwView, s2: HwView, vm: VmId, gpa: GuestPage) -> bool {
+    pub open spec fn pending_invalidation_step(
+        s1: HwView,
+        s2: HwView,
+        vm: VmId,
+        gpa: GuestPage,
+    ) -> bool {
         let targets = Set::new(
             |key: TlbKey| key.vm == vm && key.gpa == gpa && s1.tlb.contains_key(key),
         );
@@ -62,10 +67,40 @@ impl HwView {
     /// flag.
     ///
     /// On AArch64: this is the effect of one `TLBI IPAS2E1IS` acknowledgement.
-    pub open spec fn tlbi_step(s1: HwView, s2: HwView, cpu: CpuId, vm: VmId, gpa: GuestPage) -> bool {
+    pub open spec fn tlbi_step(
+        s1: HwView,
+        s2: HwView,
+        cpu: CpuId,
+        vm: VmId,
+        gpa: GuestPage,
+    ) -> bool {
         let tkey = TlbKey::new(cpu, vm, gpa);
         &&& s2.tlb == s1.tlb.remove(tkey)
         &&& s2.pending_invalidations == s1.pending_invalidations.remove(tkey)
+        &&& s2.active_vm == s1.active_vm
+        &&& s2.memory == s1.memory
+    }
+
+    /// Broadcast a stage-2 TLB invalidation for the IPA `(vm, gpa)` across every
+    /// PE in the inner-shareable domain.
+    ///
+    /// On AArch64: a single `TLBI IPAS2E1IS` instruction.  Whereas [`tlbi_step`]
+    /// models one per-CPU acknowledgement, this models the broadcast as a whole:
+    /// every cached entry `(*, vm, gpa)` is removed together with its pending
+    /// flag — the net effect that holds once the following completion `DSB ISH`
+    /// retires.  Used by the map/unmap maintenance sequence to re-establish TLB
+    /// coherence synchronously with a stage-2 mapping edit.
+    pub open spec fn tlbi_ipa_broadcast_step(
+        s1: HwView,
+        s2: HwView,
+        vm: VmId,
+        gpa: GuestPage,
+    ) -> bool {
+        let targets = Set::new(
+            |key: TlbKey| key.vm == vm && key.gpa == gpa && s1.tlb.contains_key(key),
+        );
+        &&& s2.tlb == s1.tlb.remove_keys(targets)
+        &&& s2.pending_invalidations == s1.pending_invalidations.difference(targets)
         &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory
     }
@@ -91,6 +126,25 @@ impl HwView {
     /// Instruction Synchronization Barrier — no observable state change.
     pub open spec fn isb_step(s1: HwView, s2: HwView) -> bool {
         s2 == s1
+    }
+
+    /// Hardware reads a physical memory word (a backed address; no state change).
+    pub open spec fn mem_read_step(s1: HwView, s2: HwView, pa: PhysWordAddr) -> bool {
+        &&& s1.memory.contains_key(pa)
+        &&& s2 == s1
+    }
+
+    /// Hardware writes `value` to a physical memory word.
+    pub open spec fn mem_write_step(
+        s1: HwView,
+        s2: HwView,
+        pa: PhysWordAddr,
+        value: DataWord,
+    ) -> bool {
+        &&& s2.tlb == s1.tlb
+        &&& s2.pending_invalidations == s1.pending_invalidations
+        &&& s2.active_vm == s1.active_vm
+        &&& s2.memory == s1.memory.insert(pa, value)
     }
 }
 
