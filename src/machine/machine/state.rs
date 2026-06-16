@@ -43,9 +43,19 @@ impl MachineState {
         self.all_vms
     }
 
-    /// `page` is private to `vm`: owned by it and not exposed through sharing.
+    /// `page` is private to `vm`: owned by it and exposed through *no* sharing edge.
+    ///
+    /// Note this is "globally unshared", not merely "not shared *with* `vm`".  The
+    /// weaker `!shared_with(vm, page)` would admit a page that `vm` owns yet that is
+    /// shared between two *other* VMs — a configuration `wf` alone does not rule out
+    /// (sharing edges are not tied to ownership in `wf`).  Requiring the page to lie
+    /// in no edge at all is the sound notion of private for the isolation theorems,
+    /// and on reachable states it coincides with `!shared_with(vm, page)` (a share is
+    /// only ever created by the page's owner, and ownership is disjoint).
     pub open spec fn private_page(&self, vm: VmId, page: PhysPage) -> bool {
-        self.vm_owned[vm].contains(page) && !self.shared_with(vm, page)
+        &&& self.vm_owned[vm].contains(page)
+        &&& forall|edge: SharedPage| #[trigger]
+            self.shared_pages.contains(edge) ==> edge.page != page
     }
 
     pub open spec fn private_pa(&self, vm: VmId, pa: PhysWordAddr) -> bool {
