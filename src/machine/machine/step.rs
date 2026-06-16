@@ -186,6 +186,11 @@ impl MachineState {
         &&& s1.wf()
         &&& s1.shared_pages.contains(edge)
         &&& s1.shared_pages.contains(rev)
+        // No dangling translation: if an endpoint of the edge maps `page`, it must
+        // *own* it, so dropping the share strands nothing (cf. `reclaim`'s quiescence).
+        &&& forall|k: VmPageKey|
+            #[trigger] s1.s2_map.contains_key(k) && (k.vm == left || k.vm == right) && s1.s2_map[k].page
+                == page ==> s1.vm_owned[k.vm].contains(page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.hypervisor_owned == s1.hypervisor_owned

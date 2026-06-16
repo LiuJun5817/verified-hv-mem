@@ -1,5 +1,12 @@
 //! Hardware `wf`-preservation: `HwView::wf` (pending invalidations ⊆ cached TLB
 //! entries) is an inductive invariant of every `HwView` step.
+//!
+//! **Status — scaffolding.** `HwView::wf` is *not* part of `MachineState::wf`
+//! (the assembled state drops `pending_invalidations` and folds TLB invalidation
+//! synchronously), and no refinement lemma requires `hw.wf()`.  These lemmas are
+//! therefore not on the critical path of the isolation result; they are retained
+//! as scaffolding for a future hardware-refinement layer (real MMU/asm ⟹
+//! `HwView`), where `pending ⊆ tlb` would be the pure-hardware invariant.
 use vstd::prelude::*;
 
 use super::HwView;
