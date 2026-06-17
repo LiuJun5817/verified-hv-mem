@@ -164,6 +164,18 @@ tokenized_state_machine! {
             }
         }
 
+        /// Allocate a contiguous range `[start, start + count)` from the free pool to `cid`.
+        transition! {
+            alloc_contiguous(cid: ClientID, start: FrameID, count: FrameID) {
+                let allocated = Set::new(|fid: FrameID| start <= fid < start + count);
+                require(0 < count);
+                require(forall |fid: FrameID| #[trigger] allocated.contains(fid) ==> pre.free_set.contains(fid));
+                update free_set = pre.free_set.difference(allocated);
+                remove client_sets -= [cid => let owned];
+                add    client_sets += [cid => owned.union(allocated)];
+            }
+        }
+
         /// Return `fid` from `cid` back to the free pool.
         transition! {
             dealloc(cid: ClientID, fid: FrameID) {
@@ -351,6 +363,73 @@ tokenized_state_machine! {
                 }
             }
         }
+
+        #[inductive(alloc_contiguous)]
+        fn alloc_contiguous_inductive(pre: Self, post: Self, cid: ClientID, start: FrameID, count: FrameID) {
+            let allocated = Set::new(|fid: FrameID| start <= fid < start + count);
+            let owned = pre.client_sets[cid];
+            assert(post.client_sets =~= pre.client_sets.insert(cid, owned.union(allocated)));
+            assert(post.free_set =~= pre.free_set.difference(allocated));
+
+            assert forall |fid: FrameID| #[trigger] allocated.contains(fid)
+                implies !owned.contains(fid)
+            by {
+                assert(pre.inv_free_clients_disjoint());
+                assert(allocated.contains(fid) ==> pre.free_set.contains(fid));
+                assert(owned.disjoint(pre.free_set));
+            }
+
+            assert forall |c: ClientID| #[trigger] pre.client_sets.contains_key(c) && c != cid
+                implies pre.client_sets[c].disjoint(allocated)
+            by {
+                assert(pre.inv_free_clients_disjoint());
+                assert forall |fid: FrameID| #[trigger] allocated.contains(fid)
+                    implies !pre.client_sets[c].contains(fid)
+                by {
+                    assert(allocated.contains(fid) ==> pre.free_set.contains(fid));
+                    assert(pre.client_sets[c].disjoint(pre.free_set));
+                }
+            }
+
+            assert forall |c: ClientID| #![auto]
+                #[trigger] post.registered.contains(c) <==> post.client_sets.contains_key(c)
+            by { assert(pre.inv_registered()); }
+
+            assert forall |c: ClientID| #[trigger] post.client_sets.contains_key(c)
+                implies post.client_sets[c].disjoint(post.free_set)
+            by {
+                assert(pre.inv_free_clients_disjoint());
+                if c == cid {
+                    assert(owned.disjoint(pre.free_set));
+                    assert(post.free_set.subset_of(pre.free_set));
+                } else {
+                    assert(pre.client_sets.contains_key(c));
+                    assert(pre.client_sets[c] =~= post.client_sets[c]);
+                    assert(post.free_set.subset_of(pre.free_set));
+                }
+            }
+
+            assert forall |c1: ClientID, c2: ClientID| #![auto]
+                c1 != c2
+                && post.client_sets.contains_key(c1)
+                && post.client_sets.contains_key(c2)
+                implies post.client_sets[c1].disjoint(post.client_sets[c2])
+            by {
+                assert(pre.inv_clients_disjoint());
+                if c1 == cid {
+                    assert(pre.client_sets.contains_key(c2));
+                    assert(pre.client_sets[c2].disjoint(allocated));
+                    assert(pre.client_sets[c2] =~= post.client_sets[c2]);
+                } else if c2 == cid {
+                    assert(pre.client_sets.contains_key(c1));
+                    assert(pre.client_sets[c1].disjoint(allocated));
+                    assert(pre.client_sets[c1] =~= post.client_sets[c1]);
+                } else {
+                    assert(pre.client_sets[c1] =~= post.client_sets[c1]);
+                    assert(pre.client_sets[c2] =~= post.client_sets[c2]);
+                }
+            }
+        }
     }
 }
 
@@ -458,6 +537,56 @@ impl AllocatorState {
         let tracked new_ct = self.inst.alloc(cid, fid, &mut self.free_tok, client_tok);
         let tracked perm = self.free_perms.tracked_remove(fid);
         perms.tracked_insert(fid, perm);
+        ClientState { client_tok: new_ct, frame_perms: perms }
+    }
+
+    /// Allocate a contiguous range `[start, start + count)` to `client`.
+    pub proof fn alloc_contiguous(
+        tracked &mut self,
+        tracked client: ClientState,
+        start: FrameID,
+        count: FrameID,
+    ) -> (tracked new_client: ClientState)
+        requires
+            old(self).wf(),
+            client.wf(old(self).inst.id()),
+            0 < count,
+            forall|fid: FrameID| start <= fid < start + count ==> old(self).free_tok.value().contains(fid),
+        ensures
+            self.wf(),
+            self.inst.id() == old(self).inst.id(),
+            self.inst.cap() == old(self).inst.cap(),
+            self.free_tok.value() =~= old(self).free_tok.value().difference(
+                Set::new(|fid: FrameID| start <= fid < start + count),
+            ),
+            new_client.wf(old(self).inst.id()),
+            new_client.client_tok.key() == client.client_tok.key(),
+            new_client.owned_frames() =~= client.owned_frames().union(
+                Set::new(|fid: FrameID| start <= fid < start + count),
+            ),
+            forall|fid: FrameID| #[trigger]
+                client.frame_perms.contains_key(fid) ==> new_client.frame_perms.contains_key(fid)
+                    && new_client.frame_perms[fid] == client.frame_perms[fid],
+            forall|fid: FrameID| start <= fid < start + count ==> new_client.owns(fid),
+            forall|fid: FrameID| start <= fid < start + count ==> !client.owns(fid),
+    {
+        let tracked ClientState { client_tok, frame_perms: mut perms } = client;
+        let cid = client_tok.key();
+        let allocated = Set::new(|fid: FrameID| start <= fid < start + count);
+        let ghost old_free_dom = self.free_perms.dom();
+        let ghost old_client_dom = perms.dom();
+        self.inst.free_client_disjoint(cid, client_tok.value(), &self.free_tok, &client_tok);
+        assert(forall|fid: FrameID| #[trigger] allocated.contains(fid) ==> !client_tok.value().contains(fid)) by {
+            assert(forall|fid: FrameID| #[trigger] allocated.contains(fid) ==> self.free_tok.value().contains(fid));
+            assert(client_tok.value().disjoint(self.free_tok.value()));
+        }
+
+        let tracked new_ct = self.inst.alloc_contiguous(cid, start, count, &mut self.free_tok, client_tok);
+        let tracked new_perms = self.free_perms.tracked_remove_keys(allocated);
+        assert(self.free_perms.dom() =~= old_free_dom.difference(allocated));
+        assert(new_perms.dom() =~= allocated);
+        perms.tracked_union_prefer_right(new_perms);
+        assert(perms.dom() =~= old_client_dom.union(allocated));
         ClientState { client_tok: new_ct, frame_perms: perms }
     }
 
@@ -860,6 +989,62 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         // ── unlock ────────────────────────────────────────────────────────────
         self.mutex.unlock(MutexGuard { handle, token: Tracked(content) });
         Tracked(new_client)
+    }
+
+    /// Allocate `count` contiguous free frames with `2^align_log2` frame alignment.
+    pub fn alloc_contiguous(
+        &self,
+        Tracked(client): Tracked<ClientState>,
+        count: usize,
+        align_log2: usize,
+    ) -> (res: (PAddr, Tracked<ClientState>))
+        requires
+            self.invariants(),
+            client.wf(self.inst_id()),
+            0 < count <= A::spec_cap(),
+            align_log2 < 64,
+        ensures
+            res.0@.aligned(SPEC_FRAME_SIZE),
+            res.0.0 >= self.base.0,
+            res.1.wf(self.inst_id()),
+            res.1.cid() == client.cid(),
+            forall|fid: FrameID| #[trigger]
+                client.frame_perms.contains_key(fid) ==> res.1.frame_perms.contains_key(fid)
+                    && res.1.frame_perms[fid] == client.frame_perms[fid],
+            forall|fid: FrameID|
+                self.paddr_to_fid_spec(res.0@) <= fid < self.paddr_to_fid_spec(res.0@) + count
+                    ==> res.1.owns(fid),
+    {
+        broadcast use BitmapAllocator::lemma_view_len_is_cap;
+
+        let guard = self.mutex.lock();
+        let MutexGuard { handle, token } = guard;
+        let tracked mut content = token.get();
+
+        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
+        let ghost old_bitmap = bitmap;
+
+        let alloc_res = bitmap.alloc_contiguous(count, align_log2);
+        // The free pool is non-empty (design assumption: infinitely many slots).
+        assume(alloc_res.is_some());
+        let idx = alloc_res.unwrap();
+        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
+
+        let tracked new_client;
+        proof {
+            assert(forall|fid: FrameID|
+                idx as nat <= fid < idx as nat + count as nat ==> old_bitmap@[fid as int]);
+            assert forall|fid: FrameID|
+                idx as nat <= fid < idx as nat + count as nat implies content.allocator_state.free_tok.value().contains(fid) by {
+                assert(old_bitmap@[fid as int]);
+                assert(content.allocator_state.free_tok.value().contains(fid) == old_bitmap@[fid as int]);
+            }
+            new_client = content.allocator_state.alloc_contiguous(client, idx as nat, count as nat);
+            assert(AllocMutexPred::<A>::inv(self.mutex.k@, content));
+        }
+        let frame = self.fid_to_paddr(idx);
+        self.mutex.unlock(MutexGuard { handle, token: Tracked(content) });
+        (frame, Tracked(new_client))
     }
 }
 
