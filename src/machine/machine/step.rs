@@ -149,7 +149,10 @@ impl MachineState {
         &&& s2.same_ownership_as(&s1)
         &&& s2.same_memory_as(&s1)
         &&& s2.active_vm == s1.active_vm
-        &&& s2.s2_map == s1.s2_map.insert(key, entry)
+        &&& s2.s2_map == s1.s2_map.insert(
+            key,
+            entry,
+        )
         // synchronous TLB invalidation of the edited mapping
         &&& s2.tlb == s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))
     }
@@ -248,11 +251,13 @@ impl MachineState {
         let rev = edge.reverse();
         &&& s1.wf()
         &&& s1.shared_pages.contains(edge)
-        &&& s1.shared_pages.contains(rev)
+        &&& s1.shared_pages.contains(
+            rev,
+        )
         // No dangling translation: if an endpoint of the edge maps `page`, it must
         // *own* it, so dropping the share strands nothing (cf. `reclaim`'s quiescence).
-        &&& forall|k: VmPageKey|
-            #[trigger] s1.s2_map.contains_key(k) && (k.vm == left || k.vm == right) && s1.s2_map[k].page
+        &&& forall|k: VmPageKey| #[trigger]
+            s1.s2_map.contains_key(k) && (k.vm == left || k.vm == right) && s1.s2_map[k].page
                 == page ==> s1.vm_owned[k.vm].contains(page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)

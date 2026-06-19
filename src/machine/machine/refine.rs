@@ -4,8 +4,9 @@ use super::state::MachineState;
 use crate::machine::hardware::HardwareOps;
 use crate::machine::hardware::HwView;
 use crate::machine::software::proof::{
-    lemma_assign_page_step_preserves_wf, lemma_map_step_preserves_wf,
-    lemma_reclaim_page_step_preserves_wf, lemma_share_page_step_preserves_wf,
+    lemma_add_vm_step_preserves_wf, lemma_assign_page_step_preserves_wf,
+    lemma_map_step_preserves_wf, lemma_reclaim_page_step_preserves_wf,
+    lemma_remove_vm_step_preserves_wf, lemma_share_page_step_preserves_wf,
     lemma_unmap_step_preserves_wf, lemma_unshare_page_step_preserves_wf,
 };
 use crate::machine::software::Region;
@@ -413,6 +414,94 @@ pub proof fn refine_hv_context_switch(sw: SwView, hw1: HwView, hw2: HwView, cpu:
     assert(s2.wf());
 }
 
+// ------------------------------------------------------------------
+// VM lifecycle (pure SW — HW state unchanged)
+// ------------------------------------------------------------------
+/// Registering a fresh VM refines `hv_add_vm_step`.  The new VM owns and maps
+/// nothing, so the only machine-only clause to re-establish is `execution_wf`
+/// (which survives a growing `all_vms`); the SW clauses come via the bridge and
+/// `tlb_safe` carries over unchanged.
+pub proof fn refine_hv_add_vm(sw1: SwView, sw2: SwView, hw: HwView, vm: VmId)
+    requires
+        SwView::add_vm_enabled(sw1, vm),
+        SwView::add_vm_step(sw1, sw2, vm),
+        MachineState::assemble(sw1, hw).wf(),
+    ensures
+        MachineState::hv_add_vm_step(
+            MachineState::assemble(sw1, hw),
+            MachineState::assemble(sw2, hw),
+            vm,
+        ),
+{
+    let s1 = MachineState::assemble(sw1, hw);
+    let s2 = MachineState::assemble(sw2, hw);
+    lemma_sw_machine_wf_equiv(sw1, hw);
+    assert(sw1.wf());
+    lemma_add_vm_step_preserves_wf(sw1, sw2, vm);
+    lemma_sw_machine_wf_equiv(sw2, hw);
+    // execution_wf: `active_vm` is unchanged and `all_vms` only grows (insert `vm`),
+    // so every scheduled VM is still present.
+    assert(s2.active_vm == s1.active_vm);
+    assert(s2.all_vms == s1.all_vms.insert(vm));
+    assert forall|c: CpuId| #[trigger] s2.active_vm.contains_key(c) implies s2.all_vms.contains(
+        s2.active_vm[c],
+    ) by {
+        assert(s1.active_vm.contains_key(c) && s1.all_vms.contains(s1.active_vm[c]));
+    }
+    // tlb_safe: `tlb` and `s2_map` are unchanged.
+    assert(s2.tlb == s1.tlb);
+    assert(s2.s2_map == s1.s2_map);
+    assert(s1.tlb_safe());
+    assert(s2.wf());
+}
+
+/// Deregistering an empty VM refines `hv_remove_vm_step`.  Beyond the SW
+/// `remove_vm_enabled` condition, the machine step also requires two HW-side
+/// guards — `vm` has no cached TLB entry and runs on no CPU — so that dropping it
+/// strands no hardware reference; both are taken as hypotheses (cf. the
+/// no-dangling guard of `refine_hv_unshare_page`).
+pub proof fn refine_hv_remove_vm(sw1: SwView, sw2: SwView, hw: HwView, vm: VmId)
+    requires
+        SwView::remove_vm_enabled(sw1, vm),
+        SwView::remove_vm_step(sw1, sw2, vm),
+        MachineState::assemble(sw1, hw).wf(),
+        forall|k: TlbKey| #[trigger]
+            MachineState::assemble(sw1, hw).tlb.contains_key(k) ==> k.vm != vm,
+        forall|cpu: CpuId| #[trigger]
+            MachineState::assemble(sw1, hw).active_vm.contains_key(cpu) ==> MachineState::assemble(
+                sw1,
+                hw,
+            ).active_vm[cpu] != vm,
+    ensures
+        MachineState::hv_remove_vm_step(
+            MachineState::assemble(sw1, hw),
+            MachineState::assemble(sw2, hw),
+            vm,
+        ),
+{
+    let s1 = MachineState::assemble(sw1, hw);
+    let s2 = MachineState::assemble(sw2, hw);
+    lemma_sw_machine_wf_equiv(sw1, hw);
+    assert(sw1.wf());
+    lemma_remove_vm_step_preserves_wf(sw1, sw2, vm);
+    lemma_sw_machine_wf_equiv(sw2, hw);
+    // execution_wf: `active_vm` unchanged; `all_vms` shrinks by `vm`, and the HW
+    // guard says no CPU ran `vm`, so every scheduled VM remains in `all_vms`.
+    assert(s2.active_vm == s1.active_vm);
+    assert(s2.all_vms == s1.all_vms.remove(vm));
+    assert forall|c: CpuId| #[trigger] s2.active_vm.contains_key(c) implies s2.all_vms.contains(
+        s2.active_vm[c],
+    ) by {
+        assert(s1.active_vm.contains_key(c) && s1.all_vms.contains(s1.active_vm[c]));
+        assert(s1.active_vm[c] != vm);
+    }
+    // tlb_safe: `tlb` and `s2_map` are unchanged.
+    assert(s2.tlb == s1.tlb);
+    assert(s2.s2_map == s1.s2_map);
+    assert(s1.tlb_safe());
+    assert(s2.wf());
+}
+
 // ---------------------------------------------------------------------------
 // SwView region-trace helpers (partial states, prefixes, per-page edges)
 //
@@ -589,7 +678,7 @@ pub proof fn lemma_insert_partial_wf(s1: SwView, region: Region, a: nat, m: nat)
             assert(s1.s2_map.contains_key(k));
             assert(s1.owned_or_shared(k.vm, s1.s2_map[k].page));
             if s1.shared_with(k.vm, s1.s2_map[k].page) {
-                let w = choose|w: SharedPage|
+                let w = choose|w: SharedPage| #[trigger]
                     s1.shared_pages.contains(w) && w.page == s1.s2_map[k].page && (w.left == k.vm
                         || w.right == k.vm);
                 assert(sp.shared_pages.contains(w));
@@ -796,7 +885,7 @@ pub proof fn lemma_remove_partial_wf(s1: SwView, region: Region, u: nat, r: nat)
         lemma_remove_survivor_unreclaimed(s1, region, u, r, k);
         assert(s1.owned_or_shared(k.vm, s1.s2_map[k].page));
         if s1.shared_with(k.vm, s1.s2_map[k].page) {
-            let w = choose|w: SharedPage|
+            let w = choose|w: SharedPage| #[trigger]
                 s1.shared_pages.contains(w) && w.page == s1.s2_map[k].page && (w.left == k.vm
                     || w.right == k.vm);
             assert(sp.shared_pages.contains(w));
@@ -1225,6 +1314,7 @@ pub proof fn lemma_remove_unmap_machine_edge(sw1: SwView, hw: HwView, region: Re
     // flushed keys are exactly the cached `(vm, gpa_i)` ones, i.e. tlb_prefix grows.
     assert(s2.tlb =~= s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))) by {
         assert forall|k: TlbKey|
+            #![auto]
             tlb_prefix_keys(region, (i + 1) as nat).contains(k) <==> (tlb_prefix_keys(
                 region,
                 i,
