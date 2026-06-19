@@ -85,6 +85,13 @@ impl MachineState {
         Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa && self.tlb.contains_key(key))
     }
 
+    /// `page` is referenced by no `s2_map` entry, no TLB entry, and no sharing edge.
+    ///
+    /// This is the model's *flush-before-free* gate: `hv_reclaim_page_step` requires
+    /// it, so a page cannot be returned to the pool while any CPU's TLB still caches
+    /// it.  Together with the synchronous flush in `hv_unmap_step`, it discharges the
+    /// real asynchronous TLB-shootdown window without modelling stale state (see the
+    /// note on `hv_unmap_step`).
     pub open spec fn page_is_quiescent(&self, page: PhysPage) -> bool {
         &&& forall|key: VmPageKey| #[trigger]
             self.s2_map.contains_key(key) ==> self.s2_map[key].page != page

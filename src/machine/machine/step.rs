@@ -78,6 +78,49 @@ impl MachineState {
     }
 
     /// A single guest VM (`vm`) executes a memory operation.
+    ///
+    /// # Why one multi-cycle op is modelled as one atomic step (reduction)
+    ///
+    /// A real read/write/hypercall takes many cycles, yet each is one `vm_step`.
+    /// This is sound by the single-shared-commit (Lipton) rule: a transition that
+    /// touches observable shared state *at most once* is observationally equivalent
+    /// to its fine-grained decomposition, because no interleaving can fall between
+    /// two shared effects when there is only one.  Each VM step meets this:
+    /// `vm_read`/`vm_hypercall` mutate nothing (`same_memory_as`), and `vm_write`
+    /// has the single effect `memory.insert(paddr, value)` while holding translation
+    /// fixed (`same_translation_as`), so it does not straddle two structural commits.
+    /// Operations that *would* have several commits are already split: a multi-word
+    /// or unaligned access is several `vm_step`s, and a hypercall is a request step
+    /// (no effect) plus a separate hypervisor service step.  The atomicity of a
+    /// single aligned word is the underlying hardware guarantee.
+    ///
+    /// # This is an access-control abstraction, not a memory-consistency model
+    ///
+    /// A `vm_step` is one **single-word, single-copy-atomic** access, and the
+    /// machine evolves by the *nondeterministic interleaving* of such steps
+    /// (`MachineState::step` fires exactly one action per tick).  Two facts about
+    /// what that does and does not model:
+    ///
+    /// * **Faithful — inter-CPU coherence on one location.**  Two CPUs writing the
+    ///   same address become two sequential `memory.insert`s in *some* order; the
+    ///   relation admits both, and nothing prefers either.  That undetermined order
+    ///   *is* Arm's coherence order for a single location, so the model is exact
+    ///   here.  A `DataWord`-granular insert matches single-copy atomicity of an
+    ///   aligned word (no tearing).
+    /// * **Over-approximation — program order and cross-location weak memory.**  The
+    ///   model has no program counter or per-CPU instruction stream, so a single
+    ///   CPU's same-location accesses are *not* ordered (Arm orders them), and
+    ///   cross-location relaxations (store buffering, non-multi-copy-atomicity,
+    ///   reordering) are not modelled at all.  This forgets order, i.e. admits a
+    ///   *superset* of hardware behaviours — sound for a reachability/safety
+    ///   property, but it means no program-order- or data-flow-dependent guest
+    ///   property may be stated against this model.
+    ///
+    /// The isolation theorems (`security::lemma_read_isolation`/`lemma_write_isolation`)
+    /// are per-state access-right invariants over a *single* step, so they are
+    /// order-agnostic by construction and need none of the dropped guarantees.
+    /// Capturing program order would require adding per-CPU sequencing — a genuine
+    /// memory-model refinement, out of scope for this access-control proof.
     pub open spec fn vm_step(s1: Self, s2: Self, vm: VmId, op: VmMemOp) -> bool {
         &&& s1.all_vms().contains(vm)
         &&& match op {
@@ -111,6 +154,26 @@ impl MachineState {
         &&& s2.tlb == s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))
     }
 
+    /// # TLB invalidation is modelled as atomic and global
+    ///
+    /// The same step edits `s2_map` and flushes *every* CPU's stale entry for
+    /// `(vm, gpa)` via `invalidation_targets`.  So no reachable state holds a stale
+    /// entry (`tlb_safe` is part of `wf` and is preserved), and a CPU sees the
+    /// page-table and TLB updates simultaneously — there is no "being-invalidated"
+    /// window in the model.
+    ///
+    /// Real hardware has an asynchronous shootdown window (invalidate, wait for all
+    /// CPUs to acknowledge, only then free the page).  That window is not modelled as
+    /// stale state; it is discharged by two ordering facts instead: this synchronous
+    /// flush, and `page_is_quiescent` gating `hv_reclaim_page_step` (a page is freed
+    /// only when no `s2_map`/TLB/sharing reference to it remains).  Soundness of the
+    /// abstraction therefore pushes a *break-before-make* obligation onto the
+    /// implementation: the abstract atomic step corresponds to "all CPUs have acked
+    /// the invalidation", not to instantaneous wall-clock invalidation.  A faithful
+    /// async model would reuse `HwView::pending_invalidations` — split the flush into
+    /// a broadcast step plus per-CPU acks, weaken `tlb_safe` to "coherent except for
+    /// pending keys", and require `pending` empty for the page at reclaim — a
+    /// memory-model refinement reserved for future work.
     pub open spec fn hv_unmap_step(s1: Self, s2: Self, vm: VmId, gpa: GuestPage) -> bool {
         let key = VmPageKey::new(vm, gpa);
         &&& s1.wf()

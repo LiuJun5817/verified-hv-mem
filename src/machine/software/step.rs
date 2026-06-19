@@ -181,9 +181,10 @@ impl SwView {
             region.entries().contains_key(k) ==> !s1.s2_map.contains_key(k))
     }
 
-    /// `region` is an assignable unit for its VM, is currently installed, and *no
-    /// other* mapping targets its pages (so reclaiming them leaves no dangling
-    /// translation).  `is_region_assignable` identifies `region` as a whole unit.
+    /// `region` is an assignable unit for its VM, is currently installed, *no
+    /// other* mapping targets its pages, and its pages are in no sharing edge (so
+    /// reclaiming them strands neither a dangling translation nor a borrower).
+    /// `is_region_assignable` identifies `region` as a whole unit.
     pub open spec fn remove_region_enabled(s1: SwView, region: Region) -> bool {
         &&& region.wf()
         &&& s1.all_vms.contains(region.vm)
@@ -196,6 +197,10 @@ impl SwView {
         &&& (forall|k: VmPageKey| #[trigger]
             s1.s2_map.contains_key(k) && !region.entries().contains_key(k)
                 ==> !region.pages().contains(s1.s2_map[k].page))
+        // Region pages are unshared: reclaiming a shared page would strand a borrower
+        // (the analogue of the no-dangling clause above, for sharing edges).
+        &&& (forall|e: SharedPage| #[trigger]
+            s1.shared_pages.contains(e) ==> !region.pages().contains(e.page))
     }
 }
 

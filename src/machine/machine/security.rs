@@ -10,7 +10,8 @@ impl MachineState {
     /// The subject-vs-environment split exists only here, to state isolation; it
     /// is not part of the machine state.
     pub open spec fn env_reachable(s1: MachineState, s2: MachineState, subject: VmId) -> bool {
-        exists|vm: VmId, op: VmMemOp| vm != subject && #[trigger] MachineState::vm_step(s1, s2, vm, op)
+        exists|vm: VmId, op: VmMemOp|
+            vm != subject && #[trigger] MachineState::vm_step(s1, s2, vm, op)
     }
 
     // ─────────────────────────── proof helpers ──────────────────────────────
@@ -67,8 +68,8 @@ impl MachineState {
                     // page is in no edge.
                     assert(s.shared_with(other, page));
                     let e = choose|e: SharedPage|
-                        s.shared_pages.contains(e) && e.page == page && (e.left == other
-                            || e.right == other);
+                        s.shared_pages.contains(e) && e.page == page && (e.left == other || e.right
+                            == other);
                     assert(s.shared_pages.contains(e) && e.page == page);
                     assert(false);
                 }
@@ -107,9 +108,15 @@ impl MachineState {
             vm != subject && MachineState::vm_step(s1, s2, vm, op);
         assert(MachineState::vm_step(s1, s2, vm, op));
         match op {
-            VmMemOp::Read(c, g) => { assert(MachineState::vm_read_step(s1, s2, vm, c, g)); },
-            VmMemOp::Write(c, g, v) => { assert(MachineState::vm_write_step(s1, s2, vm, c, g, v)); },
-            VmMemOp::HyperCall(c, r) => { assert(MachineState::vm_hypercall_step(s1, s2, vm, c, r)); },
+            VmMemOp::Read(c, g) => {
+                assert(MachineState::vm_read_step(s1, s2, vm, c, g));
+            },
+            VmMemOp::Write(c, g, v) => {
+                assert(MachineState::vm_write_step(s1, s2, vm, c, g, v));
+            },
+            VmMemOp::HyperCall(c, r) => {
+                assert(MachineState::vm_hypercall_step(s1, s2, vm, c, r));
+            },
         }
     }
 
@@ -197,12 +204,20 @@ impl MachineState {
             VmMemOp::Read(c, g) => {
                 assert(MachineState::vm_read_step(s1, s2, vmE, c, g));
                 assert(s2.memory == s1.memory);
-                assert(s2.read_observation(cpu, subject, gva) == s1.read_observation(cpu, subject, gva));
+                assert(s2.read_observation(cpu, subject, gva) == s1.read_observation(
+                    cpu,
+                    subject,
+                    gva,
+                ));
             },
             VmMemOp::HyperCall(c, r) => {
                 assert(MachineState::vm_hypercall_step(s1, s2, vmE, c, r));
                 assert(s2.memory == s1.memory);
-                assert(s2.read_observation(cpu, subject, gva) == s1.read_observation(cpu, subject, gva));
+                assert(s2.read_observation(cpu, subject, gva) == s1.read_observation(
+                    cpu,
+                    subject,
+                    gva,
+                ));
             },
             VmMemOp::Write(cE, gE, v) => {
                 assert(MachineState::vm_write_step(s1, s2, vmE, cE, gE, v));
@@ -219,7 +234,11 @@ impl MachineState {
                 Self::lemma_page_word_roundtrip(eEp, gE.offset());
                 assert(paddrE.page() == eEp);
                 assert(paddrE != subj_paddr);
-                assert(s2.read_observation(cpu, subject, gva) == s1.read_observation(cpu, subject, gva));
+                assert(s2.read_observation(cpu, subject, gva) == s1.read_observation(
+                    cpu,
+                    subject,
+                    gva,
+                ));
             },
         }
     }
