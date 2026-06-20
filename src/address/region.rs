@@ -1,10 +1,11 @@
+use vstd::prelude::*;
+
+verus! {
+
 use super::{
     addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
     frame::MemAttr,
 };
-use vstd::prelude::*;
-
-verus! {
 
 /// Page size in bytes (4KB).
 pub const PAGE_SIZE: usize = 0x1000;
@@ -196,6 +197,7 @@ impl Mapper {
         requires
             self.valid(vaddr.0 as nat),
         ensures
+            res@ == self.spec_map(vaddr@),
             vaddr.0 % PAGE_SIZE == 0 ==> res.0 % PAGE_SIZE == 0,
     {
         match self {

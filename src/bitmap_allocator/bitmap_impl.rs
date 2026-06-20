@@ -1,5 +1,3 @@
-use super::bitmap_trait::*;
-use core::ops::Range;
 use vstd::{prelude::*, seq_lib::*};
 
 /// Macro to get a specific bit from a u16 value.
@@ -80,6 +78,9 @@ macro_rules! set_bits16 {
 }
 
 verus! {
+
+use super::bitmap_trait::*;
+use core::ops::Range;
 
 pub trait BitAllocView {
     /// Specification function to view the internal u16 as a sequence of booleans.
@@ -2666,6 +2667,10 @@ impl BitmapAllocator for BitAlloc1M {
 
     fn dealloc(&mut self, key: usize) {
         <Self as BitAlloc>::dealloc(self, key)
+    }
+
+    fn insert(&mut self, range: Range<usize>) {
+        <Self as BitAlloc>::insert(self, range)
     }
 
     broadcast proof fn lemma_view_len_is_cap(self) {

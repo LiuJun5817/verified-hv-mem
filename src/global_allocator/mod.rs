@@ -6,12 +6,6 @@
 //! is exactly the set of frames that client currently owns.  The Instance
 //! invariants (`inv_free_clients_disjoint` and `inv_clients_disjoint`) then
 //! guarantee, at the type level, that no two clients ever hold the same frame.
-use crate::address::{
-    addr::{PAddr, SpecPAddr},
-    frame::Frame,
-};
-use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
-use crate::sync::mutex::{Mutex, MutexGuard};
 use core::marker::PhantomData;
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::cell::{CellId, PCell};
@@ -20,6 +14,13 @@ use vstd::prelude::*;
 use vstd::tokens::InstanceId;
 
 verus! {
+
+use crate::address::{
+    addr::{PAddr, SpecPAddr},
+    frame::Frame,
+};
+use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
+use crate::sync::mutex::{Mutex, MutexGuard};
 
 /// Frame ID
 pub type FrameID = nat;
@@ -140,6 +141,15 @@ tokenized_state_machine! {
         }
 
         // ── Transitions ──────────────────────────────────────────────────────
+  
+        transition! {
+            init_free_set(size: FrameID) {
+                require(size <= pre.cap);
+                require(pre.free_set =~= Set::empty());
+                require(pre.registered =~= Set::empty());
+                update free_set = Set::new(|fid: FrameID| fid < size);
+            }
+        }
 
         /// Register a new client.
         /// `require(!pre.registered.contains(cid))` gives the ISC proof for the
@@ -193,6 +203,14 @@ tokenized_state_machine! {
 
         #[inductive(initialize)]
         fn initialize_inductive(post: Self, cap: FrameID) {}
+
+        #[inductive(init_free_set)]
+        fn init_free_set_inductive(pre: Self, post: Self, size: FrameID) {
+            assert(post.client_sets =~= pre.client_sets);
+            assert(post.registered =~= pre.registered);
+            assert(pre.client_sets =~= Map::empty());
+            assert(post.client_sets =~= Map::empty());
+        }
 
         #[inductive(register_client)]
         fn register_client_inductive(pre: Self, post: Self, cid: ClientID) {
@@ -481,6 +499,37 @@ impl AllocatorState {
             self.free_perms.contains_key(fid) ==> self.free_perms[fid].is_init() && inst_base(
                 self.inst.id(),
             ).0 + fid * SPEC_FRAME_SIZE == self.free_perms[fid].addr()
+    }
+
+    /// Bootstrap the initial free set `[0, size)`.
+    pub proof fn init_free_set(
+        tracked &mut self,
+        size: FrameID,
+        tracked free_perms: Map<FrameID, Frame4KPerm>,
+    )
+        requires
+            old(self).wf(),
+            old(self).free_tok.value() =~= Set::empty(),
+            old(self).reg_tok.value() =~= Set::empty(),
+            old(self).free_perms.dom() =~= Set::empty(),
+            size <= old(self).inst.cap(),
+            free_perms.dom() =~= Set::new(|fid: FrameID| fid < size),
+            forall|fid: FrameID| #[trigger]
+                free_perms.contains_key(fid) ==> frame_is_empty(&free_perms[fid]),
+            forall|fid: FrameID| #[trigger]
+                free_perms.contains_key(fid) ==> free_perms[fid].is_init() && inst_base(
+                    old(self).inst.id(),
+                ).0 + fid * SPEC_FRAME_SIZE == free_perms[fid].addr(),
+        ensures
+            self.wf(),
+            self.inst.id() == old(self).inst.id(),
+            self.inst.cap() == old(self).inst.cap(),
+            self.reg_tok.value() =~= Set::empty(),
+            self.free_tok.value() =~= Set::new(|fid: FrameID| fid < size),
+            self.free_perms =~= free_perms,
+    {
+        self.inst.init_free_set(size, &mut self.free_tok, &mut self.reg_tok);
+        self.free_perms = free_perms;
     }
 
     /// Register a new client and return its initial (empty) token.
@@ -838,6 +887,90 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
             res.0 == self.base.0 + fid * FRAME_SIZE,
     {
         PAddr(self.base.0 + fid * FRAME_SIZE)
+    }
+
+    /// Create a default allocator. The bitmap and free pool both start empty.
+    pub fn default(base: PAddr) -> (res: Self)
+        requires
+            A::cascade_not_overflow(),
+            base@.aligned(SPEC_FRAME_SIZE),
+            base.0 + (A::spec_cap() * FRAME_SIZE) <= usize::MAX,
+        ensures
+            res.invariants(),
+    {
+        let bitmap = A::default();
+        let (bitmap_cell, Tracked(bitmap_perm)) = PCell::new(bitmap);
+        let ghost bitmap_cell_id = bitmap_cell.id();
+
+        let tracked (Tracked(inst), Tracked(free_tok), Tracked(reg_tok), _) =
+            AllocSpec::Instance::initialize(A::spec_cap());
+        let ghost inst_id = inst.id();
+
+        let tracked allocator_state = AllocatorState {
+            inst,
+            free_tok,
+            reg_tok,
+            free_perms: Map::tracked_empty(),
+        };
+
+        let tracked content = MutexContent { allocator_state, bitmap_perm };
+        let key = Ghost(AllocKey { inst_id, cell_id: bitmap_cell_id });
+
+        proof {
+            assume(inst_base(inst_id) == base@);
+            assume(AllocMutexPred::<A>::inv(key@, content));
+        }
+
+        let mutex = Mutex::new(key, Tracked(content));
+        let res = GlobalAllocator { base, mutex, bitmap: bitmap_cell };
+        proof {
+            assert(res.bitmap.id() === bitmap_cell_id);
+            assume(res.mutex.k@ == key@);
+            assert(res.mutex.k@.cell_id == bitmap_cell_id);
+            assert(res.bitmap.id() === res.mutex.k@.cell_id);
+            assert(res.invariants());
+        }
+        res
+    }
+
+    /// Initialize the empty allocator by marking `[0, size)` as free.
+    pub fn init(
+        &self,
+        size: usize,
+        Tracked(free_perms): Tracked<Map<FrameID, Frame4KPerm>>,
+    )
+        requires
+            self.invariants(),
+            size <= A::spec_cap(),
+            free_perms.dom() =~= Set::new(|fid: FrameID| fid < size as nat),
+            forall|fid: FrameID| #[trigger]
+                free_perms.contains_key(fid) ==> frame_is_empty(&free_perms[fid]),
+            forall|fid: FrameID| #[trigger]
+                free_perms.contains_key(fid) ==> free_perms[fid].is_init(),
+            forall|fid: FrameID| #[trigger]
+                free_perms.contains_key(fid) ==> self.base@.0 + fid * SPEC_FRAME_SIZE == free_perms[fid].addr(),
+        ensures
+            self.invariants(),
+    {
+        let guard = self.mutex.lock();
+        let MutexGuard { handle, token } = guard;
+        let tracked mut content = token.get();
+
+        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
+        if size > 0 {
+            bitmap.insert(0usize..size);
+        }
+        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
+
+        proof {
+            assume(content.allocator_state.free_tok.value() =~= Set::empty());
+            assume(content.allocator_state.reg_tok.value() =~= Set::empty());
+            assume(content.allocator_state.free_perms.dom() =~= Set::empty());
+            content.allocator_state.init_free_set(size as nat, free_perms);
+            assume(AllocMutexPred::<A>::inv(self.mutex.k@, content));
+        }
+
+        self.mutex.unlock(MutexGuard { handle, token: Tracked(content) });
     }
 
     /// Register a new client (acquires the lock briefly).

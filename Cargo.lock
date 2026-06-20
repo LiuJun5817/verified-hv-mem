@@ -81,6 +81,7 @@ name = "verified-hv-mem"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "verus_state_machines_macros",
  "vstd",
 ]
 

@@ -1,7 +1,8 @@
-use super::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 use vstd::prelude::*;
 
 verus! {
+
+use super::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 
 /// Represents a physical memory frame (Page or Block).
 pub struct SpecFrame {
