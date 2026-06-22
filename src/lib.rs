@@ -10,6 +10,7 @@ pub mod hv_mem;
 pub mod sync;
 pub mod machine;
 pub mod refinement;
+pub mod hardware;
 
 verus! {
 
