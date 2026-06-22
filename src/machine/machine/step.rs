@@ -333,6 +333,29 @@ impl MachineState {
     }
 
     // ------------------------------------------------------------------
+    // Initial state  (the special "boot" step: a post-state with no pre-state)
+    // ------------------------------------------------------------------
+    /// The initial machine configuration — the base case of `reachable`, and the
+    /// state-machine `Init` to `step`'s `Next`.
+    ///
+    /// Unlike the `*_step` predicates this is *post-only*: it constrains a single
+    /// state rather than a transition.  At boot no guest exists yet, so the VM
+    /// population, ownership map, sharing graph, stage-2 map, TLB and CPU schedule
+    /// are all empty; every `wf` clause is then a `forall` over an empty domain and
+    /// holds vacuously (see `lemma_init_wf` in `refine.rs`).  `hypervisor_owned`
+    /// (the free pool) and `memory` (initial DRAM) are left unconstrained — they are
+    /// platform data irrelevant to `wf`.  Guests and mappings are subsequently
+    /// created by `hv_add_vm` / `hv_assign_page` / `hv_map`.
+    pub open spec fn init(s: Self) -> bool {
+        &&& s.all_vms == Set::<VmId>::empty()
+        &&& s.vm_owned == Map::<VmId, Set<PhysPage>>::empty()
+        &&& s.shared_pages == Set::<SharedPage>::empty()
+        &&& s.s2_map == Map::<VmPageKey, S2Entry>::empty()
+        &&& s.tlb == Map::<TlbKey, TlbEntry>::empty()
+        &&& s.active_vm == Map::<CpuId, VmId>::empty()
+    }
+
+    // ------------------------------------------------------------------
     // Top-level step dispatch
     // ------------------------------------------------------------------
     pub open spec fn step(s1: Self, s2: Self, action: MachineAction) -> bool {
@@ -340,6 +363,29 @@ impl MachineState {
             MachineAction::Vm(vm, op) => Self::vm_step(s1, s2, vm, op),
             MachineAction::Hypervisor(op) => Self::hypervisor_step(s1, s2, op),
         }
+    }
+
+    /// A finite execution: `trace` are the visited states and `acts[i]` drives the
+    /// edge `trace[i] → trace[i+1]`.  The `init` base state is not required here — a
+    /// caller wanting a run from boot additionally conjoins `init(trace[0])`.
+    pub open spec fn is_execution(trace: Seq<MachineState>, acts: Seq<MachineAction>) -> bool {
+        &&& trace.len() == acts.len() + 1
+        &&& forall|i: int| 0 <= i < acts.len() ==> #[trigger] MachineState::step(
+            trace[i],
+            trace[i + 1],
+            acts[i],
+        )
+    }
+
+    /// A state is **reachable** if some execution starting from an `init` state ends
+    /// in it.  (`lemma_reachable_wf`: every reachable state is `wf`.)
+    pub open spec fn reachable(s: MachineState) -> bool {
+        exists|trace: Seq<MachineState>, acts: Seq<MachineAction>|
+            {
+                &&& MachineState::is_execution(trace, acts)
+                &&& MachineState::init(trace[0])
+                &&& trace[trace.len() - 1] == s
+            }
     }
 }
 

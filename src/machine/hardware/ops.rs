@@ -24,20 +24,26 @@ pub trait HardwareOps: Sized {
     // ------------------------------------------------------------------
     // S2 TLB invalidation broadcast
     // ------------------------------------------------------------------
-    /// Broadcast a TLB invalidation for the entry `(cpu, vm, gpa)`.
+    /// Broadcast a stage-2 TLB invalidation for the IPA `(vm, gpa)` across every
+    /// PE in the inner-shareable domain.
     ///
-    /// On AArch64: `TLBI IPAS2E1IS`.  Must be bracketed by `DSB ISH`
-    /// (before) and a completion `DSB ISH` (after) to ensure ordering
-    /// and visibility.
+    /// On AArch64: a single `TLBI IPAS2E1IS` instruction.  Because it is
+    /// inner-shareable it is a *broadcast* — one instruction removes the cached
+    /// `(*, vm, gpa)` entries on **every** PE — so it takes no per-CPU argument;
+    /// its whole-domain effect is [`HwView::tlbi_ipa_broadcast_step`] (the per-CPU
+    /// [`HwView::tlbi_step`] is only an internal model of a single PE's
+    /// acknowledgement, not exposed as an instruction).  Must be followed by a
+    /// completion `DSB ISH` ([`issue_dsb_ish`]) before the new translation may be
+    /// relied upon; together they realize the synchronous flush of
+    /// `MachineState::hv_map_step` / `hv_unmap_step` (see `machine::machine::refine`).
     fn issue_tlbi_s2(
         &self,
-        cpu: Ghost<CpuId>,
         vm: Ghost<VmId>,
         gpa: Ghost<GuestPage>,
         hw: Ghost<HwView>,
     ) -> (hw_post: Ghost<HwView>)
         ensures
-            HwView::tlbi_step(hw@, hw_post@, cpu@, vm@, gpa@),
+            HwView::tlbi_ipa_broadcast_step(hw@, hw_post@, vm@, gpa@),
     ;
 
     // ------------------------------------------------------------------

@@ -52,6 +52,27 @@ pub proof fn lemma_sw_machine_wf_equiv(sw: SwView, hw: HwView)
     }
 }
 
+// ---------------------------------------------------------------------------
+// The initial state is well-formed — base case of `reachable ⇒ wf`.
+// ---------------------------------------------------------------------------
+/// The `init` configuration (`step.rs`) is `wf`.  In `init` the VM population,
+/// ownership map, sharing graph, stage-2 map, TLB and CPU schedule are all empty,
+/// so every `wf` clause quantifies over an empty domain and holds vacuously.
+pub proof fn lemma_init_wf(s: MachineState)
+    requires
+        MachineState::init(s),
+    ensures
+        s.wf(),
+{
+    // `vm_owned` and `all_vms` are both empty, so their domains coincide.
+    assert(s.vm_owned.dom() =~= s.all_vms());
+    assert(s.ownership_wf());
+    assert(s.sharing_wf());
+    assert(s.translation_wf());
+    assert(s.execution_wf());
+    assert(s.tlb_safe());
+}
+
 // ------------------------------------------------------------------
 // Stage-2 mapping management
 // ------------------------------------------------------------------

@@ -17,7 +17,8 @@ impl HwView {
     /// Mark any TLB entries for `(vm, gpa)` as pending invalidation.
     ///
     /// Called alongside a software map/unmap step.  The actual TLB shootdown
-    /// is performed later via [`tlbi_step`].
+    /// is performed later via [`tlbi_ipa_broadcast_step`] (the broadcast
+    /// `TLBI IPAS2E1IS` exposed by `HardwareOps::issue_tlbi_s2`).
     pub open spec fn pending_invalidation_step(
         s1: HwView,
         s2: HwView,
