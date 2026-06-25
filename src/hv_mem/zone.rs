@@ -17,6 +17,8 @@ use crate::{
     address::region::MemoryRegion,
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
+    hardware::{HardwareInst, MmuHardware},
+    machine::types::VmId,
     memory_set::MemorySet,
     page_table::PageTable,
     sync::rwlock::{RwLock, RwReadGuard, RwWriteGuard},
@@ -63,20 +65,28 @@ pub tracked struct ZoneRwContent<M, P> where P: ZoneGhostProtocol {
 }
 
 /// Phantom struct that carries the `Zone`-level `InvariantPredicate`.
-pub struct ZonePred<PT, M, A, P> where
+pub struct ZonePred<PT, M, A, P, I> where
     PT: PageTable<A>,
-    M: MemorySet<PT, A>,
+    M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
+    I: HardwareInst,
  {
-    pub _phantom: PhantomData<(PT, M, A, P)>,
+    pub _phantom: PhantomData<(PT, M, A, P, I)>,
 }
 
-impl<PT, M, A, P> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePred<PT, M, A, P> where
+impl<PT, M, A, P, I> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePred<
+    PT,
+    M,
+    A,
+    P,
+    I,
+> where
     PT: PageTable<A>,
-    M: MemorySet<PT, A>,
+    M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
+    I: HardwareInst,
  {
     /// The content is well-formed when:
     /// - `mem_set_perm` is initialised and points to the key's cell,
@@ -111,27 +121,29 @@ impl<PT, M, A, P> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePred<
 /// Multiple CPUs from the **same zone** can hold read guards concurrently
 /// (e.g., for page-table walks).  A write guard gives exclusive access for
 /// operations that mutate the memory set (insert/remove region).
-pub struct Zone<PT, M, A, P> where
+pub struct Zone<PT, M, A, P, I> where
     PT: PageTable<A>,
-    M: MemorySet<PT, A>,
+    M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
+    I: HardwareInst,
  {
     /// Exec memory set — written only while the write guard is held.
     pub mem_set: PCell<M>,
     /// RwLock protecting `ZoneRwContent<M, P>` with `ZoneKey` predicate.
-    pub lock: RwLock<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
+    pub lock: RwLock<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P, I>>,
     /// Zone identifier.
     pub zone_id: usize,
     /// Phantom data for unused type parameters.
-    pub _phantom: PhantomData<(PT, A, P)>,
+    pub _phantom: PhantomData<(PT, A, P, I)>,
 }
 
-impl<PT, M, A, P> Zone<PT, M, A, P> where
+impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     PT: PageTable<A>,
-    M: MemorySet<PT, A>,
+    M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
+    I: HardwareInst,
  {
     /// Structural well-formedness:
     /// - the `RwLock` is internally consistent, and
@@ -193,7 +205,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
         // zone_state.wf(mem_inst_id) from the precondition, and the caller's
         // responsibility to supply a mem_set satisfying M::invariants().
         proof {
-            assume(ZonePred::<PT, M, A, P>::inv(zone_key@, zone_rw_content));
+            assume(ZonePred::<PT, M, A, P, I>::inv(zone_key@, zone_rw_content));
         }
 
         let zone_lock = RwLock::new(zone_key, Tracked(zone_rw_content));
@@ -207,7 +219,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     /// release the lock and restore the invariant.
     pub fn lock_write(&self) -> (res: (
         M,
-        RwWriteGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
+        RwWriteGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P, I>>,
     ))
         requires
             self.wf(),
@@ -234,7 +246,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     pub fn unlock_write(
         &self,
         mem_set: M,
-        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
+        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P, I>>,
     )
         requires
             self.wf(),
@@ -254,7 +266,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
         let tracked mut content: ZoneRwContent<M, P> = token.get();
         self.mem_set.put(Tracked(&mut content.mem_set_perm), mem_set);
         proof {
-            assert(ZonePred::<PT, M, A, P>::inv(self.lock.k@, content)) by {
+            assert(ZonePred::<PT, M, A, P, I>::inv(self.lock.k@, content)) by {
                 // mem_set_perm.is_init() — PCell::put postcondition.
                 assert(content.mem_set_perm.is_init());
                 // pcell matches — existing precondition + self.wf() gives
@@ -284,7 +296,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     pub fn lock_read(&self) -> (res: RwReadGuard<
         ZoneKey,
         ZoneRwContent<M, P>,
-        ZonePred<PT, M, A, P>,
+        ZonePred<PT, M, A, P, I>,
     >)
         requires
             self.wf(),
@@ -297,7 +309,7 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
     /// Release the read lock acquired by `lock_read`.
     pub fn unlock_read(
         &self,
-        guard: RwReadGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P>>,
+        guard: RwReadGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P, I>>,
     )
         requires
             self.wf(),
@@ -316,10 +328,11 @@ impl<PT, M, A, P> Zone<PT, M, A, P> where
 /// (constant-sharded) as a shared reference.
 ///
 /// This lets callers hold only the HvMem **read** lock rather than the write lock.
-impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
+impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
     PT: PageTable<A>,
-    M: MemorySet<PT, A>,
+    M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
+    I: HardwareInst,
  {
     /// Insert `region` into this zone using only a shared borrow of the global state.
     ///
@@ -383,12 +396,14 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
         allocator: &GlobalAllocator<A>,
         Tracked(gs): Tracked<&BudgetGlobalState>,
         region: MemoryRegion,
+        mmu: &mut MmuHardware<I>,
     ) -> (res: Result<(), ()>)
         requires
             self.wf(),
             self.lock.k@.mem_inst_id == BudgetProtocol::mem_inst_id(gs),
             self.lock.k@.alloc_inst_id == allocator.inst_id(),
             allocator.invariants(),
+            old(mmu).wf(),
     {
         if !region.valid() {
             return Err(());
@@ -402,7 +417,8 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             return Err(());
         }
         let ghost old_mem_set = mem_set@;
-        mem_set.remove(allocator, region.vstart);
+        // Forced per-page PTE clear + stage-2 `TLBI` via the tokenized MMU handle.
+        mem_set.remove(allocator, region.vstart, Ghost(VmId(self.lock.k@.zone_id as nat)), mmu);
 
         proof {
             let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state } = content;
@@ -432,107 +448,6 @@ impl<PT, M, A> Zone<PT, M, A, BudgetProtocol> where
             assert(content.zone_state.ghost_zone().mem_set == mem_set@);
         }
 
-        self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
-        Ok(())
-    }
-}
-
-/// `ClosureProtocol` implementation for `Zone`: `insert_region` and `remove_region`.
-///
-/// `ClosureProtocol::insert_region` modifies `gs.region_closure_tok` globally, so
-/// callers need an exclusive `&mut ClosureGlobalState` — which requires holding the
-/// HvMem **write** lock.
-impl<PT, M, A> Zone<PT, M, A, ClosureProtocol> where
-    PT: PageTable<A>,
-    M: MemorySet<PT, A>,
-    A: BitmapAllocator,
- {
-    /// Insert `region` into this zone under `ClosureProtocol`.
-    ///
-    /// The caller must hold the HvMem write lock to supply `&mut ClosureGlobalState`.
-    ///
-    /// Returns `Err(())` if `region` is invalid or overlaps an existing mapping.
-    pub fn insert_region(
-        &self,
-        allocator: &GlobalAllocator<A>,
-        Tracked(gs): Tracked<&mut ClosureGlobalState>,
-        region: MemoryRegion,
-    ) -> (res: Result<(), ()>)
-        requires
-            self.wf(),
-            self.lock.k@.alloc_inst_id == allocator.inst_id(),
-            allocator.invariants(),
-    {
-        // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
-        proof {
-            admit();
-        }
-
-        if !region.valid() {
-            return Err(());
-        }
-        let (mut mem_set, guard) = self.lock_write();
-        let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, ClosureProtocol> = token.get();
-        if mem_set.overlaps_vmem(&region) {
-            self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
-            return Err(());
-        }
-        mem_set.insert(allocator, region);
-        proof {
-            let tracked ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state } = content;
-            // Targeted assumptions for the new ClosureProtocol::insert_region preconditions.
-            // These conditions are checked exec-side (valid/overlaps) or are trusted
-            // configuration properties (all_regions membership, !region_closure).
-            assume(!zone_state.ghost_zone().contains_region(region));
-            assume(!zone_state.ghost_zone().mem_set.overlaps_vmem(region));
-            assume(region.spec_valid());
-            assume(all_regions().contains(region));
-            assume(!gs.region_closure().contains(region));
-            let tracked new_zone_state = ClosureProtocol::insert_region(gs, zone_state, region);
-            content =
-            ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state: new_zone_state };
-        }
-        self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
-        Ok(())
-    }
-
-    /// Remove `region` from this zone under `ClosureProtocol`.
-    ///
-    /// Returns `Err(())` if `region` is invalid or no region starts at `region.start`.
-    pub fn remove_region(
-        &self,
-        allocator: &GlobalAllocator<A>,
-        Tracked(gs): Tracked<&mut ClosureGlobalState>,
-        region: MemoryRegion,
-    ) -> (res: Result<(), ()>)
-        requires
-            self.wf(),
-            self.lock.k@.alloc_inst_id == allocator.inst_id(),
-            allocator.invariants(),
-    {
-        // TODO: `ClosureProtocol` is not used by hvisor, proof left for future work.
-        proof {
-            admit();
-        }
-
-        if !region.valid() {
-            return Err(());
-        }
-        let (mut mem_set, guard) = self.lock_write();
-        let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, ClosureProtocol> = token.get();
-        if !mem_set.has_region_starting_at(region.vstart) {
-            self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
-            return Err(());
-        }
-        mem_set.remove(allocator, region.vstart);
-        proof {
-            let tracked ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state } = content;
-            let tracked new_zone_state = ClosureProtocol::remove_region(gs, zone_state, region);
-            content =
-            ZoneRwContent::<M, ClosureProtocol> { mem_set_perm, zone_state: new_zone_state };
-        }
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
         Ok(())
     }

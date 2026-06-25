@@ -8,9 +8,13 @@
 //! (used inside the proofs).  Because `self@.mappings` is *defined* as
 //! `self.pt@.mappings`, the two coincide on `mappings`; we deliberately keep both
 //! spellings to mark which layer each statement is reasoning about.
+use super::tlb::gpa_of_vaddr;
 use super::*;
-use crate::address::addr::PAddr;
+use crate::address::addr::{PAddr, SpecVAddr};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
+use crate::hardware::{HardwareInst, MmuHardware};
+use crate::machine::hardware::mmu::lemma_invalidate_clears_page;
+use crate::machine::types::{CpuId, GuestPage, TlbKey, VmId};
 use crate::page_table::{PTConstants, PageTable};
 use vstd::prelude::*;
 
@@ -19,16 +23,16 @@ verus! {
 broadcast use crate::page_table::PageTable::lemma_invariants_implies_wf;
 
 /// Memory set implementation using a vector of memory regions.
-pub struct VecMemorySet<PT, A> where PT: PageTable<A>, A: BitmapAllocator {
+pub struct VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator, I: HardwareInst {
     /// The list of memory regions in the memory set.
     pub regions: Vec<MemoryRegion>,
     /// Page table managing the mappings.
     pub pt: PT,
     /// Phantom data for the page table memory type.
-    pub phantom: PhantomData<A>,
+    pub phantom: PhantomData<(A, I)>,
 }
 
-impl<PT, A> VecMemorySet<PT, A> where PT: PageTable<A>, A: BitmapAllocator {
+impl<PT, A, I> VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator, I: HardwareInst {
     /// If a region is mapped in the page table.
     ///
     /// TODO: For now we only support 4KB pages, so we use `mappings.contains_key` to simplify the proof.
@@ -85,7 +89,11 @@ impl<PT, A> VecMemorySet<PT, A> where PT: PageTable<A>, A: BitmapAllocator {
     }
 }
 
-impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: BitmapAllocator {
+impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
+    PT: PageTable<A>,
+    A: BitmapAllocator,
+    I: HardwareInst,
+ {
     open spec fn view(&self) -> SpecMemorySet {
         SpecMemorySet {
             regions: Set::new(
@@ -121,7 +129,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
             )
             // Exact-dense consistency (completeness): every region page is mapped to
             // exactly its frame.
-        &&& forall|r: MemoryRegion|
+        &&& forall|r: MemoryRegion| #[trigger]
             self.regions@.contains(r) ==> self.has_mapping_for(
                 r,
             )
@@ -179,6 +187,14 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
         };
 
         // Map the region in the page table
+        // (completeness trigger) every existing region is in `regions@`, so
+        // `invariants()` gives `has_mapping_for` for each — establishes the loop
+        // invariant's completeness clause.
+        assert forall|j: int| 0 <= j < self.regions.len() implies #[trigger] self.has_mapping_for(
+            self.regions[j],
+        ) by {
+            assert(self.regions@.contains(self.regions[j]));
+        }
         let mut i: usize = 0;
         while i < region.pages
             invariant
@@ -463,6 +479,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                                     < self_before_push.regions[idx].pages && v
                                     == self_before_push.regions[idx].spec_page_vaddr(j) && f
                                     == self_before_push.regions[idx].spec_frame(j);
+                            assert(old(self).regions@.contains(self_before_push.regions[idx]));
                             assert(old(self).has_mapping_for(self_before_push.regions[idx]));
                             assert(old_pt_maps.contains_pair(v, f));
                             assert(!region_maps.contains_key(v)) by {
@@ -499,7 +516,13 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
         }
     }
 
-    fn remove(&mut self, allocator: &GlobalAllocator<A>, start: VAddr) {
+    fn remove(
+        &mut self,
+        allocator: &GlobalAllocator<A>,
+        start: VAddr,
+        vm: Ghost<VmId>,
+        mmu: &mut MmuHardware<I>,
+    ) {
         let len = self.regions.len();
         let mut i = 0;
         // Find the region with the given start address
@@ -519,7 +542,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
             i += 1;
         }
         if i == len {
-            assert(false);  // No region starts at the given address, contradicts precondition
+            assert(false);  // contradicts precondition
         }
         proof {
             self.lemma_region_start_unique();
@@ -530,10 +553,18 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
         let ridx = i;
         let region = &self.regions[ridx];
         assert(region.vstart@ == start@);
+        assert(self.regions@.contains(*region));  // regions[ridx] ∈ regions@ (completeness trigger)
         assert(self.has_mapping_for(*region));
 
+        // (completeness trigger) every existing region is in `regions@`, so
+        // `invariants()` gives `has_mapping_for` for each.
+        assert forall|j: int| 0 <= j < self.regions.len() implies #[trigger] self.has_mapping_for(
+            self.regions[j],
+        ) by {
+            assert(self.regions@.contains(self.regions[j]));
+        }
         let mut i = 0;
-        // Unmap the region from the page table
+        // Unmap + flush the region page by page
         while i < region.pages
             invariant
                 region.spec_valid(),
@@ -555,7 +586,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     0 <= j < self.regions.len() && j != ridx ==> !region.spec_overlaps_vmem(
                         #[trigger] self.regions[j],
                     ),
-                // (completeness) Pages [i, region.pages) of the removed region are mapped in the page table
+                // (completeness) Pages [i, region.pages) of the removed region are mapped
                 forall|j: nat|
                     i <= j < region.pages ==> #[trigger] self.pt@.mappings.contains_pair(
                         region.spec_page_vaddr(j),
@@ -566,7 +597,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     0 <= j < self.regions.len() && j != ridx ==> #[trigger] self.has_mapping_for(
                         self.regions[j],
                     ),
-                // (soundness) All mappings are within old regions or the pages [i, region.pages) of the removed region
+                // (soundness) All mappings are within old regions or pages [i, region.pages)
                 forall|vbase2: SpecVAddr, frame2: SpecFrame| #[trigger]
                     self.pt@.mappings.contains_pair(vbase2, frame2) ==> self.has_region_for_except(
                         vbase2,
@@ -575,6 +606,13 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     ) || exists|j: nat|
                         i <= j < region.pages && vbase2 == region.spec_page_vaddr(j) && frame2
                             == region.spec_frame(j),
+                // MMU forcing: the hardware TLB is clean for every page flushed so far.
+                mmu.wf(),
+                mmu.inst_id() == old(mmu).inst_id(),
+                forall|j: nat, cpu: CpuId|
+                    j < i ==> !(#[trigger] mmu.tlb_view().contains_key(
+                        TlbKey::new(cpu, vm@, gpa_of_vaddr(region.spec_page_vaddr(j))),
+                    )),
             decreases region.pages - i,
         {
             let vaddr = VAddr(region.vstart.0 + i * PAGE_SIZE);
@@ -584,30 +622,32 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     region.spec_page_vaddr(i as nat),
                     region.spec_frame(i as nat),
                 ));
-                // TODO: edit precondition to require the new region is within the address space limit
                 assume(vaddr@.0 < self.pt@.constants.arch.vspace_size());
             }
 
+            let ipa_page = vaddr.0 / PAGE_SIZE;
             let ghost self_before_unmap = *self;
             let ghost old_mappings = self.pt@.mappings;
-            // Unmap the frame, always succeed
             let res = self.pt.unmap(allocator, vaddr);
+            // FORCED stage-2 invalidation of this page on the tokenized MMU.  The
+            // post-state TLB cleanliness below is provable only because this real
+            // `TLBI` runs (the encapsulated instance is the sole TLB mutator).
+            let ghost view_before = mmu.tlb_view();
+            mmu.tlbi(ipa_page, vm, Ghost(GuestPage(ipa_page as nat)));
             let ghost mappings = self.pt@.mappings;
             i += 1;
 
             proof {
-                // Prove loop invariants
+                // ── Mapping invariants (verbatim from `MemorySet::remove`) ──
                 assert(self.pt.invariants());
                 assert(res.is_ok());
                 assert(mappings == old_mappings.remove(vaddr@));
-                //
                 assert forall|vbase: SpecVAddr, frame: SpecFrame| #[trigger]
                     self.pt@.mappings.contains_pair(vbase, frame) implies old(
                     self,
                 ).pt@.mappings.contains_pair(vbase, frame) by {
                     assert(old_mappings.contains_pair(vbase, frame));
                 }
-                // (completeness) Pages [i, region.pages) of the removed region are mapped in the page table
                 assert forall|j: nat|
                     i <= j < region.pages implies #[trigger] self.pt@.mappings.contains_pair(
                     region.spec_page_vaddr(j),
@@ -623,7 +663,6 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                         ));
                     }
                 }
-                // (completeness) Other regions are still mapped in the page table
                 assert forall|j: int|
                     0 <= j < self.regions.len() && j
                         != ridx implies #[trigger] self.has_mapping_for(self.regions[j]) by {
@@ -640,7 +679,6 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                         ));
                     }
                 }
-                // (soundness) All mappings are within old regions or the pages [i, region.pages) of the removed region
                 assert forall|vbase2: SpecVAddr, frame2: SpecFrame| #[trigger]
                     mappings.contains_pair(vbase2, frame2) implies self.has_region_for_except(
                     vbase2,
@@ -658,15 +696,45 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                         ));
                     }
                 }
+                // ── MMU forcing (the per-page stage-2 TLBI) ──
+                assert(PAGE_SIZE as nat == SPEC_PAGE_SIZE);
+                assert(GuestPage(ipa_page as nat) == gpa_of_vaddr(vaddr@));
+                // Maintenance: the page just flushed (index i-1) is clean,
+                // and earlier pages stay clean (a `TLBI` only removes entries).
+                lemma_invalidate_clears_page(view_before, vm@, GuestPage(ipa_page as nat));
+                assert(region.spec_page_vaddr((i - 1) as nat) == vaddr@);
+                assert(gpa_of_vaddr(vaddr@) == GuestPage(ipa_page as nat));
+                assert forall|j: nat, cpu: CpuId| j < i implies !(
+                #[trigger] mmu.tlb_view().contains_key(
+                    TlbKey::new(cpu, vm@, gpa_of_vaddr(region.spec_page_vaddr(j))),
+                )) by {
+                    if j < (i - 1) as nat {
+                        assert(!view_before.contains_key(
+                            TlbKey::new(cpu, vm@, gpa_of_vaddr(region.spec_page_vaddr(j))),
+                        ));
+                    } else {
+                        assert(region.spec_page_vaddr(j) == vaddr@);
+                    }
+                }
             }
         }
 
-        // Remove the region from the list
+        // Capture the loop's TLB-clean result over a ghost copy of `region`, since the
+        // `region` borrow ends at the `self.regions.remove` below (and the MMU is not
+        // touched after this, so the fact survives to the post-condition).
+        let ghost rr = *region;
+        assert forall|j: nat, cpu: CpuId| j < rr.pages implies !(
+        #[trigger] mmu.tlb_view().contains_key(
+            TlbKey::new(cpu, vm@, gpa_of_vaddr(rr.spec_page_vaddr(j))),
+        )) by {
+            assert(region.spec_page_vaddr(j) == rr.spec_page_vaddr(j));
+        }
+
+        // Remove the region from the list (does not touch the page table or TLB).
         let ghost self_before_remove = *self;
         self.regions.remove(ridx);
 
         proof {
-            // Prove invariants
             // All regions are still valid
             assert forall|i: int|
                 0 <= i < self.regions.len() implies #[trigger] self.regions[i].spec_valid() by {
@@ -729,7 +797,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
             }
             assert(self.invariants());
 
-            // Prove the postcondition. The region set is exactly old regions - `region`.
+            // Postcondition: region set is old regions - `region`.
             let removed = old(self).regions[ridx as int];
             assert(self@.regions =~= old(self)@.regions.remove(removed)) by {
                 assert forall|r: MemoryRegion| #[trigger]
@@ -760,7 +828,7 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     }
                 }
             }
-            // Prove postcondition: the page table shrinks by exactly `region.spec_mappings()`.
+            // Postcondition: the page table shrinks by exactly `region.spec_mappings()`.
             assert(self@.mappings =~= old(self)@.mappings.remove_keys(
                 removed.spec_mappings().dom(),
             )) by {
@@ -772,7 +840,6 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     self.pt@.mappings.contains_pair(v, f) <==> old_pt_maps.remove_keys(
                         region_maps.dom(),
                     ).contains_pair(v, f) by {
-                    // ==>
                     if self.pt@.mappings.contains_pair(v, f) {
                         assert(old_pt_maps.contains_pair(v, f));
                         assert(!region_maps.contains_key(v)) by {
@@ -782,8 +849,6 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                         };
                         assert(old_pt_maps.remove_keys(region_maps.dom()).contains_pair(v, f));
                     }
-                    // <==
-
                     if old_pt_maps.remove_keys(region_maps.dom()).contains_pair(v, f) {
                         assert(old(self)@.mappings.contains_pair(v, f));
                         if self.has_region_for(v, f) {
@@ -811,6 +876,22 @@ impl<PT, A> MemorySet<PT, A> for VecMemorySet<PT, A> where PT: PageTable<A>, A: 
                     }
                 }
                 lemma_map_eq_pair(old_pt_maps.remove_keys(region_maps.dom()), self.pt@.mappings);
+            }
+            // FORCED tlb-clean post: each removed mapping is a page of `removed`, and
+            // every page of `removed` was flushed by the per-page `TLBI` above.
+            assert(rr == removed);
+            assert forall|va: SpecVAddr, cpu: CpuId|
+                old(self)@.mappings.contains_key(va) && !self@.mappings.contains_key(
+                    va,
+                ) implies !mmu.tlb_view().contains_key(TlbKey::new(cpu, vm@, gpa_of_vaddr(va))) by {
+                // `self@.mappings == old@.mappings.remove_keys(removed.spec_mappings().dom())`,
+                // so a removed key lies in `removed.spec_mappings().dom()`.
+                assert(removed.spec_mappings().dom().contains(va));
+                removed.lemma_mappings_sound(va);
+                let j = choose|k: nat| 0 <= k < removed.pages && va == removed.spec_page_vaddr(k);
+                assert(!mmu.tlb_view().contains_key(
+                    TlbKey::new(cpu, vm@, gpa_of_vaddr(removed.spec_page_vaddr(j))),
+                ));
             }
         }
     }

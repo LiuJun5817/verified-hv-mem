@@ -35,7 +35,7 @@ pub trait ZoneStateOps {
 
 /// Ghost-state trait for **zone lifecycle** operations (add / remove a zone).
 ///
-/// `Zone<PT, M, A, P>` and `HvMem<PT, M, A, P>` are parameterized by `P: ZoneGhostProtocol`.
+/// `Zone<PT, M, A, P, I>` and `HvMem<PT, M, A, P, I>` are parameterized by `P: ZoneGhostProtocol`.
 /// Swapping `P` switches the entire ghost-state bookkeeping strategy without changing
 /// any exec code.
 ///

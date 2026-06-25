@@ -21,11 +21,9 @@
 //! page identity is derived from it as `GuestPage(ipa_page as nat)`.  The VMID is
 //! abstracted (ghost `vm`): it is read from the current `VTTBR_EL2`, which the
 //! caller must already have programmed to `vm`.
+use super::mmu::HardwareInst;
 use core::arch::asm;
 use vstd::prelude::*;
-
-use crate::machine::hardware::{HardwareOps, HwView};
-use crate::machine::types::*;
 
 verus! {
 
@@ -33,11 +31,9 @@ verus! {
 /// hypervisor code a value on which to call the [`HardwareOps`] instructions.
 pub struct Aarch64Hw;
 
-impl HardwareOps for Aarch64Hw {
+impl HardwareInst for Aarch64Hw {
     #[verifier::external_body]
-    fn issue_tlbi_s2(&self, ipa_page: usize, vm: Ghost<VmId>, hw: Ghost<HwView>) -> (hw_post: Ghost<
-        HwView,
-    >) {
+    fn issue_tlbi_s2(ipa_page: usize) {
         // Broadcast a stage-2 IPA invalidation across the inner-shareable domain.
         // `IPAS2E1IS` requires a register operand: Xt holds IPA >> 12 = the 4K
         // guest page number.  One instruction removes every cached `(*, vm, gpa)`
@@ -45,42 +41,25 @@ impl HardwareOps for Aarch64Hw {
         unsafe {
             asm!("tlbi ipas2e1is, {x}", x = in(reg) ipa_page);
         }
-        // The abstract effect realized by the broadcast (see
-        // `HwView::tlbi_ipa_broadcast_step`): drop every cached entry for the
-        // target IPA together with its pending-invalidation flag.
-        let ghost gpa = GuestPage(ipa_page as nat);
-        let ghost targets = Set::new(
-            |key: TlbKey| key.vm == vm@ && key.gpa == gpa && hw@.tlb.contains_key(key),
-        );
-        Ghost(
-            HwView {
-                tlb: hw@.tlb.remove_keys(targets),
-                pending_invalidations: hw@.pending_invalidations.difference(targets),
-                active_vm: hw@.active_vm,
-                memory: hw@.memory,
-            },
-        )
     }
 
     #[verifier::external_body]
-    fn issue_dsb_ish(&self, hw: Ghost<HwView>) -> (hw_post: Ghost<HwView>) {
+    fn issue_dsb_ish() {
         // Data Synchronization Barrier, inner-shareable.  Does not retire until the
         // preceding broadcast has completed on every PE; no architectural state
         // change (`HwView::dsb_step` is the identity).
         unsafe {
             asm!("dsb ish");
         }
-        hw
     }
 
     #[verifier::external_body]
-    fn issue_isb(&self, hw: Ghost<HwView>) -> (hw_post: Ghost<HwView>) {
+    fn issue_isb() {
         // Instruction Synchronization Barrier.  No architectural state change
         // (`HwView::isb_step` is the identity).
         unsafe {
             asm!("isb");
         }
-        hw
     }
 }
 

@@ -1,6 +1,9 @@
 //! A memory set is a collection of memory areas that can be mapped into the virtual address
 //! space of a zone (process). It manages the page table for the zone, and provides methods to
 //! insert, remove, and find memory areas.
+use crate::hardware::{HardwareInst, MmuHardware};
+use crate::machine::types::{CpuId, GuestPage, TlbKey, VmId};
+use crate::memory_set::tlb::gpa_of_vaddr;
 use crate::{
     address::{
         addr::{SpecPAddr, SpecVAddr, VAddr},
@@ -11,10 +14,11 @@ use crate::{
     global_allocator::GlobalAllocator,
     page_table::{PTConstants, PageTable},
 };
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 use vstd::prelude::*;
 use vstd::tokens::InstanceId;
 
+mod tlb;
 mod vec;
 
 verus! {
@@ -129,7 +133,12 @@ impl SpecMemorySet {
 }
 
 /// Specification of a memory set viewed by higher-level components.
-pub trait MemorySet<PT, A> where PT: PageTable<A>, A: BitmapAllocator, Self: Sized {
+pub trait MemorySet<PT, A, I> where
+    PT: PageTable<A>,
+    A: BitmapAllocator,
+    I: HardwareInst,
+    Self: Sized,
+ {
     /// View the memory set as a list of memory regions.
     spec fn view(&self) -> SpecMemorySet;
 
@@ -186,17 +195,37 @@ pub trait MemorySet<PT, A> where PT: PageTable<A>, A: BitmapAllocator, Self: Siz
             self.invariants(),
     ;
 
-    /// Remove a memory region from the memory set by its starting virtual address.
-    fn remove(&mut self, allocator: &GlobalAllocator<A>, start: VAddr)
+    /// Remove a memory region from the memory set by its starting virtual address,
+    /// **forcing a stage-2 `TLBI` per page** via the tokenized MMU.  `vm` is the
+    /// owning zone's id and `mmu` is the hardware handle that issues the `TLBI`s.
+    ///
+    /// The post-condition — every page this op removes is left clean in the hardware
+    /// TLB — is provable only because each `TLBI` actually runs: only
+    /// `MmuHardware::tlbi` can mutate the encapsulated TLB token, and the
+    /// pre-condition does not assume the TLB is already clean, so the stale-TLB-reuse
+    /// channel is closed by construction.
+    fn remove(
+        &mut self,
+        allocator: &GlobalAllocator<A>,
+        start: VAddr,
+        vm: Ghost<VmId>,
+        mmu: &mut MmuHardware<I>,
+    )
         requires
             old(self).invariants(),
             allocator.invariants(),
             old(self).inst_id() == allocator.inst_id(),
             old(self)@.has_region_starting_at(start@),
+            old(mmu).wf(),
         ensures
             self.inst_id() == old(self).inst_id(),
             self@ == old(self)@.remove_region(start@),
             self.invariants(),
+            mmu.wf(),
+            mmu.inst_id() == old(mmu).inst_id(),
+            forall|va: SpecVAddr, cpu: CpuId|
+                old(self)@.mappings.contains_key(va) && !self@.mappings.contains_key(va) ==> !(
+                #[trigger] mmu.tlb_view().contains_key(TlbKey::new(cpu, vm@, gpa_of_vaddr(va)))),
     ;
 
     /// Lemma. The invariants imply the well-formedness of the memory set.
