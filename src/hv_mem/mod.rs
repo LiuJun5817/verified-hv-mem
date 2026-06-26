@@ -26,7 +26,8 @@ use crate::{
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
     hardware::{HardwareInstr, MmuHardware},
-    memory_set::MemorySet,
+    machine::types::{GuestPage, S2Entry, VmId},
+    memory_set::{pt_s2map_inner, MemorySet},
     page_table::{PTConstants, PageTable},
     sync::rwlock::{RwLock, RwReadGuard, RwReaderToken, RwWriteGuard, RwWriterToken},
 };
@@ -203,7 +204,8 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     /// 3. Delegate Zone assembly to `Zone::new` (infallible).
     /// 4. Push the new `Zone`, return the zone list to its `PCell`, and release
     ///    the write lock.
-    pub fn add_zone(&self, zid: usize, pt_constants: PTConstants) -> (res: Result<(), ()>)
+    pub fn add_zone(&self, zid: usize, pt_constants: PTConstants, mmu: &mut MmuHardware<I>) -> (res:
+        Result<(), ()>)
         requires
             self.invariants(),
             pt_constants@.valid(),
@@ -211,8 +213,15 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                 level < pt_constants.arch@.level_count() ==> pt_constants.arch@.entry_count(level)
                     == 512,
             pt_constants.arch@.leaf_frame_size() == FrameSize::Size4K,
+            old(mmu).wf(),
+            // The MMU must not yet know this vm — the caller's obligation (trusted
+            // configuration, like zone budgets); discharged once HvMem carries a
+            // `mmu.live_vms() == zone_ids` invariant (a later refinement step).
+            !old(mmu).live_vms().contains(VmId(zid as nat)),
         ensures
             res is Ok ==> self.invariants(),
+            mmu.wf(),
+            mmu.inst_id() == old(mmu).inst_id(),
     {
         // ── Step 1: acquire HvMem write lock ──────────────────────────────────
         let guard = self.lock.lock_write();
@@ -253,6 +262,9 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                         != zones@[l].zone_id,
                 // All zones well-formed.
                 forall|k: int| #![auto] 0 <= k < zones@.len() ==> zones@[k].wf(),
+                // The MMU handle is untouched by the scan (needed by the early Err exit).
+                mmu.wf(),
+                mmu.inst_id() == old(mmu).inst_id(),
             decreases zones.len() - i,
         {
             if zones[i].zone_id == zid {
@@ -284,12 +296,21 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
 
         // ── Step 3: assemble the new Zone with an empty MemorySet ─────────────
         let mem_set = M::new(&self.allocator, pt_constants);
+        // Mint this zone's MMU `s2map` slice token (empty, keyed by the vm); the
+        // forced sync clause holds at birth because an empty mem_set projects to an
+        // empty `s2map`.
+        let s2map_tok = mmu.add_vm(Ghost(VmId(zid as nat)));
+        proof {
+            assert(pt_s2map_inner(mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
+        }
         let new_zone = Zone::<PT, M, A, P, I>::new(
             mem_set,
             zid,
             Ghost(mem_inst_id),
             Ghost(self.allocator.inst_id()),
+            Ghost(mmu.inst_id()),
             Tracked(zone_state),
+            s2map_tok,
         );
         // Snapshot the pre-push zone list for use in the postcondition proof.
         let ghost old_zones = zones@;
@@ -433,7 +454,10 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
 
         // ── Step 5: advance protocol ghost state ───────────────────────────────
         proof {
-            let tracked ZoneRwContent::<M, P> { mem_set_perm: _, zone_state } = zone_content;
+            // `s2map_tok` is dropped with the destroyed zone (there is no `remove_vm`
+            // transition; the vm's slice simply becomes unreachable).
+            let tracked ZoneRwContent::<M, P> { mem_set_perm: _, zone_state, s2map_tok: _ } =
+                zone_content;
             P::remove_zone(&mut content.global_state, zone_state);
             // zone_handle (writer token) is consumed here via assume — the zone is
             // being destroyed so there is no need to formally unlock it.
@@ -556,12 +580,16 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
     ///
     /// Returns `Err(())` if `region` is invalid, the zone is not found, or
     /// `region` overlaps an existing mapping in that zone.
-    pub fn insert_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+    pub fn insert_region(&self, zid: usize, region: MemoryRegion, mmu: &mut MmuHardware<I>) -> (res:
+        Result<(), ()>)
         requires
             self.invariants(),
             zone_budget(zid as nat).contains(region),
+            old(mmu).wf(),
         ensures
             res is Ok ==> self.invariants(),
+            mmu.wf(),
+            mmu.inst_id() == old(mmu).inst_id(),
     {
         // ── Step 1: validate region ────────────────────────────────────────────
         if !region.valid() {
@@ -604,7 +632,15 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         // so the HvMem read lock is sufficient.
 
         assert(zones[i as int].zone_id == zid);
-        let res = zones[i].insert_region(&self.allocator, Tracked(&global_state), region);
+        proof {
+            // INSTANCE-ID BRIDGE (trusted): there is one physical MMU, so the handle
+            // passed here is the one whose `add_vm` minted this zone's slice token.
+            // The token's *forcing* is real (its instance-id is checked inside
+            // `Zone::insert_region`); this assume only states the caller wired the
+            // matching MMU, discharged once HvMem carries the MMU instance id.
+            assume(zones[i as int].lock.k@.mmu_inst_id == mmu.inst_id());
+        }
+        let res = zones[i].insert_region(&self.allocator, Tracked(&global_state), region, mmu);
 
         self.lock.unlock_read(guard);
         res
@@ -624,6 +660,8 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
             old(mmu).wf(),
         ensures
             res is Ok ==> self.invariants(),
+            mmu.wf(),
+            mmu.inst_id() == old(mmu).inst_id(),
     {
         // ── Step 1: validate region ────────────────────────────────────────────
         if !region.valid() {
@@ -660,6 +698,10 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         }
         // ── Step 4: delegate to Zone::remove_region ────────────────
 
+        proof {
+            // INSTANCE-ID BRIDGE (trusted) — see `insert_region` for the rationale.
+            assume(zones[i as int].lock.k@.mmu_inst_id == mmu.inst_id());
+        }
         let res = zones[i].remove_region(&self.allocator, Tracked(&global_state), region, mmu);
 
         self.lock.unlock_read(guard);

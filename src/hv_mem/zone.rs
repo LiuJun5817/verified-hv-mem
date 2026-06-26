@@ -18,8 +18,9 @@ use crate::{
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
     hardware::{HardwareInstr, MmuHardware},
+    machine::hardware::mmu::MmuS2MapToken,
     machine::types::VmId,
-    memory_set::{pt_s2_map, MemorySet},
+    memory_set::{pt_s2map_inner, MemorySet},
     page_table::PageTable,
     sync::rwlock::{RwLock, RwReadGuard, RwWriteGuard},
 };
@@ -50,6 +51,8 @@ pub struct ZoneKey {
     pub mem_inst_id: InstanceId,
     /// Global allocator instance id — must match `M::inst_id()` of the stored memory set.
     pub alloc_inst_id: InstanceId,
+    /// `MmuSpec` instance id — the `s2map` slice token in this lock belongs to it.
+    pub mmu_inst_id: InstanceId,
 }
 
 /// Tracked content protected by a `Zone`'s `RwLock`.
@@ -62,6 +65,9 @@ pub tracked struct ZoneRwContent<M, P> where P: ZoneGhostProtocol {
     pub mem_set_perm: PointsTo<M>,
     /// Per-zone ghost token (map-sharded `zones[zid]` for the active spec).
     pub zone_state: P::ZoneToken,
+    /// This zone's MMU `s2map` slice token, kept in sync with `mem_set`'s mappings
+    /// by [`ZonePred::inv`] — the lock-resident half of the per-vm sync point.
+    pub s2map_tok: MmuS2MapToken,
 }
 
 /// Phantom struct that carries the `Zone`-level `InvariantPredicate`.
@@ -101,7 +107,14 @@ impl<PT, M, A, P, I> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePr
         &&& v.mem_set_perm@.mem_contents->Init_0.inst_id() == k.alloc_inst_id
         &&& v.zone_state.zone_id() == k.zone_id
         &&& v.zone_state.wf(k.mem_inst_id)
-        &&& v.zone_state.ghost_zone().mem_set == v.mem_set_perm@.mem_contents->Init_0@
+        &&& v.zone_state.ghost_zone().mem_set
+            == v.mem_set_perm@.mem_contents->Init_0@
+        // The MMU `s2map` slice token belongs to the MMU instance, is keyed by this
+        // zone's vm, and equals the projection of the stored memory set's mappings —
+        // i.e. the MMU is *synced* for this zone (the hv-controlled `s2map` half).
+        &&& v.s2map_tok.instance_id() == k.mmu_inst_id
+        &&& v.s2map_tok.key() == VmId(k.zone_id as nat)
+        &&& v.s2map_tok.value() == pt_s2map_inner(v.mem_set_perm@.mem_contents->Init_0@.mappings)
     }
 }
 
@@ -179,26 +192,40 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         zone_id: usize,
         Ghost(mem_inst_id): Ghost<InstanceId>,
         Ghost(alloc_inst_id): Ghost<InstanceId>,
+        Ghost(mmu_inst_id): Ghost<InstanceId>,
         Tracked(zone_state): Tracked<P::ZoneToken>,
+        Tracked(s2map_tok): Tracked<MmuS2MapToken>,
     ) -> (res: Self)
         requires
             zone_state.wf(mem_inst_id),
             mem_set.inst_id() == alloc_inst_id,
+            // The freshly minted slice token (from `MmuHardware::add_vm`) is keyed by
+            // this zone's vm, belongs to the MMU instance, and projects this mem_set.
+            s2map_tok.instance_id() == mmu_inst_id,
+            s2map_tok.key() == VmId(zone_id as nat),
+            s2map_tok.value() == pt_s2map_inner(mem_set@.mappings),
         ensures
             res.wf(),
             res.lock.k@.mem_inst_id == mem_inst_id,
             res.lock.k@.alloc_inst_id == alloc_inst_id,
+            res.lock.k@.mmu_inst_id == mmu_inst_id,
             res.zone_id == zone_id,
     {
         // Store the exec mem_set in a fresh PCell.
         let (mem_set_cell, Tracked(mem_set_perm)) = PCell::new(mem_set);
 
-        // Bundle permission + ghost token into the lock content.
-        let tracked zone_rw_content = ZoneRwContent::<M, P> { mem_set_perm, zone_state };
+        // Bundle permission + ghost tokens into the lock content.
+        let tracked zone_rw_content = ZoneRwContent::<M, P> { mem_set_perm, zone_state, s2map_tok };
 
         // Build the ZoneKey (evaluated in spec mode via Ghost(…)).
         let zone_key = Ghost(
-            ZoneKey { zone_id, cell_id: mem_set_cell.id(), mem_inst_id, alloc_inst_id },
+            ZoneKey {
+                zone_id,
+                cell_id: mem_set_cell.id(),
+                mem_inst_id,
+                alloc_inst_id,
+                mmu_inst_id,
+            },
         );
 
         // Admit ZonePred::inv; dischargeable from PCell::new postconditions,
@@ -232,6 +259,11 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             res.1.token@.zone_state.zone_id() == self.lock.k@.zone_id,
             res.1.token@.zone_state.wf(self.lock.k@.mem_inst_id),
             res.1.token@.zone_state.ghost_zone().mem_set == res.0@,
+            // Surface the MMU slice token kept in the lock so the caller can thread
+            // it through `mem_set.insert`/`remove` (forcing the maintenance instrs).
+            res.1.token@.s2map_tok.instance_id() == self.lock.k@.mmu_inst_id,
+            res.1.token@.s2map_tok.key() == VmId(self.lock.k@.zone_id as nat),
+            res.1.token@.s2map_tok.value() == pt_s2map_inner(res.0@.mappings),
     {
         let RwWriteGuard { handle, token } = self.lock.lock_write();
         let tracked mut content: ZoneRwContent<M, P> = token.get();
@@ -261,6 +293,11 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             guard.token@.zone_state.zone_id() == self.lock.k@.zone_id,
             guard.token@.zone_state.wf(self.lock.k@.mem_inst_id),
             guard.token@.zone_state.ghost_zone().mem_set == mem_set@,
+            // The MMU slice token being stored back is keyed by this zone's vm and
+            // projects the mem_set being stored back — restores the sync clause.
+            guard.token@.s2map_tok.instance_id() == self.lock.k@.mmu_inst_id,
+            guard.token@.s2map_tok.key() == VmId(self.lock.k@.zone_id as nat),
+            guard.token@.s2map_tok.value() == pt_s2map_inner(mem_set@.mappings),
     {
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, P> = token.get();
@@ -284,6 +321,13 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
                 // ghost/exec linking: both sides equal mem_set@ after PCell::put.
                 assert(content.zone_state.ghost_zone().mem_set
                     == content.mem_set_perm@.mem_contents->Init_0@);
+                // MMU sync clause: the slice token (unchanged by put) still projects
+                // the mem_set just stored back (== content.mem_set_perm view).
+                assert(content.s2map_tok.instance_id() == self.lock.k@.mmu_inst_id);
+                assert(content.s2map_tok.key() == VmId(self.lock.k@.zone_id as nat));
+                assert(content.s2map_tok.value() == pt_s2map_inner(
+                    content.mem_set_perm@.mem_contents->Init_0@.mappings,
+                ));
             };
         }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
@@ -342,13 +386,20 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         allocator: &GlobalAllocator<A>,
         Tracked(gs): Tracked<&BudgetGlobalState>,
         region: MemoryRegion,
+        mmu: &mut MmuHardware<I>,
     ) -> (res: Result<(), ()>)
         requires
             self.wf(),
             self.lock.k@.mem_inst_id == BudgetProtocol::mem_inst_id(gs),
             self.lock.k@.alloc_inst_id == allocator.inst_id(),
+            self.lock.k@.mmu_inst_id == old(mmu).inst_id(),
             allocator.invariants(),
+            old(mmu).wf(),
             zone_budget(self.zone_id as nat).contains(region),
+        ensures
+            mmu.wf(),
+            mmu.inst_id() == old(mmu).inst_id(),
+            mmu.live_vms() == old(mmu).live_vms(),
     {
         if !region.valid() {
             return Err(());
@@ -362,10 +413,20 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
             return Err(());
         }
         let ghost old_mem_set = mem_set@;
-        mem_set.insert(allocator, region);
+        // Pull this zone's MMU slice token out of the lock content so it can be
+        // threaded through `mem_set.insert` (which fires `map`/`map_dsb` per page).
+        let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state, s2map_tok } =
+            content;
+        let s2_out = mem_set.insert(
+            allocator,
+            region,
+            Ghost(VmId(self.lock.k@.zone_id as nat)),
+            mmu,
+            Tracked(s2map_tok),
+        );
+        let tracked new_s2map_tok = s2_out.get();
 
         proof {
-            let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state } = content;
             // Targeted assumptions for BudgetProtocol::insert_region preconditions.
             // zone_state.wf is derived from lock_write postcondition + mem_inst_id precondition.
             assert(zone_state.wf(gs.mem_inst_id()));
@@ -376,12 +437,18 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
             // !overlaps_vmem are confirmed (exec-side) before reaching this point.
             let tracked new_zone_state = BudgetProtocol::insert_region(gs, zone_state, region);
             content =
-            ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
+            ZoneRwContent::<M, BudgetProtocol> {
+                mem_set_perm,
+                zone_state: new_zone_state,
+                s2map_tok: new_s2map_tok,
+            };
             // Linking invariant: new ghost_zone mirrors the updated exec mem_set.
             // new_zone_state.ghost_zone() == old_ghost_zone.insert_region(region)
             // and M::insert ensures mem_set@.regions == old_mem_set.regions.insert(region),
             // so both sides reduce to SpecMemorySet { regions: old_mem_set.regions.insert(region) }.
             assert(content.zone_state.ghost_zone().mem_set == mem_set@);
+            // MMU sync clause restored: `mem_set.insert` returned the slice token driven
+            // to `pt_s2map_inner(mem_set@.mappings)` (one `map_dsb` per inserted page).
         }
 
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -402,8 +469,13 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
             self.wf(),
             self.lock.k@.mem_inst_id == BudgetProtocol::mem_inst_id(gs),
             self.lock.k@.alloc_inst_id == allocator.inst_id(),
+            self.lock.k@.mmu_inst_id == old(mmu).inst_id(),
             allocator.invariants(),
             old(mmu).wf(),
+        ensures
+            mmu.wf(),
+            mmu.inst_id() == old(mmu).inst_id(),
+            mmu.live_vms() == old(mmu).live_vms(),
     {
         if !region.valid() {
             return Err(());
@@ -417,24 +489,23 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
             return Err(());
         }
         let ghost old_mem_set = mem_set@;
-        proof {
-            // GLOBAL SYNC-POINT INVARIANT (transitional assume).  `mem_set.remove`
-            // requires the MMU to be at a sync point for this zone's *current*
-            // mappings.  This holds for a single zone driving the global MMU; with
-            // several zones sharing one MMU it is only sound once `synced` is a
-            // per-VM slice (`s2map.restrict(vm) == pt_s2_map(mappings, vm)`) rather
-            // than whole-map equality — the global-composition refinement (L3).
-            // Same flavor as `Zone::new`'s `assume(ZonePred::inv)`.
-            assume(mmu.synced(
-                VmId(self.lock.k@.zone_id as nat),
-                pt_s2_map(mem_set@.mappings, VmId(self.lock.k@.zone_id as nat)),
-            ));
-        }
-        // Forced per-page PTE clear + stage-2 `TLBI` via the tokenized MMU handle.
-        mem_set.remove(allocator, region.vstart, Ghost(VmId(self.lock.k@.zone_id as nat)), mmu);
+        // Pull this zone's MMU slice token out of the lock content.  Its lock
+        // invariant — `s2map_tok.value() == pt_s2map_inner(mem_set@.mappings)` — *is*
+        // the sync point that the old `assume(mmu.synced(..))` used to fabricate; it
+        // now comes for free from `lock_write` and is threaded through `mem_set.remove`,
+        // which fires `unmap_invalidate`/`unmap_dsb_tlbi` (forced `DSB`+`TLBI`) per page.
+        let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state, s2map_tok } =
+            content;
+        let s2_out = mem_set.remove(
+            allocator,
+            region.vstart,
+            Ghost(VmId(self.lock.k@.zone_id as nat)),
+            mmu,
+            Tracked(s2map_tok),
+        );
+        let tracked new_s2map_tok = s2_out.get();
 
         proof {
-            let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state } = content;
             // zone_state.wf derived from lock_write postcondition + mem_inst_id precondition.
             assert(zone_state.wf(gs.mem_inst_id()));
             // The linking invariant (surfaced by lock_write) connects the ghost zone's
@@ -453,7 +524,11 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
                 ghost_region,
             );
             content =
-            ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state: new_zone_state };
+            ZoneRwContent::<M, BudgetProtocol> {
+                mem_set_perm,
+                zone_state: new_zone_state,
+                s2map_tok: new_s2map_tok,
+            };
             // Linking invariant: new ghost_zone mirrors the updated exec mem_set.
             // new_zone_state.ghost_zone() == old_ghost_zone.remove_region(ghost_region)
             // and M::remove ensures mem_set@.regions == old_mem_set.regions.remove(ghost_region),

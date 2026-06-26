@@ -63,11 +63,17 @@ pub open spec fn synced(s2map: Map<VmPageKey, S2Entry>, tlb: Map<TlbKey, TlbEntr
 tokenized_state_machine! {
     MmuSpec {
         fields {
-            /// MMU-reachable stage-2 mappings (the walker's current view); a single
-            /// token, encapsulated in `MmuHardware`.  The `unmap` transition that
-            /// drops a page from it is the seam that forces the unmap instructions.
+            /// MMU-reachable stage-2 mappings, **per-vm sharded** (one token per vm,
+            /// value = that vm's `gpa -> S2Entry` submap).  Each zone owns its vm's
+            /// token, held in its lock; modifying it (`map`/`unmap_invalidate`) is the
+            /// seam that forces the maintenance instructions.
+            #[sharding(map)]
+            pub s2map: Map<VmId, Map<GuestPage, S2Entry>>,
+
+            /// Mirror of `s2map.dom()` (the live vms), so `add_vm` can discharge the
+            /// fresh-key obligation — the budget/global-allocator pattern.
             #[sharding(variable)]
-            pub s2map: Map<VmPageKey, S2Entry>,
+            pub vm_ids: Set<VmId>,
 
             /// Nondeterministic TLB cache; a single token for the one global TLB,
             /// encapsulated in `MmuHardware` (see module docs).
@@ -75,93 +81,118 @@ tokenized_state_machine! {
             pub tlb: Map<TlbKey, TlbEntry>,
         }
 
-        // ── Invariant ──────────────────────────────────────────────────────────
+        // ── Invariants ─────────────────────────────────────────────────────────
 
-        /// **Full TLB coherence — the sole invariant.** Every cached entry's page
-        /// is still in `s2map` *and* the entry agrees with it.  This is exactly
-        /// `MachineState::tlb_safe`.  It is inductive because the only way a page
-        /// leaves `s2map` is the bundled [`unmap_invalidate`], which clears the
-        /// page's TLB entries in the *same* step — so no orphan is ever exposed.
+        /// `vm_ids` is exactly the set of vms present in `s2map`.
+        #[invariant]
+        pub fn inv_vm_ids(&self) -> bool {
+            self.s2map.dom() == self.vm_ids
+        }
+
+        /// **Full TLB coherence — the load-bearing invariant.** Every cached entry's
+        /// page is still in `s2map` *and* the entry agrees with it (= the body of
+        /// `MachineState::tlb_safe`).  Inductive because the only page-removal,
+        /// `unmap_invalidate`, clears that page's TLB entries in the *same* step.
         #[invariant]
         pub fn inv_coherent(&self) -> bool {
             forall|key: TlbKey| #[trigger] self.tlb.contains_key(key) ==> {
-                let sk = VmPageKey::new(key.vm, key.gpa);
-                &&& self.s2map.contains_key(sk)
-                &&& self.tlb[key].as_s2_entry() == self.s2map[sk]
+                &&& self.s2map.contains_key(key.vm)
+                &&& self.s2map[key.vm].contains_key(key.gpa)
+                &&& self.tlb[key].as_s2_entry() == self.s2map[key.vm][key.gpa]
             }
         }
 
         // ── Transitions ──────────────────────────────────────────────────────────
 
-        /// Start from a given set of established mappings with an empty TLB.
+        /// Boot: no vms, empty TLB.
         init! {
-            initialize(s2map0: Map<VmPageKey, S2Entry>) {
-                init s2map = s2map0;
+            initialize() {
+                init s2map = Map::empty();
+                init vm_ids = Set::empty();
                 init tlb = Map::empty();
             }
         }
 
+        /// Register a fresh vm with an empty mapping slice (fired when a zone is
+        /// created; yields the zone's `s2map` slice token).
+        transition! {
+            add_vm(vm: VmId) {
+                require !pre.vm_ids.contains(vm);
+                update vm_ids = pre.vm_ids.insert(vm);
+                add s2map += [vm => Map::empty()];
+            }
+        }
+
         /// The hardware MMU autonomously caches a walker-reachable translation.
-        /// Modeled as an *environment* transition; guarded by `s2map.contains` so
-        /// it can never cache a mapping the walker cannot reach (which is what
-        /// blocks a re-fill once `unmap_invalidate` has removed the page).
+        /// Modeled as an *environment* transition; guarded by `s2map[vm].contains`
+        /// so it can never cache a mapping the walker cannot reach (blocking a
+        /// re-fill once `unmap_invalidate` has removed the page).
         transition! {
             fill(cpu: CpuId, vm: VmId, gpa: GuestPage) {
-                require pre.s2map.contains_key(VmPageKey::new(vm, gpa));
-                birds_eye let entry = pre.s2map[VmPageKey::new(vm, gpa)];
+                have s2map >= [vm => let inner];
+                require inner.contains_key(gpa);
                 update tlb = pre.tlb.insert(
                     TlbKey::new(cpu, vm, gpa),
-                    TlbEntry { page: entry.page, access: entry.access, generation: entry.generation },
+                    TlbEntry { page: inner[gpa].page, access: inner[gpa].access, generation: inner[gpa].generation },
                 );
             }
         }
 
-        /// One atomic break-before-make step: a `DSB` makes the (already-written-
-        /// invalid) PTE walker-invisible (drops `(vm, gpa)` from `s2map`) and the
-        /// `TLBI IPAS2E1IS` broadcast clears that page's cached entries — together,
-        /// so coherence is never broken (no orphan window at this granularity).
+        /// One atomic break-before-make step: a `DSB` drops `(vm, gpa)` from `s2map`
+        /// and the `TLBI IPAS2E1IS` broadcast clears that page's cached entries —
+        /// together, so coherence is never broken at this granularity.
         transition! {
             unmap_invalidate(vm: VmId, gpa: GuestPage) {
-                update s2map = pre.s2map.remove(VmPageKey::new(vm, gpa));
+                remove s2map -= [vm => let inner];
+                add s2map += [vm => inner.remove(gpa)];
                 update tlb = pre.tlb.remove_keys(invalidation_targets(vm, gpa));
             }
         }
 
         /// A `DSB` after writing a *fresh* PTE makes the new mapping walker-
         /// reachable.  Break-before-make for the map side: the page must be absent
-        /// from `s2map`, which by the `inv_coherent` invariant means it has **no**
-        /// cached TLB entry — so adding it cannot disagree with a stale entry, and
-        /// no `TLBI` is needed.  (Used by the insert path.)
+        /// from the vm's slice, which by `inv_coherent` means it has **no** cached
+        /// TLB entry — so no `TLBI` is needed.  (Used by the insert path.)
         transition! {
             map(vm: VmId, gpa: GuestPage, entry: S2Entry) {
-                require !pre.s2map.contains_key(VmPageKey::new(vm, gpa));
-                update s2map = pre.s2map.insert(VmPageKey::new(vm, gpa), entry);
+                remove s2map -= [vm => let inner];
+                require !inner.contains_key(gpa);
+                add s2map += [vm => inner.insert(gpa, entry)];
             }
         }
 
         // ── Inductive proofs ──────────────────────────────────────────────────────
 
         #[inductive(initialize)]
-        fn initialize_inductive(post: Self, s2map0: Map<VmPageKey, S2Entry>) {
+        fn initialize_inductive(post: Self) {
             assert(post.tlb =~= Map::empty());
+            assert(post.s2map.dom() =~= post.vm_ids);
+        }
+
+        #[inductive(add_vm)]
+        fn add_vm_inductive(pre: Self, post: Self, vm: VmId) {
+            assert(post.s2map.dom() =~= post.vm_ids);
+            assert forall|key: TlbKey| #[trigger] post.tlb.contains_key(key) implies {
+                &&& post.s2map.contains_key(key.vm)
+                &&& post.s2map[key.vm].contains_key(key.gpa)
+                &&& post.tlb[key].as_s2_entry() == post.s2map[key.vm][key.gpa]
+            } by {
+                assert(pre.s2map.contains_key(key.vm));
+                assert(key.vm != vm);
+            };
         }
 
         #[inductive(fill)]
         fn fill_inductive(pre: Self, post: Self, cpu: CpuId, vm: VmId, gpa: GuestPage) {
-            let sk0 = VmPageKey::new(vm, gpa);
+            let inner = pre.s2map[vm];
             let tkey0 = TlbKey::new(cpu, vm, gpa);
-            let entry = pre.s2map[sk0];
             assert forall|key: TlbKey| #[trigger] post.tlb.contains_key(key) implies {
-                let sk = VmPageKey::new(key.vm, key.gpa);
-                &&& post.s2map.contains_key(sk)
-                &&& post.tlb[key].as_s2_entry() == post.s2map[sk]
+                &&& post.s2map.contains_key(key.vm)
+                &&& post.s2map[key.vm].contains_key(key.gpa)
+                &&& post.tlb[key].as_s2_entry() == post.s2map[key.vm][key.gpa]
             } by {
-                let sk = VmPageKey::new(key.vm, key.gpa);
                 if key == tkey0 {
-                    // The freshly-cached entry is built from s2map[sk0] (which the
-                    // `require` guarantees is present), so it agrees.
-                    assert(sk == sk0);
-                    assert(post.tlb[tkey0].as_s2_entry() == entry);
+                    assert(post.tlb[tkey0].as_s2_entry() == inner[gpa]);
                 } else {
                     assert(post.tlb[key] == pre.tlb[key]);
                 }
@@ -170,35 +201,33 @@ tokenized_state_machine! {
 
         #[inductive(unmap_invalidate)]
         fn unmap_invalidate_inductive(pre: Self, post: Self, vm: VmId, gpa: GuestPage) {
-            let sk0 = VmPageKey::new(vm, gpa);
+            assert(post.s2map.dom() =~= post.vm_ids);
             assert forall|key: TlbKey| #[trigger] post.tlb.contains_key(key) implies {
-                let sk = VmPageKey::new(key.vm, key.gpa);
-                &&& post.s2map.contains_key(sk)
-                &&& post.tlb[key].as_s2_entry() == post.s2map[sk]
+                &&& post.s2map.contains_key(key.vm)
+                &&& post.s2map[key.vm].contains_key(key.gpa)
+                &&& post.tlb[key].as_s2_entry() == post.s2map[key.vm][key.gpa]
             } by {
-                let sk = VmPageKey::new(key.vm, key.gpa);
-                // A surviving key escaped `invalidation_targets`, so its page differs
-                // from `(vm, gpa)`, hence `sk != sk0` and it stays in `s2map`.
                 assert(!invalidation_targets(vm, gpa).contains(key));
-                assert(sk != sk0);
                 assert(pre.tlb.contains_key(key) && post.tlb[key] == pre.tlb[key]);
+                if key.vm == vm {
+                    assert(key.gpa != gpa);
+                }
             };
         }
 
         #[inductive(map)]
         fn map_inductive(pre: Self, post: Self, vm: VmId, gpa: GuestPage, entry: S2Entry) {
-            let sk0 = VmPageKey::new(vm, gpa);
+            assert(post.s2map.dom() =~= post.vm_ids);
             assert forall|key: TlbKey| #[trigger] post.tlb.contains_key(key) implies {
-                let sk = VmPageKey::new(key.vm, key.gpa);
-                &&& post.s2map.contains_key(sk)
-                &&& post.tlb[key].as_s2_entry() == post.s2map[sk]
+                &&& post.s2map.contains_key(key.vm)
+                &&& post.s2map[key.vm].contains_key(key.gpa)
+                &&& post.tlb[key].as_s2_entry() == post.s2map[key.vm][key.gpa]
             } by {
-                let sk = VmPageKey::new(key.vm, key.gpa);
-                // `key` is cached, so by the pre-invariant its page is in `pre.s2map`;
-                // the `require` says `sk0` is not — so `sk != sk0`, and `insert` leaves
-                // `sk`'s entry untouched.
-                assert(pre.s2map.contains_key(sk));
-                assert(sk != sk0);
+                assert(pre.s2map.contains_key(key.vm));
+                if key.vm == vm {
+                    assert(pre.s2map[vm].contains_key(key.gpa));
+                    assert(key.gpa != gpa);
+                }
             };
         }
     }
@@ -209,8 +238,11 @@ tokenized_state_machine! {
 /// `MmuSpec` instance token (shared by reference).
 pub type MmuInstance = MmuSpec::Instance;
 
-/// The MMU-reachable stage-2 map token (variable-sharded; held by `MmuHardware`).
+/// One vm's MMU-reachable stage-2 slice token (map-sharded; held in that zone's lock).
 pub type MmuS2MapToken = MmuSpec::s2map;
+
+/// The live-vm mirror token (variable-sharded; held by `MmuHardware` for `add_vm`).
+pub type MmuVmIdsToken = MmuSpec::vm_ids;
 
 /// The global TLB token (variable-sharded; held by `MmuHardware`).
 pub type MmuTlbToken = MmuSpec::tlb;

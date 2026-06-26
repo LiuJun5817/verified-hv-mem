@@ -12,6 +12,7 @@ use super::*;
 use crate::address::addr::{PAddr, SpecVAddr};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 use crate::hardware::{HardwareInstr, MmuHardware};
+use crate::machine::hardware::mmu::MmuS2MapToken;
 use crate::machine::types::{GuestPage, VmId};
 use crate::machine::VmPageKey;
 use crate::page_table::{PTConstants, PageTable};
@@ -174,7 +175,15 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         false
     }
 
-    fn insert(&mut self, allocator: &GlobalAllocator<A>, region: MemoryRegion) {
+    fn insert(
+        &mut self,
+        allocator: &GlobalAllocator<A>,
+        region: MemoryRegion,
+        vm: Ghost<VmId>,
+        mmu: &mut MmuHardware<I>,
+        s2_tok: Tracked<MmuS2MapToken>,
+    ) -> (res: Tracked<MmuS2MapToken>) {
+        let mut s2 = s2_tok;
         // New region does not overlap with old regions
         assert(forall|j: int|
             #![auto]
@@ -236,6 +245,13 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                         0 <= k < i && vb == region.spec_page_vaddr(k) && fr == region.spec_frame(
                             k,
                         )),
+                // MMU forcing: the vm's `s2map` slice tracks the (growing) mappings.
+                mmu.wf(),
+                mmu.inst_id() == old(mmu).inst_id(),
+                mmu.live_vms() == old(mmu).live_vms(),
+                s2@.instance_id() == mmu.inst_id(),
+                s2@.key() == vm@,
+                s2@.value() == pt_s2map_inner(self.pt@.mappings),
             decreases region.pages - i,
         {
             let vbase = VAddr(region.vstart.0 + i * PAGE_SIZE);
@@ -301,7 +317,30 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
 
             let ghost self_before_map = *self;
             let ghost old_mappings = self.pt@.mappings;
+            // Page `i` is fresh (not yet mapped), so it is absent from the slice.
+            proof {
+                assert(!old_mappings.contains_key(vbase@)) by {
+                    if old_mappings.contains_key(vbase@) {
+                        assert(self.pt@.overlaps_vmem(vbase@, frame@));
+                    }
+                }
+            }
             let res = self.pt.map(allocator, vbase, frame);
+            // MMU map side: `DSB` makes the fresh PTE walker-reachable; the slice
+            // gains exactly this page.
+            let ipa_page = vbase.0 / PAGE_SIZE;
+            proof {
+                assert(PAGE_SIZE as nat == SPEC_PAGE_SIZE);
+                assert(GuestPage(ipa_page as nat) == gpa_of_vaddr(vbase@));
+                lemma_vaddr_gpa_roundtrip(vbase@);
+                // s2 still reflects `old_mappings` (the map touched `self.pt`, not the
+                // slice token), and `vbase` ∉ old_mappings ⇒ its gpa ∉ the slice.
+                assert(!s2@.value().contains_key(GuestPage(ipa_page as nat)));
+            }
+            s2 = mmu.map_dsb(s2, ipa_page, vm, Ghost(frame_to_s2(frame@)));
+            proof {
+                lemma_pt_s2map_inner_insert(old_mappings, vbase@, frame@);
+            }
             let ghost mappings = self.pt@.mappings;
             i += 1;
 
@@ -513,6 +552,9 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 lemma_map_eq_pair(old_pt_maps.union_prefer_right(region_maps), self.pt@.mappings);
             }
         }
+        // The push touched only `self.regions`; the slice token still equals the
+        // projection of the (unchanged) page-table mappings = the sync point.
+        s2
     }
 
     fn remove(
@@ -521,7 +563,9 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         start: VAddr,
         vm: Ghost<VmId>,
         mmu: &mut MmuHardware<I>,
-    ) {
+        s2_tok: Tracked<MmuS2MapToken>,
+    ) -> (res: Tracked<MmuS2MapToken>) {
+        let mut s2 = s2_tok;
         let len = self.regions.len();
         let mut i = 0;
         // Find the region with the given start address
@@ -605,10 +649,14 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                     ) || exists|j: nat|
                         i <= j < region.pages && vbase2 == region.spec_page_vaddr(j) && frame2
                             == region.spec_frame(j),
-                // MMU forcing: the sync point is maintained for the (shrinking)
-                // page-table mappings as each page is unmapped + flushed.
-                mmu.synced(vm@, pt_s2_map(self.pt@.mappings, vm@)),
+                // MMU forcing: the vm's slice token tracks the (shrinking) mappings
+                // as each page is unmapped + flushed.
+                mmu.wf(),
                 mmu.inst_id() == old(mmu).inst_id(),
+                mmu.live_vms() == old(mmu).live_vms(),
+                s2@.instance_id() == mmu.inst_id(),
+                s2@.key() == vm@,
+                s2@.value() == pt_s2map_inner(self.pt@.mappings),
             decreases region.pages - i,
         {
             let vaddr = VAddr(region.vstart.0 + i * PAGE_SIZE);
@@ -624,22 +672,20 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
             let ipa_page = vaddr.0 / PAGE_SIZE;
             let ghost self_before_unmap = *self;
             let ghost old_mappings = self.pt@.mappings;
-            // `synced` over the projection holds for `old_mappings` (loop invariant);
-            // neither `mmu` nor `old_mappings` is touched by the PTE write below.
-            assert(mmu.synced(vm@, pt_s2_map(old_mappings, vm@)));
+            // The slice token equals `pt_s2map_inner(old_mappings)` here (loop
+            // invariant); neither `mmu` nor `s2` is touched by the PTE write below.
+            assert(s2@.value() == pt_s2map_inner(old_mappings));
             let res = self.pt.unmap(allocator, vaddr);
-            // FORCED per-page DSB + stage-2 TLBI: re-establishes the sync point for
-            // this page — provable only because the real instructions run.
-            mmu.unmap_dsb_tlbi(Ghost(pt_s2_map(old_mappings, vm@)), ipa_page, vm);
+            // FORCED per-page DSB + stage-2 TLBI: the slice token loses exactly this
+            // page — provable only because the real instructions run.
+            s2 = mmu.unmap_dsb_tlbi(s2, ipa_page, vm);
             proof {
-                // `pt.unmap` removed `vaddr`; the projection loses exactly its key, which
-                // is the `(vm, gpa)` that `unmap_dsb_tlbi` flushed.
+                // `pt.unmap` removed `vaddr`; the slice loses exactly its guest page,
+                // which is the `(vm, gpa)` that `unmap_dsb_tlbi` flushed.
                 assert(PAGE_SIZE as nat == SPEC_PAGE_SIZE);
                 assert(GuestPage(ipa_page as nat) == gpa_of_vaddr(vaddr@));
-                lemma_pt_s2_map_remove(old_mappings, vm@, vaddr@);
+                lemma_pt_s2map_inner_remove(old_mappings, vaddr@);
             }
-            assert(mmu.synced(vm@, pt_s2_map(self.pt@.mappings, vm@)));
-
             let ghost mappings = self.pt@.mappings;
             i += 1;
 
@@ -852,12 +898,12 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 }
                 lemma_map_eq_pair(old_pt_maps.remove_keys(region_maps.dom()), self.pt@.mappings);
             }
-            // FORCED sync-point post: the per-page loop restored `synced` over the
-            // page-table mappings, and removing the region from the list touches
-            // neither the page table nor the MMU, so the sync point survives.
+            // FORCED sync-point post: the per-page loop drove the slice token to
+            // `pt_s2map_inner(self.pt@.mappings)`, and removing the region from the
+            // list touches neither the page table nor the slice token.
             assert(self@.mappings == self.pt@.mappings);
-            assert(mmu.synced(vm@, pt_s2_map(self@.mappings, vm@)));
         }
+        s2
     }
 
     proof fn lemma_invariants_implies_wf(self) {

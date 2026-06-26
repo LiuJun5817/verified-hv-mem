@@ -2,6 +2,7 @@
 //! space of a zone (process). It manages the page table for the zone, and provides methods to
 //! insert, remove, and find memory areas.
 use crate::hardware::{HardwareInstr, MmuHardware};
+use crate::machine::hardware::mmu::MmuS2MapToken;
 use crate::machine::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 use crate::{
     address::{
@@ -26,7 +27,6 @@ verus! {
 // view) to the model's `Map<VmPageKey, S2Entry>` (the MMU-reachable stage-2 map).
 // They are what the per-page unmap loop and the `MmuHardware::synced` contract are
 // stated over.
-
 /// The guest page (IPA page number) of a page-aligned virtual address.
 pub open spec fn gpa_of_vaddr(v: SpecVAddr) -> GuestPage {
     GuestPage(v.0 / SPEC_PAGE_SIZE)
@@ -51,15 +51,13 @@ pub open spec fn frame_to_s2(f: SpecFrame) -> S2Entry {
     }
 }
 
-/// The stage-2 map a single zone's page-table mappings induce, keyed like the
-/// model's `s2_map`.
-pub open spec fn pt_s2_map(mappings: Map<SpecVAddr, SpecFrame>, vm: VmId) -> Map<
-    VmPageKey,
-    S2Entry,
-> {
+/// One zone's MMU-reachable stage-2 slice (`gpa -> S2Entry`) induced by its
+/// page-table mappings — the value a zone's per-vm `s2map` token must equal at a
+/// sync point.
+pub open spec fn pt_s2map_inner(mappings: Map<SpecVAddr, SpecFrame>) -> Map<GuestPage, S2Entry> {
     Map::new(
-        |k: VmPageKey| k.vm == vm && mappings.contains_key(vaddr_of_gpa(k.gpa)),
-        |k: VmPageKey| frame_to_s2(mappings[vaddr_of_gpa(k.gpa)]),
+        |g: GuestPage| mappings.contains_key(vaddr_of_gpa(g)),
+        |g: GuestPage| frame_to_s2(mappings[vaddr_of_gpa(g)]),
     )
 }
 
@@ -80,33 +78,77 @@ pub proof fn lemma_vaddr_gpa_roundtrip(v: SpecVAddr)
     ;
 }
 
-/// Removing a page-aligned `vaddr` from the byte-keyed `mappings` corresponds
-/// exactly to removing its `VmPageKey` from the projected stage-2 map.  This is
-/// what lets the per-page unmap loop carry `synced(pt_s2_map(self.pt@.mappings))`:
-/// after `pt.unmap(vaddr)` the projection loses precisely `VmPageKey(vm, gpa)`.
-pub proof fn lemma_pt_s2_map_remove(mappings: Map<SpecVAddr, SpecFrame>, vm: VmId, vaddr: SpecVAddr)
+/// Removing a page-aligned `vaddr` from the byte map removes exactly its guest
+/// page from the projected slice — so after `pt.unmap(vaddr)` the slice loses
+/// precisely `gpa_of_vaddr(vaddr)`, matching the `unmap_dsb_tlbi` token effect.
+pub proof fn lemma_pt_s2map_inner_remove(mappings: Map<SpecVAddr, SpecFrame>, vaddr: SpecVAddr)
     requires
         vaddr.0 % SPEC_PAGE_SIZE == 0,
     ensures
-        pt_s2_map(mappings.remove(vaddr), vm) == pt_s2_map(mappings, vm).remove(
-            VmPageKey::new(vm, gpa_of_vaddr(vaddr)),
+        pt_s2map_inner(mappings.remove(vaddr)) == pt_s2map_inner(mappings).remove(
+            gpa_of_vaddr(vaddr),
         ),
 {
-    let removed_key = VmPageKey::new(vm, gpa_of_vaddr(vaddr));
-    let lhs = pt_s2_map(mappings.remove(vaddr), vm);
-    let rhs = pt_s2_map(mappings, vm).remove(removed_key);
+    let g0 = gpa_of_vaddr(vaddr);
+    let lhs = pt_s2map_inner(mappings.remove(vaddr));
+    let rhs = pt_s2map_inner(mappings).remove(g0);
     lemma_vaddr_gpa_roundtrip(vaddr);
-    assert forall|k: VmPageKey| #[trigger] lhs.contains_key(k) <==> rhs.contains_key(k) by {
-        if k.vm == vm && vaddr_of_gpa(k.gpa) == vaddr {
-            assert(vaddr_of_gpa(k.gpa) == vaddr_of_gpa(gpa_of_vaddr(vaddr)));
-            assert(k.gpa == gpa_of_vaddr(vaddr)) by (nonlinear_arith)
+    assert forall|g: GuestPage| #[trigger] lhs.contains_key(g) <==> rhs.contains_key(g) by {
+        if vaddr_of_gpa(g) == vaddr {
+            assert(vaddr_of_gpa(g) == vaddr_of_gpa(g0));
+            assert(g == g0) by (nonlinear_arith)
                 requires
-                    k.gpa.0 * SPEC_PAGE_SIZE == gpa_of_vaddr(vaddr).0 * SPEC_PAGE_SIZE,
+                    g.0 * SPEC_PAGE_SIZE == g0.0 * SPEC_PAGE_SIZE,
                     SPEC_PAGE_SIZE == 0x1000nat,
             ;
         }
     }
-    assert forall|k: VmPageKey| #[trigger] lhs.contains_key(k) implies lhs[k] == rhs[k] by {}
+    assert forall|g: GuestPage| #[trigger] lhs.contains_key(g) implies lhs[g] == rhs[g] by {}
+    assert(lhs =~= rhs);
+}
+
+/// Inserting a page-aligned `vaddr => frame` into the byte map inserts exactly its
+/// guest page into the projected slice — matching the `map_dsb` token effect.
+pub proof fn lemma_pt_s2map_inner_insert(
+    mappings: Map<SpecVAddr, SpecFrame>,
+    vaddr: SpecVAddr,
+    frame: SpecFrame,
+)
+    requires
+        vaddr.0 % SPEC_PAGE_SIZE == 0,
+    ensures
+        pt_s2map_inner(mappings.insert(vaddr, frame)) == pt_s2map_inner(mappings).insert(
+            gpa_of_vaddr(vaddr),
+            frame_to_s2(frame),
+        ),
+{
+    let g0 = gpa_of_vaddr(vaddr);
+    let lhs = pt_s2map_inner(mappings.insert(vaddr, frame));
+    let rhs = pt_s2map_inner(mappings).insert(g0, frame_to_s2(frame));
+    lemma_vaddr_gpa_roundtrip(vaddr);
+    assert forall|g: GuestPage| #[trigger] lhs.contains_key(g) <==> rhs.contains_key(g) by {
+        if vaddr_of_gpa(g) == vaddr {
+            assert(vaddr_of_gpa(g) == vaddr_of_gpa(g0));
+            assert(g == g0) by (nonlinear_arith)
+                requires
+                    g.0 * SPEC_PAGE_SIZE == g0.0 * SPEC_PAGE_SIZE,
+                    SPEC_PAGE_SIZE == 0x1000nat,
+            ;
+        }
+    }
+    assert forall|g: GuestPage| #[trigger] lhs.contains_key(g) implies lhs[g] == rhs[g] by {
+        if g != g0 {
+            assert(vaddr_of_gpa(g) != vaddr) by {
+                if vaddr_of_gpa(g) == vaddr {
+                    assert(g == g0) by (nonlinear_arith)
+                        requires
+                            g.0 * SPEC_PAGE_SIZE == g0.0 * SPEC_PAGE_SIZE,
+                            SPEC_PAGE_SIZE == 0x1000nat,
+                    ;
+                }
+            }
+        }
+    }
     assert(lhs =~= rhs);
 }
 
@@ -192,31 +234,6 @@ impl SpecMemorySet {
             mappings: self.mappings.remove_keys(removed.spec_mappings().dom()),
         }
     }
-
-    /// Lemma. Inserting a new region into the memory set preserves well-formedness.
-    pub proof fn lemma_insert_region_preserves_wf(self, region: MemoryRegion)
-        requires
-            self.wf(),
-            region.spec_valid(),
-            !self.overlaps_vmem(region),
-        ensures
-            self.insert_region(region).wf(),
-    {
-        // TODO
-        admit();
-    }
-
-    /// Lemma. Removing a region from the memory set preserves well-formedness.
-    pub proof fn lemma_remove_region_preserves_wf(self, start: SpecVAddr)
-        requires
-            self.wf(),
-            self.has_region_starting_at(start),
-        ensures
-            self.remove_region(start).wf(),
-    {
-        // TODO
-        admit();
-    }
 }
 
 /// Specification of a memory set viewed by higher-level components.
@@ -268,48 +285,74 @@ pub trait MemorySet<PT, A, I> where
             res.invariants(),
     ;
 
-    /// Insert a new memory region into the memory set.
-    fn insert(&mut self, allocator: &GlobalAllocator<A>, region: MemoryRegion)
+    /// Insert a new memory region, **forcing a per-page `DSB` (`map`)** via the
+    /// tokenized MMU so the vm's `s2map` slice token tracks the new mappings.  The
+    /// slice token is threaded in/out and ends equal to `pt_s2map_inner(self@.mappings)`
+    /// — the zone's sync point, re-established for the lock invariant.
+    fn insert(
+        &mut self,
+        allocator: &GlobalAllocator<A>,
+        region: MemoryRegion,
+        vm: Ghost<VmId>,
+        mmu: &mut MmuHardware<I>,
+        s2_tok: Tracked<MmuS2MapToken>,
+    ) -> (res: Tracked<MmuS2MapToken>)
         requires
             old(self).invariants(),
             allocator.invariants(),
             old(self).inst_id() == allocator.inst_id(),
             region.spec_valid(),
             !old(self)@.overlaps_vmem(region),
+            old(mmu).wf(),
+            s2_tok@.instance_id() == old(mmu).inst_id(),
+            s2_tok@.key() == vm@,
+            s2_tok@.value() == pt_s2map_inner(old(self)@.mappings),
         ensures
             self.inst_id() == old(self).inst_id(),
             self@ == old(self)@.insert_region(region),
             self.invariants(),
+            mmu.wf(),
+            mmu.inst_id() == old(mmu).inst_id(),
+            mmu.live_vms() == old(mmu).live_vms(),
+            res@.instance_id() == mmu.inst_id(),
+            res@.key() == vm@,
+            res@.value() == pt_s2map_inner(self@.mappings),
     ;
 
-    /// Remove a memory region from the memory set by its starting virtual address,
-    /// **forcing a stage-2 `TLBI` per page** via the tokenized MMU.  `vm` is the
-    /// owning zone's id and `mmu` is the hardware handle that issues the `TLBI`s.
-    ///
-    /// The post-condition — every page this op removes is left clean in the hardware
-    /// TLB — is provable only because each `TLBI` actually runs: only
-    /// `MmuHardware::tlbi` can mutate the encapsulated TLB token, and the
-    /// pre-condition does not assume the TLB is already clean, so the stale-TLB-reuse
-    /// channel is closed by construction.
+    /// Remove a memory region by its starting virtual address, **forcing a per-page
+    /// `DSB`+`TLBI` (`unmap_invalidate`)** via the tokenized MMU.  `vm` is the owning
+    /// zone's id, `mmu` issues the maintenance instructions, and `s2_tok` is the
+    /// zone's `s2map` slice token (threaded in/out).  The slice token ends equal to
+    /// `pt_s2map_inner(self@.mappings)` — provable only because the instructions run
+    /// (the encapsulated instance is the sole way to advance the slice token), so the
+    /// stale-TLB-reuse channel is closed by construction.
     fn remove(
         &mut self,
         allocator: &GlobalAllocator<A>,
         start: VAddr,
         vm: Ghost<VmId>,
         mmu: &mut MmuHardware<I>,
-    )
+        s2_tok: Tracked<MmuS2MapToken>,
+    ) -> (res: Tracked<MmuS2MapToken>)
         requires
             old(self).invariants(),
             allocator.invariants(),
             old(self).inst_id() == allocator.inst_id(),
             old(self)@.has_region_starting_at(start@),
-            old(mmu).synced(vm@, pt_s2_map(old(self)@.mappings, vm@)),
+            old(mmu).wf(),
+            s2_tok@.instance_id() == old(mmu).inst_id(),
+            s2_tok@.key() == vm@,
+            s2_tok@.value() == pt_s2map_inner(old(self)@.mappings),
         ensures
             self.inst_id() == old(self).inst_id(),
             self@ == old(self)@.remove_region(start@),
             self.invariants(),
+            mmu.wf(),
             mmu.inst_id() == old(mmu).inst_id(),
-            mmu.synced(vm@, pt_s2_map(self@.mappings, vm@)),
+            mmu.live_vms() == old(mmu).live_vms(),
+            res@.instance_id() == mmu.inst_id(),
+            res@.key() == vm@,
+            res@.value() == pt_s2map_inner(self@.mappings),
     ;
 
     /// Lemma. The invariants imply the well-formedness of the memory set.
