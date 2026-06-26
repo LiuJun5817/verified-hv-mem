@@ -8,13 +8,12 @@
 //! (used inside the proofs).  Because `self@.mappings` is *defined* as
 //! `self.pt@.mappings`, the two coincide on `mappings`; we deliberately keep both
 //! spellings to mark which layer each statement is reasoning about.
-use super::tlb::gpa_of_vaddr;
 use super::*;
 use crate::address::addr::{PAddr, SpecVAddr};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
-use crate::hardware::{HardwareInst, MmuHardware};
-use crate::machine::hardware::mmu::lemma_invalidate_clears_page;
-use crate::machine::types::{CpuId, GuestPage, TlbKey, VmId};
+use crate::hardware::{HardwareInstr, MmuHardware};
+use crate::machine::types::{GuestPage, VmId};
+use crate::machine::VmPageKey;
 use crate::page_table::{PTConstants, PageTable};
 use vstd::prelude::*;
 
@@ -23,7 +22,7 @@ verus! {
 broadcast use crate::page_table::PageTable::lemma_invariants_implies_wf;
 
 /// Memory set implementation using a vector of memory regions.
-pub struct VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator, I: HardwareInst {
+pub struct VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator, I: HardwareInstr {
     /// The list of memory regions in the memory set.
     pub regions: Vec<MemoryRegion>,
     /// Page table managing the mappings.
@@ -32,7 +31,7 @@ pub struct VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator, I:
     pub phantom: PhantomData<(A, I)>,
 }
 
-impl<PT, A, I> VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator, I: HardwareInst {
+impl<PT, A, I> VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator, I: HardwareInstr {
     /// If a region is mapped in the page table.
     ///
     /// TODO: For now we only support 4KB pages, so we use `mappings.contains_key` to simplify the proof.
@@ -92,7 +91,7 @@ impl<PT, A, I> VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator
 impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
     PT: PageTable<A>,
     A: BitmapAllocator,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     open spec fn view(&self) -> SpecMemorySet {
         SpecMemorySet {
@@ -606,13 +605,10 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                     ) || exists|j: nat|
                         i <= j < region.pages && vbase2 == region.spec_page_vaddr(j) && frame2
                             == region.spec_frame(j),
-                // MMU forcing: the hardware TLB is clean for every page flushed so far.
-                mmu.wf(),
+                // MMU forcing: the sync point is maintained for the (shrinking)
+                // page-table mappings as each page is unmapped + flushed.
+                mmu.synced(vm@, pt_s2_map(self.pt@.mappings, vm@)),
                 mmu.inst_id() == old(mmu).inst_id(),
-                forall|j: nat, cpu: CpuId|
-                    j < i ==> !(#[trigger] mmu.tlb_view().contains_key(
-                        TlbKey::new(cpu, vm@, gpa_of_vaddr(region.spec_page_vaddr(j))),
-                    )),
             decreases region.pages - i,
         {
             let vaddr = VAddr(region.vstart.0 + i * PAGE_SIZE);
@@ -628,12 +624,22 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
             let ipa_page = vaddr.0 / PAGE_SIZE;
             let ghost self_before_unmap = *self;
             let ghost old_mappings = self.pt@.mappings;
+            // `synced` over the projection holds for `old_mappings` (loop invariant);
+            // neither `mmu` nor `old_mappings` is touched by the PTE write below.
+            assert(mmu.synced(vm@, pt_s2_map(old_mappings, vm@)));
             let res = self.pt.unmap(allocator, vaddr);
-            // FORCED stage-2 invalidation of this page on the tokenized MMU.  The
-            // post-state TLB cleanliness below is provable only because this real
-            // `TLBI` runs (the encapsulated instance is the sole TLB mutator).
-            let ghost view_before = mmu.tlb_view();
-            mmu.tlbi(ipa_page, vm, Ghost(GuestPage(ipa_page as nat)));
+            // FORCED per-page DSB + stage-2 TLBI: re-establishes the sync point for
+            // this page — provable only because the real instructions run.
+            mmu.unmap_dsb_tlbi(Ghost(pt_s2_map(old_mappings, vm@)), ipa_page, vm);
+            proof {
+                // `pt.unmap` removed `vaddr`; the projection loses exactly its key, which
+                // is the `(vm, gpa)` that `unmap_dsb_tlbi` flushed.
+                assert(PAGE_SIZE as nat == SPEC_PAGE_SIZE);
+                assert(GuestPage(ipa_page as nat) == gpa_of_vaddr(vaddr@));
+                lemma_pt_s2_map_remove(old_mappings, vm@, vaddr@);
+            }
+            assert(mmu.synced(vm@, pt_s2_map(self.pt@.mappings, vm@)));
+
             let ghost mappings = self.pt@.mappings;
             i += 1;
 
@@ -696,41 +702,10 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                         ));
                     }
                 }
-                // ── MMU forcing (the per-page stage-2 TLBI) ──
-                assert(PAGE_SIZE as nat == SPEC_PAGE_SIZE);
-                assert(GuestPage(ipa_page as nat) == gpa_of_vaddr(vaddr@));
-                // Maintenance: the page just flushed (index i-1) is clean,
-                // and earlier pages stay clean (a `TLBI` only removes entries).
-                lemma_invalidate_clears_page(view_before, vm@, GuestPage(ipa_page as nat));
-                assert(region.spec_page_vaddr((i - 1) as nat) == vaddr@);
-                assert(gpa_of_vaddr(vaddr@) == GuestPage(ipa_page as nat));
-                assert forall|j: nat, cpu: CpuId| j < i implies !(
-                #[trigger] mmu.tlb_view().contains_key(
-                    TlbKey::new(cpu, vm@, gpa_of_vaddr(region.spec_page_vaddr(j))),
-                )) by {
-                    if j < (i - 1) as nat {
-                        assert(!view_before.contains_key(
-                            TlbKey::new(cpu, vm@, gpa_of_vaddr(region.spec_page_vaddr(j))),
-                        ));
-                    } else {
-                        assert(region.spec_page_vaddr(j) == vaddr@);
-                    }
-                }
             }
         }
 
-        // Capture the loop's TLB-clean result over a ghost copy of `region`, since the
-        // `region` borrow ends at the `self.regions.remove` below (and the MMU is not
-        // touched after this, so the fact survives to the post-condition).
-        let ghost rr = *region;
-        assert forall|j: nat, cpu: CpuId| j < rr.pages implies !(
-        #[trigger] mmu.tlb_view().contains_key(
-            TlbKey::new(cpu, vm@, gpa_of_vaddr(rr.spec_page_vaddr(j))),
-        )) by {
-            assert(region.spec_page_vaddr(j) == rr.spec_page_vaddr(j));
-        }
-
-        // Remove the region from the list (does not touch the page table or TLB).
+        // Remove the region from the list (does not touch the page table or MMU).
         let ghost self_before_remove = *self;
         self.regions.remove(ridx);
 
@@ -877,22 +852,11 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 }
                 lemma_map_eq_pair(old_pt_maps.remove_keys(region_maps.dom()), self.pt@.mappings);
             }
-            // FORCED tlb-clean post: each removed mapping is a page of `removed`, and
-            // every page of `removed` was flushed by the per-page `TLBI` above.
-            assert(rr == removed);
-            assert forall|va: SpecVAddr, cpu: CpuId|
-                old(self)@.mappings.contains_key(va) && !self@.mappings.contains_key(
-                    va,
-                ) implies !mmu.tlb_view().contains_key(TlbKey::new(cpu, vm@, gpa_of_vaddr(va))) by {
-                // `self@.mappings == old@.mappings.remove_keys(removed.spec_mappings().dom())`,
-                // so a removed key lies in `removed.spec_mappings().dom()`.
-                assert(removed.spec_mappings().dom().contains(va));
-                removed.lemma_mappings_sound(va);
-                let j = choose|k: nat| 0 <= k < removed.pages && va == removed.spec_page_vaddr(k);
-                assert(!mmu.tlb_view().contains_key(
-                    TlbKey::new(cpu, vm@, gpa_of_vaddr(removed.spec_page_vaddr(j))),
-                ));
-            }
+            // FORCED sync-point post: the per-page loop restored `synced` over the
+            // page-table mappings, and removing the region from the list touches
+            // neither the page table nor the MMU, so the sync point survives.
+            assert(self@.mappings == self.pt@.mappings);
+            assert(mmu.synced(vm@, pt_s2_map(self@.mappings, vm@)));
         }
     }
 

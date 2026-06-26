@@ -1,37 +1,29 @@
-//! AArch64 realization of the [`HardwareOps`] trust contract.
+//! AArch64 realization of the [`HardwareInstr`] trust contract.
 //!
 //! Each method wraps a real maintenance / barrier instruction in an
-//! `#[verifier::external_body]` exec `fn` and is *axiomatized* to refine the
-//! corresponding `HwView` step (the `ensures` is inherited from the trait).
-//! These bodies are the trusted seam between running code and the abstract
-//! `HwView` state machine: the proof in `machine::machine::refine` consumes the
-//! very same step predicates that these instructions are declared to realize.
+//! `#[verifier::external_body]` exec `fn` containing the `asm!`.  These bodies are
+//! the trusted seam between running code and the MMU state machine: `MmuHardware`
+//! pairs each instruction with the ghost transition it realizes.
 //!
 //! ## Trust boundary
 //!
 //! The `asm!` strings are trusted against the Arm Architecture Reference Manual,
-//! not proved against a formal ISA model.  The ghost return value records the
-//! abstract effect the instruction is *defined* to have; because the function is
-//! `external_body`, Verus takes that effect on faith.  Likewise, emitting the
-//! barriers in the correct break-before-make order is an implementation / TCB
-//! obligation, not something the model enforces (see [`HardwareOps`]).
-//!
-//! `TLBI IPAS2E1IS` is a register-form op, so it takes a **real** `usize`
-//! operand `ipa_page` (the IPA `>> 12`, i.e. the guest page number); the spec
-//! page identity is derived from it as `GuestPage(ipa_page as nat)`.  The VMID is
-//! abstracted (ghost `vm`): it is read from the current `VTTBR_EL2`, which the
-//! caller must already have programmed to `vm`.
-use super::mmu::HardwareInst;
+//! not proved against a formal ISA model.  `TLBI IPAS2E1IS` is a register-form op,
+//! so it takes a **real** `usize` operand `ipa_page` (the IPA `>> 12`, i.e. the
+//! guest page number); `MmuHardware::unmap_dsb_tlbi` derives the spec page from it.
+//! The VMID is read from the current `VTTBR_EL2`, which the caller must already
+//! have programmed.
+use super::mmu::HardwareInstr;
 use core::arch::asm;
 use vstd::prelude::*;
 
 verus! {
 
-/// Zero-sized handle to the AArch64 hardware.  Carries no state; it only gives
-/// hypervisor code a value on which to call the [`HardwareOps`] instructions.
+/// Zero-sized AArch64 [`HardwareInstr`] implementor: the asm-emitting backend that
+/// `MmuHardware` is parameterized over.
 pub struct Aarch64Hw;
 
-impl HardwareInst for Aarch64Hw {
+impl HardwareInstr for Aarch64Hw {
     #[verifier::external_body]
     fn issue_tlbi_s2(ipa_page: usize) {
         // Broadcast a stage-2 IPA invalidation across the inner-shareable domain.
@@ -46,8 +38,7 @@ impl HardwareInst for Aarch64Hw {
     #[verifier::external_body]
     fn issue_dsb_ish() {
         // Data Synchronization Barrier, inner-shareable.  Does not retire until the
-        // preceding broadcast has completed on every PE; no architectural state
-        // change (`HwView::dsb_step` is the identity).
+        // preceding broadcast has completed on every PE.
         unsafe {
             asm!("dsb ish");
         }
@@ -55,8 +46,7 @@ impl HardwareInst for Aarch64Hw {
 
     #[verifier::external_body]
     fn issue_isb() {
-        // Instruction Synchronization Barrier.  No architectural state change
-        // (`HwView::isb_step` is the identity).
+        // Instruction Synchronization Barrier (executing PE's own context).
         unsafe {
             asm!("isb");
         }

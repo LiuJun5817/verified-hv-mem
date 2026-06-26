@@ -17,9 +17,9 @@ use crate::{
     address::region::MemoryRegion,
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
-    hardware::{HardwareInst, MmuHardware},
+    hardware::{HardwareInstr, MmuHardware},
     machine::types::VmId,
-    memory_set::MemorySet,
+    memory_set::{pt_s2_map, MemorySet},
     page_table::PageTable,
     sync::rwlock::{RwLock, RwReadGuard, RwWriteGuard},
 };
@@ -70,7 +70,7 @@ pub struct ZonePred<PT, M, A, P, I> where
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     pub _phantom: PhantomData<(PT, M, A, P, I)>,
 }
@@ -86,7 +86,7 @@ impl<PT, M, A, P, I> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePr
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     /// The content is well-formed when:
     /// - `mem_set_perm` is initialised and points to the key's cell,
@@ -126,7 +126,7 @@ pub struct Zone<PT, M, A, P, I> where
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     /// Exec memory set — written only while the write guard is held.
     pub mem_set: PCell<M>,
@@ -143,7 +143,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     /// Structural well-formedness:
     /// - the `RwLock` is internally consistent, and
@@ -332,7 +332,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     /// Insert `region` into this zone using only a shared borrow of the global state.
     ///
@@ -417,6 +417,19 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
             return Err(());
         }
         let ghost old_mem_set = mem_set@;
+        proof {
+            // GLOBAL SYNC-POINT INVARIANT (transitional assume).  `mem_set.remove`
+            // requires the MMU to be at a sync point for this zone's *current*
+            // mappings.  This holds for a single zone driving the global MMU; with
+            // several zones sharing one MMU it is only sound once `synced` is a
+            // per-VM slice (`s2map.restrict(vm) == pt_s2_map(mappings, vm)`) rather
+            // than whole-map equality — the global-composition refinement (L3).
+            // Same flavor as `Zone::new`'s `assume(ZonePred::inv)`.
+            assume(mmu.synced(
+                VmId(self.lock.k@.zone_id as nat),
+                pt_s2_map(mem_set@.mappings, VmId(self.lock.k@.zone_id as nat)),
+            ));
+        }
         // Forced per-page PTE clear + stage-2 `TLBI` via the tokenized MMU handle.
         mem_set.remove(allocator, region.vstart, Ghost(VmId(self.lock.k@.zone_id as nat)), mmu);
 

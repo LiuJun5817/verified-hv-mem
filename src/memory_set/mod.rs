@@ -1,9 +1,8 @@
 //! A memory set is a collection of memory areas that can be mapped into the virtual address
 //! space of a zone (process). It manages the page table for the zone, and provides methods to
 //! insert, remove, and find memory areas.
-use crate::hardware::{HardwareInst, MmuHardware};
-use crate::machine::types::{CpuId, GuestPage, TlbKey, VmId};
-use crate::memory_set::tlb::gpa_of_vaddr;
+use crate::hardware::{HardwareInstr, MmuHardware};
+use crate::machine::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 use crate::{
     address::{
         addr::{SpecPAddr, SpecVAddr, VAddr},
@@ -18,10 +17,98 @@ use core::marker::PhantomData;
 use vstd::prelude::*;
 use vstd::tokens::InstanceId;
 
-mod tlb;
 mod vec;
 
 verus! {
+
+// ─────────────────── byte-view ↔ stage-2 (`s2_map`) projection ───────────────────
+// These connect the page-table's `Map<SpecVAddr, SpecFrame>` (the software byte
+// view) to the model's `Map<VmPageKey, S2Entry>` (the MMU-reachable stage-2 map).
+// They are what the per-page unmap loop and the `MmuHardware::synced` contract are
+// stated over.
+
+/// The guest page (IPA page number) of a page-aligned virtual address.
+pub open spec fn gpa_of_vaddr(v: SpecVAddr) -> GuestPage {
+    GuestPage(v.0 / SPEC_PAGE_SIZE)
+}
+
+/// The page-aligned virtual address of a guest page (inverse of [`gpa_of_vaddr`]
+/// on aligned addresses).
+pub open spec fn vaddr_of_gpa(gpa: GuestPage) -> SpecVAddr {
+    SpecVAddr(gpa.0 * SPEC_PAGE_SIZE)
+}
+
+/// The stage-2 entry a page-table frame projects to.
+pub open spec fn frame_to_s2(f: SpecFrame) -> S2Entry {
+    S2Entry {
+        page: PhysPage(f.base.0 / SPEC_PAGE_SIZE),
+        access: AccessPerms {
+            read: f.attr.readable,
+            write: f.attr.writable,
+            execute: f.attr.executable,
+        },
+        generation: 0,
+    }
+}
+
+/// The stage-2 map a single zone's page-table mappings induce, keyed like the
+/// model's `s2_map`.
+pub open spec fn pt_s2_map(mappings: Map<SpecVAddr, SpecFrame>, vm: VmId) -> Map<
+    VmPageKey,
+    S2Entry,
+> {
+    Map::new(
+        |k: VmPageKey| k.vm == vm && mappings.contains_key(vaddr_of_gpa(k.gpa)),
+        |k: VmPageKey| frame_to_s2(mappings[vaddr_of_gpa(k.gpa)]),
+    )
+}
+
+/// Round-trip on page-aligned addresses: `vaddr_of_gpa ∘ gpa_of_vaddr = id`.
+pub proof fn lemma_vaddr_gpa_roundtrip(v: SpecVAddr)
+    requires
+        v.0 % SPEC_PAGE_SIZE == 0,
+    ensures
+        vaddr_of_gpa(gpa_of_vaddr(v)) == v,
+{
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(v.0 as int, SPEC_PAGE_SIZE as int);
+    assert((v.0 / SPEC_PAGE_SIZE) * SPEC_PAGE_SIZE == v.0) by (nonlinear_arith)
+        requires
+            v.0 % SPEC_PAGE_SIZE == 0,
+            v.0 as int == (SPEC_PAGE_SIZE as int) * (v.0 as int / SPEC_PAGE_SIZE as int)
+                + v.0 as int % SPEC_PAGE_SIZE as int,
+            SPEC_PAGE_SIZE == 0x1000nat,
+    ;
+}
+
+/// Removing a page-aligned `vaddr` from the byte-keyed `mappings` corresponds
+/// exactly to removing its `VmPageKey` from the projected stage-2 map.  This is
+/// what lets the per-page unmap loop carry `synced(pt_s2_map(self.pt@.mappings))`:
+/// after `pt.unmap(vaddr)` the projection loses precisely `VmPageKey(vm, gpa)`.
+pub proof fn lemma_pt_s2_map_remove(mappings: Map<SpecVAddr, SpecFrame>, vm: VmId, vaddr: SpecVAddr)
+    requires
+        vaddr.0 % SPEC_PAGE_SIZE == 0,
+    ensures
+        pt_s2_map(mappings.remove(vaddr), vm) == pt_s2_map(mappings, vm).remove(
+            VmPageKey::new(vm, gpa_of_vaddr(vaddr)),
+        ),
+{
+    let removed_key = VmPageKey::new(vm, gpa_of_vaddr(vaddr));
+    let lhs = pt_s2_map(mappings.remove(vaddr), vm);
+    let rhs = pt_s2_map(mappings, vm).remove(removed_key);
+    lemma_vaddr_gpa_roundtrip(vaddr);
+    assert forall|k: VmPageKey| #[trigger] lhs.contains_key(k) <==> rhs.contains_key(k) by {
+        if k.vm == vm && vaddr_of_gpa(k.gpa) == vaddr {
+            assert(vaddr_of_gpa(k.gpa) == vaddr_of_gpa(gpa_of_vaddr(vaddr)));
+            assert(k.gpa == gpa_of_vaddr(vaddr)) by (nonlinear_arith)
+                requires
+                    k.gpa.0 * SPEC_PAGE_SIZE == gpa_of_vaddr(vaddr).0 * SPEC_PAGE_SIZE,
+                    SPEC_PAGE_SIZE == 0x1000nat,
+            ;
+        }
+    }
+    assert forall|k: VmPageKey| #[trigger] lhs.contains_key(k) implies lhs[k] == rhs[k] by {}
+    assert(lhs =~= rhs);
+}
 
 /// Abstract state of a memory set: the regions **and** the page-table mappings
 /// they induce.
@@ -136,7 +223,7 @@ impl SpecMemorySet {
 pub trait MemorySet<PT, A, I> where
     PT: PageTable<A>,
     A: BitmapAllocator,
-    I: HardwareInst,
+    I: HardwareInstr,
     Self: Sized,
  {
     /// View the memory set as a list of memory regions.
@@ -216,16 +303,13 @@ pub trait MemorySet<PT, A, I> where
             allocator.invariants(),
             old(self).inst_id() == allocator.inst_id(),
             old(self)@.has_region_starting_at(start@),
-            old(mmu).wf(),
+            old(mmu).synced(vm@, pt_s2_map(old(self)@.mappings, vm@)),
         ensures
             self.inst_id() == old(self).inst_id(),
             self@ == old(self)@.remove_region(start@),
             self.invariants(),
-            mmu.wf(),
             mmu.inst_id() == old(mmu).inst_id(),
-            forall|va: SpecVAddr, cpu: CpuId|
-                old(self)@.mappings.contains_key(va) && !self@.mappings.contains_key(va) ==> !(
-                #[trigger] mmu.tlb_view().contains_key(TlbKey::new(cpu, vm@, gpa_of_vaddr(va)))),
+            mmu.synced(vm@, pt_s2_map(self@.mappings, vm@)),
     ;
 
     /// Lemma. The invariants imply the well-formedness of the memory set.

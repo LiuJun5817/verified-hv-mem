@@ -25,7 +25,7 @@ use crate::{
     address::region::MemoryRegion,
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
-    hardware::{HardwareInst, MmuHardware},
+    hardware::{HardwareInstr, MmuHardware},
     memory_set::MemorySet,
     page_table::{PTConstants, PageTable},
     sync::rwlock::{RwLock, RwReadGuard, RwReaderToken, RwWriteGuard, RwWriterToken},
@@ -64,7 +64,7 @@ pub tracked struct HvMemRwContent<PT, M, A, P, I> where
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     /// Permission to read/write the zone-list PCell.
     pub zone_list_perm: PointsTo<Vec<Zone<PT, M, A, P, I>>>,
@@ -78,7 +78,7 @@ pub struct HvMemPred<PT, M, A, P, I> where
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     pub _phantom: PhantomData<(PT, M, A, P, I)>,
 }
@@ -94,7 +94,7 @@ impl<PT, M, A, P, I> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P, I>
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     /// The content is well-formed when:
     /// - `zone_list_perm` is initialised and points to the key's cell,
@@ -160,7 +160,7 @@ pub struct HvMem<PT, M, A, P, I> where
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     /// Zone list — written only while the HvMem write guard is held.
     pub zone_mem_list: PCell<Vec<Zone<PT, M, A, P, I>>>,
@@ -175,7 +175,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     /// Structural well-formedness:
     /// - the outer `RwLock` is internally consistent,
@@ -546,7 +546,7 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
-    I: HardwareInst,
+    I: HardwareInstr,
  {
     /// Insert `region` into zone `zid` using only the HvMem **read** lock.
     ///
