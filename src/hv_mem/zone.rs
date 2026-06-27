@@ -181,6 +181,11 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         self.lock.k@.alloc_inst_id
     }
 
+    /// The MMU instance ID of this zone, obtained from the lock's ghost key.
+    pub open spec fn mmu_inst_id(&self) -> InstanceId {
+        self.lock.k@.mmu_inst_id
+    }
+
     /// Assemble a `Zone` from an already-built exec `mem_set` and its ghost token.
     ///
     /// This is intentionally infallible: all fallible work (validating
@@ -490,10 +495,9 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         }
         let ghost old_mem_set = mem_set@;
         // Pull this zone's MMU slice token out of the lock content.  Its lock
-        // invariant — `s2map_tok.value() == pt_s2map_inner(mem_set@.mappings)` — *is*
-        // the sync point that the old `assume(mmu.synced(..))` used to fabricate; it
-        // now comes for free from `lock_write` and is threaded through `mem_set.remove`,
-        // which fires `unmap_invalidate`/`unmap_dsb_tlbi` (forced `DSB`+`TLBI`) per page.
+        // invariant `s2map_tok.value() == pt_s2map_inner(mem_set@.mappings)` is the
+        // sync point, threaded through `mem_set.remove`, which fires
+        // `unmap_invalidate`/`unmap_dsb_tlbi` (forced `DSB`+`TLBI`) per page.
         let tracked ZoneRwContent::<M, BudgetProtocol> { mem_set_perm, zone_state, s2map_tok } =
             content;
         let s2_out = mem_set.remove(
@@ -514,7 +518,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
             // The exec check guarantees a region starts at region.start, so the ghost
             // zone also has one — they are in sync by the linking invariant.
             assert(zone_state.ghost_zone().mem_set.has_region_starting_at(region.vstart@));
-            // Derive the ghost region from the zone's own view; no assume needed.
+            // Derive the ghost region from the zone's own view.
             let ghost ghost_region = choose|r: MemoryRegion| #[trigger]
                 zone_state.ghost_zone().mem_set.regions.contains(r) && r.vstart@ == region.vstart@;
             assert(zone_state.ghost_zone().contains_region(ghost_region));

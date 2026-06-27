@@ -54,6 +54,8 @@ pub struct HvMemKey {
     pub alloc_inst_id: InstanceId,
     /// `PCell::id()` of `HvMem`'s zone-list cell.
     pub cell_id: CellId,
+    /// MMU instance ID.
+    pub mmu_inst_id: InstanceId,
 }
 
 /// Tracked content protected by `HvMem`'s `RwLock`.
@@ -131,6 +133,11 @@ impl<PT, M, A, P, I> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P, I>
                 #![trigger zone_list[i]]
                 0 <= i < zone_list.len() ==> zone_list[i].alloc_inst_id()
                     == k.alloc_inst_id
+            // Each exec zone is bound to the same MMU instance.
+            &&& forall|i: int|
+                #![trigger zone_list[i]]
+                0 <= i < zone_list.len() ==> zone_list[i].mmu_inst_id()
+                    == k.mmu_inst_id
             // Each zone in the list is well-formed.
             &&& forall|i: int| #![auto] 0 <= i < zone_list.len() ==> zone_list[i].wf()
         }
@@ -214,6 +221,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                     == 512,
             pt_constants.arch@.leaf_frame_size() == FrameSize::Size4K,
             old(mmu).wf(),
+            old(mmu).inst_id() == self.lock.k@.mmu_inst_id,
             // The MMU must not yet know this vm — the caller's obligation (trusted
             // configuration, like zone budgets); discharged once HvMem carries a
             // `mmu.live_vms() == zone_ids` invariant (a later refinement step).
@@ -255,6 +263,10 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                     #![trigger zones@[k]]
                     0 <= k < zones@.len() ==> zones@[k].alloc_inst_id()
                         == self.lock.k@.alloc_inst_id,
+                // MMU-instance consistency.
+                forall|k: int|
+                    #![trigger zones@[k]]
+                    0 <= k < zones@.len() ==> zones@[k].mmu_inst_id() == self.lock.k@.mmu_inst_id,
                 // Pairwise distinct IDs.
                 forall|k: int, l: int|
                     #![auto]
@@ -264,7 +276,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                 forall|k: int| #![auto] 0 <= k < zones@.len() ==> zones@[k].wf(),
                 // The MMU handle is untouched by the scan (needed by the early Err exit).
                 mmu.wf(),
-                mmu.inst_id() == old(mmu).inst_id(),
+                mmu.inst_id() == self.lock.k@.mmu_inst_id,
             decreases zones.len() - i,
         {
             if zones[i].zone_id == zid {
@@ -361,6 +373,20 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                     if k < old_len {
                         // From loop invariant: old_zones[k].mem_inst_id() == mem_inst_id.
                         assert(old_zones[k].mem_inst_id() == mem_inst_id);
+                    }
+                };
+                // 5b. MMU-instance consistency for all new zones.
+                assert forall|k: int|
+                    #![trigger new_zones[k]]
+                    0 <= k < new_zones.len() implies new_zones[k].mmu_inst_id()
+                    == self.lock.k@.mmu_inst_id by {
+                    if k < old_len {
+                        // From loop invariant: old_zones[k].mmu_inst_id() == k.mmu_inst_id.
+                        assert(old_zones[k].mmu_inst_id() == self.lock.k@.mmu_inst_id);
+                    } else {
+                        // new_zone.mmu_inst_id() == mmu.inst_id() (Zone::new) ==
+                        // k.mmu_inst_id (loop invariant, preserved by add_vm's stable inst_id).
+                        assert(new_zones[k] == new_zone);
                     }
                 };
                 // 6. Pairwise distinct IDs.
@@ -586,6 +612,7 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
             self.invariants(),
             zone_budget(zid as nat).contains(region),
             old(mmu).wf(),
+            old(mmu).inst_id() == self.lock.k@.mmu_inst_id,
         ensures
             res is Ok ==> self.invariants(),
             mmu.wf(),
@@ -633,12 +660,10 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
 
         assert(zones[i as int].zone_id == zid);
         proof {
-            // INSTANCE-ID BRIDGE (trusted): there is one physical MMU, so the handle
+            // The `HvMemKey::mmu_inst_id` lock-invariant clause pins every zone's MMU
+            // instance, and the precondition pins `mmu.inst_id()` to it — so the handle
             // passed here is the one whose `add_vm` minted this zone's slice token.
-            // The token's *forcing* is real (its instance-id is checked inside
-            // `Zone::insert_region`); this assume only states the caller wired the
-            // matching MMU, discharged once HvMem carries the MMU instance id.
-            assume(zones[i as int].lock.k@.mmu_inst_id == mmu.inst_id());
+            assert(zones[i as int].lock.k@.mmu_inst_id == mmu.inst_id());
         }
         let res = zones[i].insert_region(&self.allocator, Tracked(&global_state), region, mmu);
 
@@ -658,6 +683,7 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         requires
             self.invariants(),
             old(mmu).wf(),
+            old(mmu).inst_id() == self.lock.k@.mmu_inst_id,
         ensures
             res is Ok ==> self.invariants(),
             mmu.wf(),
@@ -699,8 +725,8 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         // ── Step 4: delegate to Zone::remove_region ────────────────
 
         proof {
-            // INSTANCE-ID BRIDGE (trusted) — see `insert_region` for the rationale.
-            assume(zones[i as int].lock.k@.mmu_inst_id == mmu.inst_id());
+            // MMU instance-id bridge — see `insert_region`.
+            assert(zones[i as int].lock.k@.mmu_inst_id == mmu.inst_id());
         }
         let res = zones[i].remove_region(&self.allocator, Tracked(&global_state), region, mmu);
 
