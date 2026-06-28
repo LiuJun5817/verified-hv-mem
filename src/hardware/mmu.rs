@@ -19,7 +19,7 @@
 //! fire `unmap`/`invalidate` itself.  And `unmap_dsb_tlbi`'s post — restoring the
 //! [`synced`](MmuHardware::synced) sync point — is unprovable unless its real
 //! `DSB`+`TLBI` actually run, since only they advance the encapsulated tokens.
-use crate::machine::hardware::mmu::{MmuInstance, MmuS2MapToken, MmuTlbToken, MmuVmIdsToken};
+use crate::hardware::spec::{MmuInstance, MmuS2MapToken, MmuTlbToken, MmuVmIdsToken};
 use crate::machine::types::*;
 use core::marker::PhantomData;
 use vstd::prelude::*;

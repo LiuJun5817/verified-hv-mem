@@ -15,7 +15,7 @@ verus! {
 // edit flushes the stale TLB entries, so there are no standalone TLB steps and no
 // pending-invalidation state.
 //
-// The refinement proofs in `refine.rs` show that executing a SW step together
+// The refinement proofs in `crate::refinement` show that executing a SW step together
 // with the matching HW step implies the corresponding predicate here.
 // ---------------------------------------------------------------------------
 impl MachineState {
@@ -349,7 +349,7 @@ impl MachineState {
     /// state rather than a transition.  At boot no guest exists yet, so the VM
     /// population, ownership map, sharing graph, stage-2 map, TLB and CPU schedule
     /// are all empty; every `wf` clause is then a `forall` over an empty domain and
-    /// holds vacuously (see `lemma_init_wf` in `refine.rs`).  `hypervisor_owned`
+    /// holds vacuously (see `lemma_init_wf` in `security.rs`).  `hypervisor_owned`
     /// (the free pool) and `memory` (initial DRAM) are left unconstrained — they are
     /// platform data irrelevant to `wf`.  Guests and mappings are subsequently
     /// created by `hv_add_vm` / `hv_assign_page` / `hv_map`.

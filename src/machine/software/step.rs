@@ -1,6 +1,6 @@
 use vstd::prelude::*;
 
-use super::{Region, SwView};
+use super::{Region, SoftwareView};
 use crate::machine::types::*;
 
 verus! {
@@ -10,13 +10,13 @@ verus! {
 //
 // Each `*_step` predicate relates a pre-state `s1` to a post-state `s2`.
 // Hardware state is absent; cross-cutting hardware effects are composed in
-// `machine::machine::refine`.
+// `refinement::machine`.
 // ---------------------------------------------------------------------------
-impl SwView {
+impl SoftwareView {
     /// Install (or replace) the stage-2 mapping for `(vm, gpa)`.
     pub open spec fn map_step(
-        s1: SwView,
-        s2: SwView,
+        s1: SoftwareView,
+        s2: SoftwareView,
         vm: VmId,
         gpa: GuestPage,
         entry: S2Entry,
@@ -32,7 +32,12 @@ impl SwView {
     }
 
     /// Remove the stage-2 mapping for `(vm, gpa)`.
-    pub open spec fn unmap_step(s1: SwView, s2: SwView, vm: VmId, gpa: GuestPage) -> bool {
+    pub open spec fn unmap_step(
+        s1: SoftwareView,
+        s2: SoftwareView,
+        vm: VmId,
+        gpa: GuestPage,
+    ) -> bool {
         let key = VmPageKey::new(vm, gpa);
         &&& s1.s2_map.contains_key(key)
         &&& s2.all_vms == s1.all_vms
@@ -43,7 +48,12 @@ impl SwView {
     }
 
     /// Transfer `page` from the hypervisor pool to `vm`.
-    pub open spec fn assign_page_step(s1: SwView, s2: SwView, vm: VmId, page: PhysPage) -> bool {
+    pub open spec fn assign_page_step(
+        s1: SoftwareView,
+        s2: SoftwareView,
+        vm: VmId,
+        page: PhysPage,
+    ) -> bool {
         &&& s1.all_vms.contains(vm)
         &&& s1.hypervisor_owned.contains(page)
         &&& s2.all_vms == s1.all_vms
@@ -54,7 +64,12 @@ impl SwView {
     }
 
     /// Reclaim `page` from `vm` back to the hypervisor pool.
-    pub open spec fn reclaim_page_step(s1: SwView, s2: SwView, vm: VmId, page: PhysPage) -> bool {
+    pub open spec fn reclaim_page_step(
+        s1: SoftwareView,
+        s2: SoftwareView,
+        vm: VmId,
+        page: PhysPage,
+    ) -> bool {
         &&& s1.all_vms.contains(vm)
         &&& s1.vm_owned.contains_key(vm) && s1.vm_owned[vm].contains(page)
         &&& s2.all_vms == s1.all_vms
@@ -66,8 +81,8 @@ impl SwView {
 
     /// Establish a symmetric sharing edge for `page` between `left` and `right`.
     pub open spec fn share_page_step(
-        s1: SwView,
-        s2: SwView,
+        s1: SoftwareView,
+        s2: SoftwareView,
         left: VmId,
         right: VmId,
         page: PhysPage,
@@ -85,8 +100,8 @@ impl SwView {
 
     /// Remove the symmetric sharing edge for `page` between `left` and `right`.
     pub open spec fn unshare_page_step(
-        s1: SwView,
-        s2: SwView,
+        s1: SoftwareView,
+        s2: SoftwareView,
         left: VmId,
         right: VmId,
         page: PhysPage,
@@ -101,13 +116,13 @@ impl SwView {
     }
 
     // -----------------------------------------------------------------------
-    // Region and VM-lifecycle steps  (the 4 `SoftwareOps` operations)
+    // Region and VM-lifecycle steps  (the 4 `SoftwareRefinement` operations)
     //
     // Region steps are set/map algebra (the observable effect); their
     // decomposition into per-page steps is in `super::proof`.
     // -----------------------------------------------------------------------
     /// Register a fresh, empty VM (counterpart of `HvMem::add_zone`).
-    pub open spec fn add_vm_step(s1: SwView, s2: SwView, vm: VmId) -> bool {
+    pub open spec fn add_vm_step(s1: SoftwareView, s2: SoftwareView, vm: VmId) -> bool {
         &&& s2.all_vms == s1.all_vms.insert(vm)
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned.insert(vm, Set::empty())
@@ -116,7 +131,7 @@ impl SwView {
     }
 
     /// Deregister an empty VM (counterpart of `HvMem::remove_zone`).
-    pub open spec fn remove_vm_step(s1: SwView, s2: SwView, vm: VmId) -> bool {
+    pub open spec fn remove_vm_step(s1: SoftwareView, s2: SoftwareView, vm: VmId) -> bool {
         &&& s2.all_vms == s1.all_vms.remove(vm)
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned.remove(vm)
@@ -125,7 +140,11 @@ impl SwView {
     }
 
     /// Bulk assign + map a whole `region` (counterpart of `HvMem::insert_region`).
-    pub open spec fn insert_region_step(s1: SwView, s2: SwView, region: Region) -> bool {
+    pub open spec fn insert_region_step(
+        s1: SoftwareView,
+        s2: SoftwareView,
+        region: Region,
+    ) -> bool {
         &&& s2.all_vms == s1.all_vms
         &&& s2.hypervisor_owned == s1.hypervisor_owned.difference(region.pages())
         &&& s2.vm_owned == s1.vm_owned.insert(
@@ -137,7 +156,11 @@ impl SwView {
     }
 
     /// Bulk unmap + reclaim a whole `region` (counterpart of `HvMem::remove_region`).
-    pub open spec fn remove_region_step(s1: SwView, s2: SwView, region: Region) -> bool {
+    pub open spec fn remove_region_step(
+        s1: SoftwareView,
+        s2: SoftwareView,
+        region: Region,
+    ) -> bool {
         &&& s2.all_vms == s1.all_vms
         &&& s2.hypervisor_owned == s1.hypervisor_owned.union(region.pages())
         &&& s2.vm_owned == s1.vm_owned.insert(
@@ -156,12 +179,12 @@ impl SwView {
     // `wf` (see `super::proof`).
     // -----------------------------------------------------------------------
     /// `vm` is fresh.
-    pub open spec fn add_vm_enabled(s1: SwView, vm: VmId) -> bool {
+    pub open spec fn add_vm_enabled(s1: SoftwareView, vm: VmId) -> bool {
         !s1.all_vms.contains(vm)
     }
 
     /// `vm` exists, owns nothing, has no mappings, and is in no sharing edge.
-    pub open spec fn remove_vm_enabled(s1: SwView, vm: VmId) -> bool {
+    pub open spec fn remove_vm_enabled(s1: SoftwareView, vm: VmId) -> bool {
         &&& s1.all_vms.contains(vm)
         &&& s1.vm_owned[vm] == Set::<PhysPage>::empty()
         &&& (forall|k: VmPageKey| #[trigger] s1.s2_map.contains_key(k) ==> k.vm != vm)
@@ -171,7 +194,7 @@ impl SwView {
 
     /// `region` is an assignable unit for its VM in this state, its pages are free
     /// (in the hypervisor pool), and its guest pages are not yet mapped.
-    pub open spec fn insert_region_enabled(s1: SwView, region: Region) -> bool {
+    pub open spec fn insert_region_enabled(s1: SoftwareView, region: Region) -> bool {
         &&& region.wf()
         &&& s1.all_vms.contains(region.vm)
         &&& s1.is_region_assignable(region)
@@ -185,7 +208,7 @@ impl SwView {
     /// other* mapping targets its pages, and its pages are in no sharing edge (so
     /// reclaiming them strands neither a dangling translation nor a borrower).
     /// `is_region_assignable` identifies `region` as a whole unit.
-    pub open spec fn remove_region_enabled(s1: SwView, region: Region) -> bool {
+    pub open spec fn remove_region_enabled(s1: SoftwareView, region: Region) -> bool {
         &&& region.wf()
         &&& s1.all_vms.contains(region.vm)
         &&& s1.is_region_assignable(region)
@@ -196,7 +219,9 @@ impl SwView {
                 == region.entries()[k])
         &&& (forall|k: VmPageKey| #[trigger]
             s1.s2_map.contains_key(k) && !region.entries().contains_key(k)
-                ==> !region.pages().contains(s1.s2_map[k].page))
+                ==> !region.pages().contains(
+                s1.s2_map[k].page,
+            ))
         // Region pages are unshared: reclaiming a shared page would strand a borrower
         // (the analogue of the no-dangling clause above, for sharing edges).
         &&& (forall|e: SharedPage| #[trigger]

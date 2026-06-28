@@ -1,7 +1,7 @@
 use vstd::prelude::*;
 
-use crate::machine::hardware::HwView;
-use crate::machine::software::SwView;
+use crate::machine::hardware::HardwareView;
+use crate::machine::software::SoftwareView;
 use crate::machine::types::*;
 
 verus! {
@@ -18,9 +18,9 @@ pub ghost struct MachineState {
     pub hypervisor_owned: Set<PhysPage>,
     pub vm_owned: Map<VmId, Set<PhysPage>>,
     pub shared_pages: Set<SharedPage>,
-    /// The **software-maintained** stage-2 map (page-table bytes; from `SwView`).
+    /// The **software-maintained** stage-2 map (page-table bytes; from `SoftwareView`).
     pub s2_map: Map<VmPageKey, S2Entry>,
-    /// The **hardware-reachable** stage-2 map (walker view; from `HwView`).  Equal to
+    /// The **hardware-reachable** stage-2 map (walker view; from `HardwareView`).  Equal to
     /// `s2_map` at well-formed states (the [`sync`](MachineState::sync) invariant);
     /// the TLB caches *this* map, and translation resolves through it.
     pub hw_s2map: Map<VmPageKey, S2Entry>,
@@ -31,7 +31,7 @@ pub ghost struct MachineState {
 
 impl MachineState {
     /// Combine a software view and a hardware view into a high-level machine state.
-    pub open spec fn assemble(sw: SwView, hw: HwView) -> MachineState {
+    pub open spec fn assemble(sw: SoftwareView, hw: HardwareView) -> MachineState {
         MachineState {
             all_vms: sw.all_vms,
             hypervisor_owned: sw.hypervisor_owned,

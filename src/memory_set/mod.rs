@@ -1,8 +1,9 @@
 //! A memory set is a collection of memory areas that can be mapped into the virtual address
 //! space of a zone (process). It manages the page table for the zone, and provides methods to
 //! insert, remove, and find memory areas.
+use crate::machine::convert::pt_s2map_inner;
 use crate::hardware::{HardwareInstr, MmuHardware};
-use crate::machine::hardware::mmu::MmuS2MapToken;
+use crate::hardware::spec::MmuS2MapToken;
 use crate::machine::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 use crate::{
     address::{
@@ -21,136 +22,6 @@ use vstd::tokens::InstanceId;
 mod vec;
 
 verus! {
-
-// ─────────────────── byte-view ↔ stage-2 (`s2_map`) projection ───────────────────
-// These connect the page-table's `Map<SpecVAddr, SpecFrame>` (the software byte
-// view) to the model's `Map<VmPageKey, S2Entry>` (the MMU-reachable stage-2 map).
-// They are what the per-page unmap loop and the `MmuHardware::synced` contract are
-// stated over.
-/// The guest page (IPA page number) of a page-aligned virtual address.
-pub open spec fn gpa_of_vaddr(v: SpecVAddr) -> GuestPage {
-    GuestPage(v.0 / SPEC_PAGE_SIZE)
-}
-
-/// The page-aligned virtual address of a guest page (inverse of [`gpa_of_vaddr`]
-/// on aligned addresses).
-pub open spec fn vaddr_of_gpa(gpa: GuestPage) -> SpecVAddr {
-    SpecVAddr(gpa.0 * SPEC_PAGE_SIZE)
-}
-
-/// The stage-2 entry a page-table frame projects to.
-pub open spec fn frame_to_s2(f: SpecFrame) -> S2Entry {
-    S2Entry {
-        page: PhysPage(f.base.0 / SPEC_PAGE_SIZE),
-        access: AccessPerms {
-            read: f.attr.readable,
-            write: f.attr.writable,
-            execute: f.attr.executable,
-        },
-        generation: 0,
-    }
-}
-
-/// One zone's MMU-reachable stage-2 slice (`gpa -> S2Entry`) induced by its
-/// page-table mappings — the value a zone's per-vm `s2map` token must equal at a
-/// sync point.
-pub open spec fn pt_s2map_inner(mappings: Map<SpecVAddr, SpecFrame>) -> Map<GuestPage, S2Entry> {
-    Map::new(
-        |g: GuestPage| mappings.contains_key(vaddr_of_gpa(g)),
-        |g: GuestPage| frame_to_s2(mappings[vaddr_of_gpa(g)]),
-    )
-}
-
-/// Round-trip on page-aligned addresses: `vaddr_of_gpa ∘ gpa_of_vaddr = id`.
-pub proof fn lemma_vaddr_gpa_roundtrip(v: SpecVAddr)
-    requires
-        v.0 % SPEC_PAGE_SIZE == 0,
-    ensures
-        vaddr_of_gpa(gpa_of_vaddr(v)) == v,
-{
-    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(v.0 as int, SPEC_PAGE_SIZE as int);
-    assert((v.0 / SPEC_PAGE_SIZE) * SPEC_PAGE_SIZE == v.0) by (nonlinear_arith)
-        requires
-            v.0 % SPEC_PAGE_SIZE == 0,
-            v.0 as int == (SPEC_PAGE_SIZE as int) * (v.0 as int / SPEC_PAGE_SIZE as int)
-                + v.0 as int % SPEC_PAGE_SIZE as int,
-            SPEC_PAGE_SIZE == 0x1000nat,
-    ;
-}
-
-/// Removing a page-aligned `vaddr` from the byte map removes exactly its guest
-/// page from the projected slice — so after `pt.unmap(vaddr)` the slice loses
-/// precisely `gpa_of_vaddr(vaddr)`, matching the `unmap_dsb_tlbi` token effect.
-pub proof fn lemma_pt_s2map_inner_remove(mappings: Map<SpecVAddr, SpecFrame>, vaddr: SpecVAddr)
-    requires
-        vaddr.0 % SPEC_PAGE_SIZE == 0,
-    ensures
-        pt_s2map_inner(mappings.remove(vaddr)) == pt_s2map_inner(mappings).remove(
-            gpa_of_vaddr(vaddr),
-        ),
-{
-    let g0 = gpa_of_vaddr(vaddr);
-    let lhs = pt_s2map_inner(mappings.remove(vaddr));
-    let rhs = pt_s2map_inner(mappings).remove(g0);
-    lemma_vaddr_gpa_roundtrip(vaddr);
-    assert forall|g: GuestPage| #[trigger] lhs.contains_key(g) <==> rhs.contains_key(g) by {
-        if vaddr_of_gpa(g) == vaddr {
-            assert(vaddr_of_gpa(g) == vaddr_of_gpa(g0));
-            assert(g == g0) by (nonlinear_arith)
-                requires
-                    g.0 * SPEC_PAGE_SIZE == g0.0 * SPEC_PAGE_SIZE,
-                    SPEC_PAGE_SIZE == 0x1000nat,
-            ;
-        }
-    }
-    assert forall|g: GuestPage| #[trigger] lhs.contains_key(g) implies lhs[g] == rhs[g] by {}
-    assert(lhs =~= rhs);
-}
-
-/// Inserting a page-aligned `vaddr => frame` into the byte map inserts exactly its
-/// guest page into the projected slice — matching the `map_dsb` token effect.
-pub proof fn lemma_pt_s2map_inner_insert(
-    mappings: Map<SpecVAddr, SpecFrame>,
-    vaddr: SpecVAddr,
-    frame: SpecFrame,
-)
-    requires
-        vaddr.0 % SPEC_PAGE_SIZE == 0,
-    ensures
-        pt_s2map_inner(mappings.insert(vaddr, frame)) == pt_s2map_inner(mappings).insert(
-            gpa_of_vaddr(vaddr),
-            frame_to_s2(frame),
-        ),
-{
-    let g0 = gpa_of_vaddr(vaddr);
-    let lhs = pt_s2map_inner(mappings.insert(vaddr, frame));
-    let rhs = pt_s2map_inner(mappings).insert(g0, frame_to_s2(frame));
-    lemma_vaddr_gpa_roundtrip(vaddr);
-    assert forall|g: GuestPage| #[trigger] lhs.contains_key(g) <==> rhs.contains_key(g) by {
-        if vaddr_of_gpa(g) == vaddr {
-            assert(vaddr_of_gpa(g) == vaddr_of_gpa(g0));
-            assert(g == g0) by (nonlinear_arith)
-                requires
-                    g.0 * SPEC_PAGE_SIZE == g0.0 * SPEC_PAGE_SIZE,
-                    SPEC_PAGE_SIZE == 0x1000nat,
-            ;
-        }
-    }
-    assert forall|g: GuestPage| #[trigger] lhs.contains_key(g) implies lhs[g] == rhs[g] by {
-        if g != g0 {
-            assert(vaddr_of_gpa(g) != vaddr) by {
-                if vaddr_of_gpa(g) == vaddr {
-                    assert(g == g0) by (nonlinear_arith)
-                        requires
-                            g.0 * SPEC_PAGE_SIZE == g0.0 * SPEC_PAGE_SIZE,
-                            SPEC_PAGE_SIZE == 0x1000nat,
-                    ;
-                }
-            }
-        }
-    }
-    assert(lhs =~= rhs);
-}
 
 /// Abstract state of a memory set: the regions **and** the page-table mappings
 /// they induce.

@@ -24,10 +24,11 @@ use crate::{
     address::frame::FrameSize,
     address::region::MemoryRegion,
     bitmap_allocator::bitmap_trait::BitmapAllocator,
+    machine::convert::pt_s2map_inner,
     global_allocator::GlobalAllocator,
     hardware::{HardwareInstr, MmuHardware},
     machine::types::{GuestPage, S2Entry, VmId},
-    memory_set::{pt_s2map_inner, MemorySet},
+    memory_set::MemorySet,
     page_table::{PTConstants, PageTable},
     sync::rwlock::{RwLock, RwReadGuard, RwReaderToken, RwWriteGuard, RwWriterToken},
 };

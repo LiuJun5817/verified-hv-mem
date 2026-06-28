@@ -1,6 +1,6 @@
 use vstd::prelude::*;
 
-use super::HwView;
+use super::HardwareView;
 use crate::machine::types::*;
 
 verus! {
@@ -8,19 +8,19 @@ verus! {
 // ---------------------------------------------------------------------------
 // Hardware-only state transitions
 //
-// Each `*_step` predicate relates two `HwView` snapshots.  `s1` is the
-// pre-state; `s2` is the post-state.  Software state (`SwView`) is absent —
+// Each `*_step` predicate relates two `HardwareView` snapshots.  `s1` is the
+// pre-state; `s2` is the post-state.  Software state (`SoftwareView`) is absent —
 // cross-cutting effects that span both views are composed in
-// `machine::machine::refine`.
+// `refinement::machine`.
 // ---------------------------------------------------------------------------
-impl HwView {
+impl HardwareView {
     /// Hardware MMU silently fills the TLB with a hardware-reachable stage-2 entry.
     ///
     /// The fill reads `s1.s2map` (the walker-reachable map), so it can never cache a
     /// translation the walker cannot reach.
     pub open spec fn tlb_fill_step(
-        s1: HwView,
-        s2: HwView,
+        s1: HardwareView,
+        s2: HardwareView,
         cpu: CpuId,
         vm: VmId,
         gpa: GuestPage,
@@ -51,8 +51,8 @@ impl HwView {
     /// `tlb_safe` inductive: there is no intermediate state in which the page has
     /// left `s2map` while a cached entry survives.  Mirrors `MmuSpec.unmap_invalidate`.
     pub open spec fn unmap_invalidate_step(
-        s1: HwView,
-        s2: HwView,
+        s1: HardwareView,
+        s2: HardwareView,
         vm: VmId,
         gpa: GuestPage,
     ) -> bool {
@@ -69,8 +69,8 @@ impl HwView {
     /// make on the map side needs none (the page was absent, so it had no cached
     /// entry), so the TLB is untouched.  Mirrors `MmuSpec.map`.
     pub open spec fn map_step(
-        s1: HwView,
-        s2: HwView,
+        s1: HardwareView,
+        s2: HardwareView,
         vm: VmId,
         gpa: GuestPage,
         entry: S2Entry,
@@ -88,7 +88,12 @@ impl HwView {
     /// Schedule `vm` onto `cpu`.
     ///
     /// On AArch64: writing `VTTBR_EL2` before `ERET`.
-    pub open spec fn context_switch_step(s1: HwView, s2: HwView, cpu: CpuId, vm: VmId) -> bool {
+    pub open spec fn context_switch_step(
+        s1: HardwareView,
+        s2: HardwareView,
+        cpu: CpuId,
+        vm: VmId,
+    ) -> bool {
         &&& s2.active_vm == s1.active_vm.insert(cpu, vm)
         &&& s2.tlb == s1.tlb
         &&& s2.s2map == s1.s2map
@@ -99,25 +104,25 @@ impl HwView {
     ///
     /// The ordering guarantee is captured by the barrier consistency predicate
     /// in `machine::machine`; at the state-machine level DSB is a no-op.
-    pub open spec fn dsb_step(s1: HwView, s2: HwView) -> bool {
+    pub open spec fn dsb_step(s1: HardwareView, s2: HardwareView) -> bool {
         s2 == s1
     }
 
     /// Instruction Synchronization Barrier — no observable state change.
-    pub open spec fn isb_step(s1: HwView, s2: HwView) -> bool {
+    pub open spec fn isb_step(s1: HardwareView, s2: HardwareView) -> bool {
         s2 == s1
     }
 
     /// Hardware reads a physical memory word (a backed address; no state change).
-    pub open spec fn mem_read_step(s1: HwView, s2: HwView, pa: PhysWordAddr) -> bool {
+    pub open spec fn mem_read_step(s1: HardwareView, s2: HardwareView, pa: PhysWordAddr) -> bool {
         &&& s1.memory.contains_key(pa)
         &&& s2 == s1
     }
 
     /// Hardware writes `value` to a physical memory word.
     pub open spec fn mem_write_step(
-        s1: HwView,
-        s2: HwView,
+        s1: HardwareView,
+        s2: HardwareView,
         pa: PhysWordAddr,
         value: DataWord,
     ) -> bool {

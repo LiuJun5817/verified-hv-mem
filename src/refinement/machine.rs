@@ -1,11 +1,16 @@
 use vstd::prelude::*;
 
-use super::state::MachineState;
+use super::hardware::HardwareRefinement;
+use super::software::SoftwareRefinement;
+use super::view::state_s2_map;
+use crate::hardware::spec::MmuSpec;
+use crate::hv_mem::spec::budget::BudgetSpec;
+use crate::machine::convert::flatten_s2map;
 use crate::machine::hardware::proof::{
     lemma_map_preserves_tlb_safe, lemma_unmap_invalidate_preserves_tlb_safe,
 };
-use crate::machine::hardware::HardwareOps;
-use crate::machine::hardware::HwView;
+use crate::machine::hardware::HardwareView;
+use crate::machine::machine::MachineState;
 use crate::machine::software::proof::{
     lemma_add_vm_step_preserves_wf, lemma_assign_page_step_preserves_wf,
     lemma_map_step_preserves_wf, lemma_reclaim_page_step_preserves_wf,
@@ -13,8 +18,7 @@ use crate::machine::software::proof::{
     lemma_unmap_step_preserves_wf, lemma_unshare_page_step_preserves_wf,
 };
 use crate::machine::software::Region;
-use crate::machine::software::SoftwareOps;
-use crate::machine::software::SwView;
+use crate::machine::software::SoftwareView;
 use crate::machine::types::*;
 
 verus! {
@@ -26,16 +30,16 @@ verus! {
 // hardware sub-steps produces the corresponding high-level machine step.
 //
 // Decomposition of `MachineState::wf`: the ownership/sharing/translation clauses
-// are exactly `SwView::wf` (the `lemma_sw_machine_wf_equiv` bridge below), so a
+// are exactly `SoftwareView::wf` (the `lemma_sw_machine_wf_equiv` bridge below), so a
 // refinement only has to additionally re-establish the two cross-cutting clauses
 // — `execution_wf` and `tlb_safe`.  SW steps inherit their three clauses from the
-// SwView `wf`-preservation proofs via the bridge.
+// SoftwareView `wf`-preservation proofs via the bridge.
 // ---------------------------------------------------------------------------
 /// Bridge: the assembled machine state's SW-side `wf` clauses *are* the software
 /// view's, because `assemble` copies the SW fields verbatim and both views define
 /// the predicates identically.  Lets each `refine_*` delegate the
-/// ownership/sharing/translation obligations to the SwView `wf` proofs.
-pub proof fn lemma_sw_machine_wf_equiv(sw: SwView, hw: HwView)
+/// ownership/sharing/translation obligations to the SoftwareView `wf` proofs.
+pub proof fn lemma_sw_machine_wf_equiv(sw: SoftwareView, hw: HardwareView)
     ensures
         MachineState::assemble(sw, hw).ownership_wf() == sw.ownership_wf(),
         MachineState::assemble(sw, hw).sharing_wf() == sw.sharing_wf(),
@@ -69,7 +73,7 @@ pub proof fn lemma_sw_machine_wf_equiv(sw: SwView, hw: HwView)
 /// the full machine `wf` on which the isolation theorems rest.  The scheduler
 /// hypothesis (every running vm is live) is the only `wf` clause spanning neither
 /// view alone.
-pub proof fn lemma_synced_views_wf(sw: SwView, hw: HwView)
+pub proof fn lemma_synced_views_wf(sw: SoftwareView, hw: HardwareView)
     requires
         sw.wf(),
         hw.wf(),
@@ -98,31 +102,10 @@ pub proof fn lemma_synced_views_wf(sw: SwView, hw: HwView)
     assert(m.wf());
 }
 
-// ---------------------------------------------------------------------------
-// The initial state is well-formed — base case of `reachable ⇒ wf`.
-// ---------------------------------------------------------------------------
-/// The `init` configuration (`step.rs`) is `wf`.  In `init` the VM population,
-/// ownership map, sharing graph, stage-2 map, TLB and CPU schedule are all empty,
-/// so every `wf` clause quantifies over an empty domain and holds vacuously.
-pub proof fn lemma_init_wf(s: MachineState)
-    requires
-        MachineState::init(s),
-    ensures
-        s.wf(),
-{
-    // `vm_owned` and `all_vms` are both empty, so their domains coincide.
-    assert(s.vm_owned.dom() =~= s.all_vms());
-    assert(s.ownership_wf());
-    assert(s.sharing_wf());
-    assert(s.translation_wf());
-    assert(s.execution_wf());
-    assert(s.tlb_safe());
-}
-
 // ------------------------------------------------------------------
 // Stage-2 mapping management
 // ------------------------------------------------------------------
-/// A SW map step composed with the atomic hardware [`map_step`](HwView::map_step)
+/// A SW map step composed with the atomic hardware [`map_step`](HardwareView::map_step)
 /// (the map-side `DSB ISH` that makes the fresh PTE walker-reachable) refines the
 /// machine-level `hv_map_step`.
 ///
@@ -130,17 +113,17 @@ pub proof fn lemma_init_wf(s: MachineState)
 /// currently unreachable, so by `tlb_safe` it has no stale cached entry, and the
 /// synchronous flush in `hv_map_step` is therefore vacuous.
 pub proof fn refine_hv_map(
-    sw1: SwView,
-    sw2: SwView,
-    hw1: HwView,
-    hw2: HwView,
+    sw1: SoftwareView,
+    sw2: SoftwareView,
+    hw1: HardwareView,
+    hw2: HardwareView,
     vm: VmId,
     gpa: GuestPage,
     entry: S2Entry,
 )
     requires
-        SwView::map_step(sw1, sw2, vm, gpa, entry),
-        HwView::map_step(hw1, hw2, vm, gpa, entry),
+        SoftwareView::map_step(sw1, sw2, vm, gpa, entry),
+        HardwareView::map_step(hw1, hw2, vm, gpa, entry),
         MachineState::assemble(sw1, hw1).wf(),
     ensures
         MachineState::hv_map_step(
@@ -203,20 +186,20 @@ pub proof fn refine_hv_map(
 }
 
 /// A SW unmap step composed with the atomic hardware
-/// [`unmap_invalidate_step`](HwView::unmap_invalidate_step) (the `DSB ISH` +
+/// [`unmap_invalidate_step`](HardwareView::unmap_invalidate_step) (the `DSB ISH` +
 /// `TLBI IPAS2E1IS` that drops the page from the reachable map and flushes its
 /// cached entries together) refines `hv_unmap_step`.
 pub proof fn refine_hv_unmap(
-    sw1: SwView,
-    sw2: SwView,
-    hw1: HwView,
-    hw2: HwView,
+    sw1: SoftwareView,
+    sw2: SoftwareView,
+    hw1: HardwareView,
+    hw2: HardwareView,
     vm: VmId,
     gpa: GuestPage,
 )
     requires
-        SwView::unmap_step(sw1, sw2, vm, gpa),
-        HwView::unmap_invalidate_step(hw1, hw2, vm, gpa),
+        SoftwareView::unmap_step(sw1, sw2, vm, gpa),
+        HardwareView::unmap_invalidate_step(hw1, hw2, vm, gpa),
         MachineState::assemble(sw1, hw1).wf(),
     ensures
         MachineState::hv_unmap_step(
@@ -272,9 +255,15 @@ pub proof fn refine_hv_unmap(
 // ------------------------------------------------------------------
 // Ownership management (pure SW — HW state unchanged)
 // ------------------------------------------------------------------
-pub proof fn refine_hv_assign_page(sw1: SwView, sw2: SwView, hw: HwView, vm: VmId, page: PhysPage)
+pub proof fn refine_hv_assign_page(
+    sw1: SoftwareView,
+    sw2: SoftwareView,
+    hw: HardwareView,
+    vm: VmId,
+    page: PhysPage,
+)
     requires
-        SwView::assign_page_step(sw1, sw2, vm, page),
+        SoftwareView::assign_page_step(sw1, sw2, vm, page),
         MachineState::assemble(sw1, hw).wf(),
     ensures
         MachineState::hv_assign_page_step(
@@ -302,9 +291,15 @@ pub proof fn refine_hv_assign_page(sw1: SwView, sw2: SwView, hw: HwView, vm: VmI
     assert(s2.wf());
 }
 
-pub proof fn refine_hv_reclaim_page(sw1: SwView, sw2: SwView, hw: HwView, vm: VmId, page: PhysPage)
+pub proof fn refine_hv_reclaim_page(
+    sw1: SoftwareView,
+    sw2: SoftwareView,
+    hw: HardwareView,
+    vm: VmId,
+    page: PhysPage,
+)
     requires
-        SwView::reclaim_page_step(sw1, sw2, vm, page),
+        SoftwareView::reclaim_page_step(sw1, sw2, vm, page),
         MachineState::assemble(sw1, hw).wf(),
         MachineState::assemble(sw1, hw).page_is_quiescent(page),
     ensures
@@ -319,7 +314,7 @@ pub proof fn refine_hv_reclaim_page(sw1: SwView, sw2: SwView, hw: HwView, vm: Vm
     let s2 = MachineState::assemble(sw2, hw);
     lemma_sw_machine_wf_equiv(sw1, hw);
     assert(sw1.wf());
-    // The machine-level `page_is_quiescent` supplies the SwView reclaim lemma's
+    // The machine-level `page_is_quiescent` supplies the SoftwareView reclaim lemma's
     // premises (no surviving mapping or sharing edge targets `page`); `sw1` shares
     // `s1`'s `s2_map`/`shared_pages`.
     assert forall|k: VmPageKey| #[trigger] sw1.s2_map.contains_key(k) implies sw1.s2_map[k].page
@@ -344,15 +339,15 @@ pub proof fn refine_hv_reclaim_page(sw1: SwView, sw2: SwView, hw: HwView, vm: Vm
 // Sharing management (pure SW — HW state unchanged)
 // ------------------------------------------------------------------
 pub proof fn refine_hv_share_page(
-    sw1: SwView,
-    sw2: SwView,
-    hw: HwView,
+    sw1: SoftwareView,
+    sw2: SoftwareView,
+    hw: HardwareView,
     left: VmId,
     right: VmId,
     page: PhysPage,
 )
     requires
-        SwView::share_page_step(sw1, sw2, left, right, page),
+        SoftwareView::share_page_step(sw1, sw2, left, right, page),
         MachineState::assemble(sw1, hw).wf(),
     ensures
         MachineState::hv_share_page_step(
@@ -381,15 +376,15 @@ pub proof fn refine_hv_share_page(
 }
 
 pub proof fn refine_hv_unshare_page(
-    sw1: SwView,
-    sw2: SwView,
-    hw: HwView,
+    sw1: SoftwareView,
+    sw2: SoftwareView,
+    hw: HardwareView,
     left: VmId,
     right: VmId,
     page: PhysPage,
 )
     requires
-        SwView::unshare_page_step(sw1, sw2, left, right, page),
+        SoftwareView::unshare_page_step(sw1, sw2, left, right, page),
         MachineState::assemble(sw1, hw).wf(),
         // No-dangling guard (cf. `hv_unshare_page_step`): an endpoint that maps
         // `page` must own it, so dropping the share strands no translation.
@@ -430,9 +425,15 @@ pub proof fn refine_hv_unshare_page(
 // ------------------------------------------------------------------
 // Context switch (pure HW — SW state unchanged)
 // ------------------------------------------------------------------
-pub proof fn refine_hv_context_switch(sw: SwView, hw1: HwView, hw2: HwView, cpu: CpuId, vm: VmId)
+pub proof fn refine_hv_context_switch(
+    sw: SoftwareView,
+    hw1: HardwareView,
+    hw2: HardwareView,
+    cpu: CpuId,
+    vm: VmId,
+)
     requires
-        HwView::context_switch_step(hw1, hw2, cpu, vm),
+        HardwareView::context_switch_step(hw1, hw2, cpu, vm),
         MachineState::assemble(sw, hw1).wf(),
         MachineState::assemble(sw, hw1).all_vms().contains(vm),
     ensures
@@ -477,10 +478,10 @@ pub proof fn refine_hv_context_switch(sw: SwView, hw1: HwView, hw2: HwView, cpu:
 /// nothing, so the only machine-only clause to re-establish is `execution_wf`
 /// (which survives a growing `all_vms`); the SW clauses come via the bridge and
 /// `tlb_safe` carries over unchanged.
-pub proof fn refine_hv_add_vm(sw1: SwView, sw2: SwView, hw: HwView, vm: VmId)
+pub proof fn refine_hv_add_vm(sw1: SoftwareView, sw2: SoftwareView, hw: HardwareView, vm: VmId)
     requires
-        SwView::add_vm_enabled(sw1, vm),
-        SwView::add_vm_step(sw1, sw2, vm),
+        SoftwareView::add_vm_enabled(sw1, vm),
+        SoftwareView::add_vm_step(sw1, sw2, vm),
         MachineState::assemble(sw1, hw).wf(),
     ensures
         MachineState::hv_add_vm_step(
@@ -516,10 +517,10 @@ pub proof fn refine_hv_add_vm(sw1: SwView, sw2: SwView, hw: HwView, vm: VmId)
 /// guards — `vm` has no cached TLB entry and runs on no CPU — so that dropping it
 /// strands no hardware reference; both are taken as hypotheses (cf. the
 /// no-dangling guard of `refine_hv_unshare_page`).
-pub proof fn refine_hv_remove_vm(sw1: SwView, sw2: SwView, hw: HwView, vm: VmId)
+pub proof fn refine_hv_remove_vm(sw1: SoftwareView, sw2: SoftwareView, hw: HardwareView, vm: VmId)
     requires
-        SwView::remove_vm_enabled(sw1, vm),
-        SwView::remove_vm_step(sw1, sw2, vm),
+        SoftwareView::remove_vm_enabled(sw1, vm),
+        SoftwareView::remove_vm_step(sw1, sw2, vm),
         MachineState::assemble(sw1, hw).wf(),
         forall|k: TlbKey| #[trigger]
             MachineState::assemble(sw1, hw).tlb.contains_key(k) ==> k.vm != vm,
@@ -559,9 +560,9 @@ pub proof fn refine_hv_remove_vm(sw1: SwView, sw2: SwView, hw: HwView, vm: VmId)
 }
 
 // ---------------------------------------------------------------------------
-// SwView region-trace helpers (partial states, prefixes, per-page edges)
+// SoftwareView region-trace helpers (partial states, prefixes, per-page edges)
 //
-// These operate purely on `SwView` but live here, at the trace proof site, so the
+// These operate purely on `SoftwareView` but live here, at the trace proof site, so the
 // machine-trace lemmas below consume them directly.  (Relocated from
 // `software::proof`, which no longer references them.)
 // ---------------------------------------------------------------------------
@@ -588,8 +589,8 @@ pub open spec fn entry_prefix(region: Region, k: nat) -> Map<VmPageKey, S2Entry>
 }
 
 /// `s1` with the first `a` region pages assigned and the first `m` mapped.
-pub open spec fn insert_partial(s1: SwView, region: Region, a: nat, m: nat) -> SwView {
-    SwView {
+pub open spec fn insert_partial(s1: SoftwareView, region: Region, a: nat, m: nat) -> SoftwareView {
+    SoftwareView {
         all_vms: s1.all_vms,
         hypervisor_owned: s1.hypervisor_owned.difference(phys_prefix(region, a)),
         vm_owned: s1.vm_owned.insert(
@@ -644,10 +645,10 @@ pub proof fn lemma_half_index(j: int)
 }
 
 /// A prefix page is free in `s1`: held by the hypervisor and owned by no VM.
-proof fn lemma_prefix_pages_free(s1: SwView, region: Region, a: nat, p: PhysPage)
+proof fn lemma_prefix_pages_free(s1: SoftwareView, region: Region, a: nat, p: PhysPage)
     requires
         s1.wf(),
-        SwView::insert_region_enabled(s1, region),
+        SoftwareView::insert_region_enabled(s1, region),
         a <= region.count,
         phys_prefix(region, a).contains(p),
     ensures
@@ -665,10 +666,10 @@ proof fn lemma_prefix_pages_free(s1: SwView, region: Region, a: nat, p: PhysPage
 }
 
 /// Every partial-insert state is `wf` (`m <= a <= count`).
-pub proof fn lemma_insert_partial_wf(s1: SwView, region: Region, a: nat, m: nat)
+pub proof fn lemma_insert_partial_wf(s1: SoftwareView, region: Region, a: nat, m: nat)
     requires
         s1.wf(),
-        SwView::insert_region_enabled(s1, region),
+        SoftwareView::insert_region_enabled(s1, region),
         m <= a,
         a <= region.count,
     ensures
@@ -745,13 +746,13 @@ pub proof fn lemma_insert_partial_wf(s1: SwView, region: Region, a: nat, m: nat)
 }
 
 /// Even edge `2*i`: assigning region page `i` advances `(i, i) → (i+1, i)`.
-pub proof fn lemma_insert_assign_edge(s1: SwView, region: Region, i: nat)
+pub proof fn lemma_insert_assign_edge(s1: SoftwareView, region: Region, i: nat)
     requires
         s1.wf(),
-        SwView::insert_region_enabled(s1, region),
+        SoftwareView::insert_region_enabled(s1, region),
         i < region.count,
     ensures
-        SwView::assign_page_step(
+        SoftwareView::assign_page_step(
             insert_partial(s1, region, i, i),
             insert_partial(s1, region, (i + 1) as nat, i),
             region.vm,
@@ -782,13 +783,13 @@ pub proof fn lemma_insert_assign_edge(s1: SwView, region: Region, i: nat)
 }
 
 /// Odd edge `2*i+1`: mapping region entry `i` advances `(i+1, i) → (i+1, i+1)`.
-pub proof fn lemma_insert_map_edge(s1: SwView, region: Region, i: nat)
+pub proof fn lemma_insert_map_edge(s1: SoftwareView, region: Region, i: nat)
     requires
         s1.wf(),
-        SwView::insert_region_enabled(s1, region),
+        SoftwareView::insert_region_enabled(s1, region),
         i < region.count,
     ensures
-        SwView::map_step(
+        SoftwareView::map_step(
             insert_partial(s1, region, (i + 1) as nat, i),
             insert_partial(s1, region, (i + 1) as nat, (i + 1) as nat),
             region.vm,
@@ -821,8 +822,8 @@ pub proof fn lemma_insert_map_edge(s1: SwView, region: Region, i: nat)
 // unmapped and the first `r` region pages reclaimed (`r <= u`).  The trace's
 // state at index `j` is `remove_partial(.., (j+1)/2, j/2)`.
 /// `s1` with the first `u` region entries unmapped and the first `r` reclaimed.
-pub open spec fn remove_partial(s1: SwView, region: Region, u: nat, r: nat) -> SwView {
-    SwView {
+pub open spec fn remove_partial(s1: SoftwareView, region: Region, u: nat, r: nat) -> SoftwareView {
+    SoftwareView {
         all_vms: s1.all_vms,
         hypervisor_owned: s1.hypervisor_owned.union(phys_prefix(region, r)),
         vm_owned: s1.vm_owned.insert(
@@ -835,10 +836,10 @@ pub open spec fn remove_partial(s1: SwView, region: Region, u: nat, r: nat) -> S
 }
 
 /// A prefix page is owned by `region.vm` alone (`r <= count`).
-proof fn lemma_remove_prefix_owned(s1: SwView, region: Region, r: nat, p: PhysPage)
+proof fn lemma_remove_prefix_owned(s1: SoftwareView, region: Region, r: nat, p: PhysPage)
     requires
         s1.wf(),
-        SwView::remove_region_enabled(s1, region),
+        SoftwareView::remove_region_enabled(s1, region),
         r <= region.count,
         phys_prefix(region, r).contains(p),
     ensures
@@ -857,7 +858,7 @@ proof fn lemma_remove_prefix_owned(s1: SwView, region: Region, r: nat, p: PhysPa
 
 /// A surviving stage-2 entry targets no reclaimed page (`r <= u <= count`).
 pub proof fn lemma_remove_survivor_unreclaimed(
-    s1: SwView,
+    s1: SoftwareView,
     region: Region,
     u: nat,
     r: nat,
@@ -865,7 +866,7 @@ pub proof fn lemma_remove_survivor_unreclaimed(
 )
     requires
         s1.wf(),
-        SwView::remove_region_enabled(s1, region),
+        SoftwareView::remove_region_enabled(s1, region),
         r <= u,
         u <= region.count,
         s1.s2_map.contains_key(k),
@@ -888,10 +889,10 @@ pub proof fn lemma_remove_survivor_unreclaimed(
 }
 
 /// Every partial-remove state is `wf` (`r <= u <= count`).
-pub proof fn lemma_remove_partial_wf(s1: SwView, region: Region, u: nat, r: nat)
+pub proof fn lemma_remove_partial_wf(s1: SoftwareView, region: Region, u: nat, r: nat)
     requires
         s1.wf(),
-        SwView::remove_region_enabled(s1, region),
+        SoftwareView::remove_region_enabled(s1, region),
         r <= u,
         u <= region.count,
     ensures
@@ -951,13 +952,13 @@ pub proof fn lemma_remove_partial_wf(s1: SwView, region: Region, u: nat, r: nat)
 }
 
 /// Even edge `2*i`: unmapping region entry `i` advances `(i, i) → (i+1, i)`.
-pub proof fn lemma_remove_unmap_edge(s1: SwView, region: Region, i: nat)
+pub proof fn lemma_remove_unmap_edge(s1: SoftwareView, region: Region, i: nat)
     requires
         s1.wf(),
-        SwView::remove_region_enabled(s1, region),
+        SoftwareView::remove_region_enabled(s1, region),
         i < region.count,
     ensures
-        SwView::unmap_step(
+        SoftwareView::unmap_step(
             remove_partial(s1, region, i, i),
             remove_partial(s1, region, (i + 1) as nat, i),
             region.vm,
@@ -979,13 +980,13 @@ pub proof fn lemma_remove_unmap_edge(s1: SwView, region: Region, i: nat)
 }
 
 /// Odd edge `2*i+1`: reclaiming region page `i` advances `(i+1, i) → (i+1, i+1)`.
-pub proof fn lemma_remove_reclaim_edge(s1: SwView, region: Region, i: nat)
+pub proof fn lemma_remove_reclaim_edge(s1: SoftwareView, region: Region, i: nat)
     requires
         s1.wf(),
-        SwView::remove_region_enabled(s1, region),
+        SoftwareView::remove_region_enabled(s1, region),
         i < region.count,
     ensures
-        SwView::reclaim_page_step(
+        SoftwareView::reclaim_page_step(
             remove_partial(s1, region, (i + 1) as nat, i),
             remove_partial(s1, region, (i + 1) as nat, (i + 1) as nat),
             region.vm,
@@ -1016,7 +1017,7 @@ pub proof fn lemma_remove_reclaim_edge(s1: SwView, region: Region, i: nat)
 // ---------------------------------------------------------------------------
 // Region → per-page MACHINE trace  (insert side)
 //
-// The SwView trace helpers above realize a region step as a trace of atomic
+// The SoftwareView trace helpers above realize a region step as a trace of atomic
 // per-page SW steps.  Lifted through `assemble(·, hw)`, each SW edge becomes a
 // `MachineState` hypervisor step, so an `insert_region` is realized as a trace of
 // per-page `hv_assign_page` / `hv_map` steps — the bridge that lets the bulk
@@ -1030,13 +1031,13 @@ pub proof fn lemma_remove_reclaim_edge(s1: SwView, region: Region, i: nat)
 /// `hw` with its reachable map forced to `sw.s2_map` — the hardware state at a
 /// well-formed (synced) point.  Used to assemble trace states so that the `sync`
 /// invariant holds at every partial: `hw_s2map` tracks the partial's `s2_map`.
-pub open spec fn synced_hw(sw: SwView, hw: HwView) -> HwView {
-    HwView { s2map: sw.s2_map, ..hw }
+pub open spec fn synced_hw(sw: SoftwareView, hw: HardwareView) -> HardwareView {
+    HardwareView { s2map: sw.s2_map, ..hw }
 }
 
 /// At a synced point (`hw.s2map == sw.s2_map`) overriding the reachable map is a
 /// no-op, so the synced assembly coincides with the plain one.
-pub proof fn lemma_synced_hw_id(sw: SwView, hw: HwView)
+pub proof fn lemma_synced_hw_id(sw: SoftwareView, hw: HardwareView)
     requires
         hw.s2map == sw.s2_map,
     ensures
@@ -1048,8 +1049,8 @@ pub proof fn lemma_synced_hw_id(sw: SwView, hw: HwView)
 /// Machine partial-insert state: the SW `insert_partial`, assembled with the synced
 /// `hw` (reachable map tracks `s2_map`; TLB fixed at `hw.tlb`).
 pub open spec fn insert_machine_partial(
-    sw1: SwView,
-    hw: HwView,
+    sw1: SoftwareView,
+    hw: HardwareView,
     region: Region,
     a: nat,
     m: nat,
@@ -1060,15 +1061,15 @@ pub open spec fn insert_machine_partial(
 
 /// Each partial-insert state is `wf`.
 pub proof fn lemma_insert_partial_machine_wf(
-    sw1: SwView,
-    hw: HwView,
+    sw1: SoftwareView,
+    hw: HardwareView,
     region: Region,
     a: nat,
     m: nat,
 )
     requires
         MachineState::assemble(sw1, hw).wf(),
-        SwView::insert_region_enabled(sw1, region),
+        SoftwareView::insert_region_enabled(sw1, region),
         m <= a,
         a <= region.count,
     ensures
@@ -1077,7 +1078,7 @@ pub proof fn lemma_insert_partial_machine_wf(
     let sp = insert_partial(sw1, region, a, m);
     let m1 = MachineState::assemble(sw1, hw);
     let m2 = MachineState::assemble(sp, synced_hw(sp, hw));
-    // SW clauses via the bridge + the SwView partial-`wf` proof.
+    // SW clauses via the bridge + the SoftwareView partial-`wf` proof.
     lemma_sw_machine_wf_equiv(sw1, hw);
     assert(sw1.wf());
     lemma_insert_partial_wf(sw1, region, a, m);
@@ -1117,10 +1118,15 @@ pub proof fn lemma_insert_partial_machine_wf(
 /// Odd edge `2*i+1` at the machine level: mapping region entry `i` is an
 /// `hv_map_step`.  The flush is vacuous (`invalidation_targets` empty), so the TLB
 /// is unchanged.
-pub proof fn lemma_insert_map_machine_edge(sw1: SwView, hw: HwView, region: Region, i: nat)
+pub proof fn lemma_insert_map_machine_edge(
+    sw1: SoftwareView,
+    hw: HardwareView,
+    region: Region,
+    i: nat,
+)
     requires
         MachineState::assemble(sw1, hw).wf(),
-        SwView::insert_region_enabled(sw1, region),
+        SoftwareView::insert_region_enabled(sw1, region),
         i < region.count,
     ensures
         MachineState::hv_map_step(
@@ -1152,7 +1158,7 @@ pub proof fn lemma_insert_map_machine_edge(sw1: SwView, hw: HwView, region: Regi
         assert(!entry_prefix(region, i).dom().contains(key));  // index i not < i
     }
     // The hardware side is exactly `map_step`: reachable map grows by `key`, TLB fixed.
-    assert(HwView::map_step(hw1, hw2, vm, gpa, entry));
+    assert(HardwareView::map_step(hw1, hw2, vm, gpa, entry));
     refine_hv_map(from_sw, to_sw, hw1, hw2, vm, gpa, entry);
 }
 
@@ -1175,11 +1181,16 @@ pub open spec fn insert_hv_edge(s: MachineState, t: MachineState, region: Region
 
 /// An `insert_region` is realized by a `2*count + 1`-state trace of `MachineState`
 /// hypervisor steps (per-page `hv_assign_page` / `hv_map`), every state `wf`.
-pub proof fn lemma_insert_region_machine_trace(sw1: SwView, sw2: SwView, hw: HwView, region: Region)
+pub proof fn lemma_insert_region_machine_trace(
+    sw1: SoftwareView,
+    sw2: SoftwareView,
+    hw: HardwareView,
+    region: Region,
+)
     requires
         MachineState::assemble(sw1, hw).wf(),
-        SwView::insert_region_enabled(sw1, region),
-        SwView::insert_region_step(sw1, sw2, region),
+        SoftwareView::insert_region_enabled(sw1, region),
+        SoftwareView::insert_region_step(sw1, sw2, region),
     ensures
         exists|trace: Seq<MachineState>|
             #![auto]
@@ -1290,8 +1301,8 @@ pub open spec fn tlb_prefix_keys(region: Region, u: nat) -> Set<TlbKey> {
 }
 
 /// `hw` after flushing the TLB entries for the first `u` region guest pages.
-pub open spec fn hw_unmapped(hw: HwView, region: Region, u: nat) -> HwView {
-    HwView {
+pub open spec fn hw_unmapped(hw: HardwareView, region: Region, u: nat) -> HardwareView {
+    HardwareView {
         tlb: hw.tlb.remove_keys(tlb_prefix_keys(region, u)),
         s2map: hw.s2map,
         memory: hw.memory,
@@ -1300,15 +1311,15 @@ pub open spec fn hw_unmapped(hw: HwView, region: Region, u: nat) -> HwView {
 }
 
 /// `hw` after a full `remove_region` (all region gpas flushed from the TLB).
-pub open spec fn hw_after_unmap_region(hw: HwView, region: Region) -> HwView {
+pub open spec fn hw_after_unmap_region(hw: HardwareView, region: Region) -> HardwareView {
     hw_unmapped(hw, region, region.count)
 }
 
 /// Machine partial-remove state: SW `remove_partial` assembled with the partially
 /// flushed TLB.
 pub open spec fn remove_machine_partial(
-    sw1: SwView,
-    hw: HwView,
+    sw1: SoftwareView,
+    hw: HardwareView,
     region: Region,
     u: nat,
     r: nat,
@@ -1319,15 +1330,15 @@ pub open spec fn remove_machine_partial(
 
 /// Each partial-remove state is `wf`.
 pub proof fn lemma_remove_partial_machine_wf(
-    sw1: SwView,
-    hw: HwView,
+    sw1: SoftwareView,
+    hw: HardwareView,
     region: Region,
     u: nat,
     r: nat,
 )
     requires
         MachineState::assemble(sw1, hw).wf(),
-        SwView::remove_region_enabled(sw1, region),
+        SoftwareView::remove_region_enabled(sw1, region),
         r <= u,
         u <= region.count,
     ensures
@@ -1374,10 +1385,15 @@ pub proof fn lemma_remove_partial_machine_wf(
 
 /// Even edge `2*i` at the machine level: unmapping region entry `i` is an
 /// `hv_unmap_step`; the flush removes exactly the cached `(vm, gpa_i)` entries.
-pub proof fn lemma_remove_unmap_machine_edge(sw1: SwView, hw: HwView, region: Region, i: nat)
+pub proof fn lemma_remove_unmap_machine_edge(
+    sw1: SoftwareView,
+    hw: HardwareView,
+    region: Region,
+    i: nat,
+)
     requires
         MachineState::assemble(sw1, hw).wf(),
-        SwView::remove_region_enabled(sw1, region),
+        SoftwareView::remove_region_enabled(sw1, region),
         i < region.count,
     ensures
         MachineState::hv_unmap_step(
@@ -1417,10 +1433,15 @@ pub proof fn lemma_remove_unmap_machine_edge(sw1: SwView, hw: HwView, region: Re
 /// Odd edge `2*i+1` at the machine level: reclaiming region page `i` is an
 /// `hv_reclaim_page_step`; `page_is_quiescent` holds by the discharged s2_map / TLB
 /// / sharing conditions.
-pub proof fn lemma_remove_reclaim_machine_edge(sw1: SwView, hw: HwView, region: Region, i: nat)
+pub proof fn lemma_remove_reclaim_machine_edge(
+    sw1: SoftwareView,
+    hw: HardwareView,
+    region: Region,
+    i: nat,
+)
     requires
         MachineState::assemble(sw1, hw).wf(),
-        SwView::remove_region_enabled(sw1, region),
+        SoftwareView::remove_region_enabled(sw1, region),
         i < region.count,
     ensures
         MachineState::hv_reclaim_page_step(
@@ -1480,11 +1501,16 @@ pub open spec fn remove_hv_edge(s: MachineState, t: MachineState, region: Region
 /// A `remove_region` is realized by a `2*count + 1`-state trace of `MachineState`
 /// hypervisor steps (per-page `hv_unmap` / `hv_reclaim_page`), every state `wf`.
 /// The trace ends at `sw2` assembled with the fully-flushed TLB.
-pub proof fn lemma_remove_region_machine_trace(sw1: SwView, sw2: SwView, hw: HwView, region: Region)
+pub proof fn lemma_remove_region_machine_trace(
+    sw1: SoftwareView,
+    sw2: SoftwareView,
+    hw: HardwareView,
+    region: Region,
+)
     requires
         MachineState::assemble(sw1, hw).wf(),
-        SwView::remove_region_enabled(sw1, region),
-        SwView::remove_region_step(sw1, sw2, region),
+        SoftwareView::remove_region_enabled(sw1, region),
+        SoftwareView::remove_region_step(sw1, sw2, region),
     ensures
         exists|trace: Seq<MachineState>|
             #![auto]
@@ -1568,6 +1594,37 @@ pub proof fn lemma_remove_region_machine_trace(sw1: SwView, sw2: SwView, hw: HwV
         lemma_remove_partial_machine_wf(sw1, hw, region, ((j + 1) / 2) as nat, (j / 2) as nat);
     }
     assert(trace.len() == 2 * region.count + 1);
+}
+
+// ---------------------------------------------------------------------------
+// Sync bridge: synced `MmuSpec`/`BudgetSpec` ⟹ a `wf` machine state.
+// ---------------------------------------------------------------------------
+/// The MMU and budget states are *synced*: the hardware-reachable map (flattened
+/// `MmuSpec.s2map`) equals the software-maintained map (`BudgetSpec`'s projection).
+/// This is the per-vm lock invariant aggregated over all vms.
+pub open spec fn specs_synced(mmu: MmuSpec::State, budget: BudgetSpec::State) -> bool {
+    flatten_s2map(mmu.s2map) == state_s2_map(budget)
+}
+
+/// **Synced specs refine a `wf` machine.** Reachable `MmuSpec` / `BudgetSpec` states
+/// that are [`specs_synced`] project (via their views) to a `wf` `MachineState` — so
+/// the implementation, which forces sync, reaches well-formed (hence secure) states.
+pub proof fn lemma_specs_synced_implies_wf_machine(mmu: MmuSpec::State, budget: BudgetSpec::State)
+    requires
+        mmu.invariant(),
+        budget.invariant(),
+        specs_synced(mmu, budget),
+    ensures
+        MachineState::assemble(budget.view(), mmu.view()).wf(),
+{
+    // Each view is internally well-formed (from its own state machine's invariant).
+    budget.inv_implies_wf();
+    mmu.inv_implies_wf();
+    // view-sync: the two projected stage-2 maps coincide (the `specs_synced` hyp).
+    assert(mmu.view().s2map == budget.view().s2_map);
+    // The MMU view schedules no vm, so the scheduler clause is vacuous.
+    assert(mmu.view().active_vm == Map::<CpuId, VmId>::empty());
+    lemma_synced_views_wf(budget.view(), mmu.view());
 }
 
 } // verus!

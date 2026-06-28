@@ -1,17 +1,17 @@
-//! Hardware-refinement layer: `impl HardwareOps for MmuSpec::State`.
+//! Hardware-refinement layer: `impl HardwareRefinement for MmuSpec::State`.
 //!
-//! The `HwView` analog of [`crate::refinement`].  The abstract state **is** the
+//! The `HardwareView` analog of [`crate::refinement`].  The abstract state **is** the
 //! tokenized state machine's own `MmuSpec::State` (`s2map` + `vm_ids` + `tlb`);
-//! [`HwView`] is a projection of it, and the contract `invariants()` is the
+//! [`HardwareView`] is a projection of it, and the contract `invariants()` is the
 //! machine's real, inductively-proven `invariant()` (full TLB coherence).
 //!
 //! ```text
-//!   HardwareOps              ghost contract; invariants() == MmuSpec invariant()
+//!   HardwareRefinement              ghost contract; invariants() == MmuSpec invariant()
 //!       ▲ impl (here)
 //!   MmuSpec::State           the state machine's own state  (projected by `view`)
 //!   ├─ s2map:  Map<VmId, Map<GuestPage, S2Entry>>   (walker-reachable; software side)
 //!   ├─ vm_ids: Set<VmId>
-//!   └─ tlb:    Map<TlbKey, TlbEntry>                (the only HwView-visible field)
+//!   └─ tlb:    Map<TlbKey, TlbEntry>                (the only HardwareView-visible field)
 //!       ▲ token soundness: the tokens `MmuHardware` holds are tokens of a
 //!         reachable MmuSpec::State
 //!   MmuHardware  (fires MmuSpec transitions behind the `HardwareInstr` asm seam)
@@ -20,39 +20,91 @@
 //! # The projection
 //!
 //! The MMU governs the TLB and the walker-reachable `s2map`, so both carry over to
-//! `HwView` (`tlb` and `s2map`).  `memory` and `active_vm` are governed by the data
+//! `HardwareView` (`tlb` and `s2map`).  `memory` and `active_vm` are governed by the data
 //! plane and the scheduler, not the MMU, so they are empty (and the in-scope
 //! transitions leave them fixed).
 //!
 //! Each transition method fires the matching `MmuSpec` macro transition via
 //! `MmuSpec::take_step::*` (which supplies `post.invariant()`) and proves the
-//! corresponding `HwView` step.
-use super::ops::HardwareOps;
-use super::state::HwView;
-use crate::machine::hardware::mmu::MmuSpec;
+//! corresponding `HardwareView` step.
+use crate::hardware::spec::MmuSpec;
+use crate::machine::convert::flatten_s2map;
+use crate::machine::hardware::HardwareView;
 use crate::machine::types::*;
 use vstd::prelude::*;
 
 verus! {
 
-/// Flatten the per-vm reachable map into the machine-keyed reachable map:
-/// `(vm, gpa) ↦ s2map[vm][gpa]`.  This is the `HwView::s2map` the MMU governs.
-pub open spec fn flatten_s2map(m: Map<VmId, Map<GuestPage, S2Entry>>) -> Map<VmPageKey, S2Entry> {
-    Map::new(
-        |k: VmPageKey| m.contains_key(k.vm) && m[k.vm].contains_key(k.gpa),
-        |k: VmPageKey| m[k.vm][k.gpa],
-    )
+/// Specification trait for hardware-side TLB maintenance — the `HardwareView` analog
+/// of [`SoftwareRefinement`](super::software::SoftwareRefinement).
+///
+/// A **ghost contract**: a concrete `T: View<V = HardwareView>` represents the
+/// MMU/TLB state, and each transition is a `proof fn` taking `self` by value whose
+/// effect on the view is characterised by the matching [`HardwareView`] step
+/// predicate.  The implementing type is `MmuSpec::State` (impl below), so
+/// `invariants()` is the tokenized state machine's real `invariant()` (full TLB
+/// coherence).
+///
+/// # Scope: the hypervisor-issued maintenance instructions only
+///
+/// | op               | `HardwareView` step                     | instruction                  |
+/// |------------------|-----------------------------------------|------------------------------|
+/// | `tlb_invalidate` | [`HardwareView::unmap_invalidate_step`]  | `DSB ISH` + `TLBI IPAS2E1IS` |
+/// | `map_fence`      | [`HardwareView::map_step`]                | `DSB ISH` (map side)         |
+///
+/// The autonomous TLB *fill* is an **environment** transition (it depends on
+/// `active_vm`, no part of the MMU's token state) — out of this contract, exactly as
+/// cross-VM sharing is out of `SoftwareRefinement`.
+pub trait HardwareRefinement: View<V = HardwareView> + Sized {
+    /// Internal consistency predicate.  Implementations must establish this at
+    /// construction and preserve it across all transitions.
+    spec fn invariants(&self) -> bool;
+
+    /// Enabledness of [`map_fence`](HardwareRefinement::map_fence): the page is fresh
+    /// for a live VM, so installing it grows the reachable map by exactly `(vm, gpa)`.
+    spec fn map_fresh(&self, vm: VmId, gpa: GuestPage) -> bool;
+
+    /// Invariants imply the hardware view is well-formed.
+    broadcast proof fn inv_implies_wf(&self)
+        requires
+            #[trigger] self.invariants(),
+        ensures
+            self@.wf(),
+    ;
+
+    /// Atomic break-before-make unmap of `(vm, gpa)`: the `DSB ISH` drops the page
+    /// from the hardware-reachable map and the `TLBI IPAS2E1IS` broadcast flushes its
+    /// cached entries, together.  Always enabled (a no-op for an unreachable page).
+    proof fn tlb_invalidate(self, vm: VmId, gpa: GuestPage) -> (post: Self)
+        requires
+            self.invariants(),
+        ensures
+            post.invariants(),
+            HardwareView::unmap_invalidate_step(self@, post@, vm, gpa),
+    ;
+
+    /// The map-side `DSB ISH` that makes a freshly written PTE walker-reachable,
+    /// growing the reachable map by `(vm, gpa) => entry`.  No `TLBI` (the page was
+    /// absent, so it had no cached entry), so the TLB is untouched.
+    proof fn map_fence(self, vm: VmId, gpa: GuestPage, entry: S2Entry) -> (post: Self)
+        requires
+            self.invariants(),
+            self.map_fresh(vm, gpa),
+        ensures
+            post.invariants(),
+            HardwareView::map_step(self@, post@, vm, gpa, entry),
+    ;
 }
 
 // ───────────────────────── the abstraction relation R ───────────────────────
 impl View for MmuSpec::State {
-    type V = HwView;
+    type V = HardwareView;
 
-    /// R: project the MMU state to the abstract `HwView`.  `tlb` and the (flattened)
+    /// R: project the MMU state to the abstract `HardwareView`.  `tlb` and the (flattened)
     /// reachable `s2map` carry over — these are what the MMU governs.  `memory` and
     /// `active_vm` are empty: the data plane and scheduler are out of MMU scope.
-    open spec fn view(&self) -> HwView {
-        HwView {
+    open spec fn view(&self) -> HardwareView {
+        HardwareView {
             tlb: self.tlb,
             s2map: flatten_s2map(self.s2map),
             memory: Map::empty(),
@@ -147,7 +199,7 @@ proof fn lemma_absent_vm_noop(s: MmuSpec::State, vm: VmId, gpa: GuestPage)
 }
 
 // ───────────────────────── the refinement ───────────────────────────────────
-impl HardwareOps for MmuSpec::State {
+impl HardwareRefinement for MmuSpec::State {
     /// The contract invariant is the state machine's real invariant.
     open spec fn invariants(&self) -> bool {
         self.invariant()
@@ -190,7 +242,7 @@ impl HardwareOps for MmuSpec::State {
             lemma_absent_vm_noop(self, vm, gpa);
             post = self;
         }
-        assert(HwView::unmap_invalidate_step(self@, post@, vm, gpa));
+        assert(HardwareView::unmap_invalidate_step(self@, post@, vm, gpa));
         post
     }
 
@@ -201,7 +253,7 @@ impl HardwareOps for MmuSpec::State {
         assert(post.s2map.dom() =~= self.s2map.dom());
         assert(post.s2map[vm] == self.s2map[vm].insert(gpa, entry));
         lemma_flatten_insert(self.s2map, post.s2map, vm, gpa, entry);
-        assert(HwView::map_step(self@, post@, vm, gpa, entry));
+        assert(HardwareView::map_step(self@, post@, vm, gpa, entry));
         post
     }
 }

@@ -1,24 +1,27 @@
+//! The abstract **models** (no refinement proofs — those live in
+//! [`crate::refinement`]): the software view, the hardware view, and the combined
+//! machine state, each with its transitions, well-formedness, and (for the machine)
+//! the security lemmas.
 pub mod types;
 
-// ---------------------------------------------------------------------------
-// New three-layer architecture
-// ---------------------------------------------------------------------------
+/// Geometry/conversion bridge between implementation types (`address`) and model
+/// types (`types`) — the single place the two worlds meet.
+pub mod convert;
 
-/// Software state machine — `SwView`, SW transitions, `SoftwareOps` trait.
+/// Software model — `SoftwareView`, its transitions, and `wf`.
 pub mod software;
 
-/// Hardware state machine — `HwView`, HW transitions, `HardwareOps` trait.
+/// Hardware model — `HardwareView`, its transitions, and `wf`.
 pub mod hardware;
 
-/// High-level abstract machine — `MachineState`, combined steps, security
-/// lemmas, and refinement proofs.
+/// High-level abstract machine — `MachineState`, combined steps, and security lemmas.
 pub mod machine;
 
 // ---------------------------------------------------------------------------
 // Flat re-exports for convenience
 // ---------------------------------------------------------------------------
 
-pub use hardware::{HardwareOps, HwView};
+pub use hardware::HardwareView;
 pub use machine::MachineState;
-pub use software::{SoftwareOps, SwView};
+pub use software::SoftwareView;
 pub use types::*;

@@ -9,8 +9,8 @@ verus! {
 ///
 /// All fields are derived from the hypervisor's data structures (zone list,
 /// stage-2 page tables, page allocator).  An exec type implementing
-/// `View<V = SwView>` provides a spec-level mapping from its concrete fields.
-pub ghost struct SwView {
+/// `View<V = SoftwareView>` provides a spec-level mapping from its concrete fields.
+pub ghost struct SoftwareView {
     /// Set of all VM identifiers currently managed by the hypervisor.
     pub all_vms: Set<VmId>,
     /// Physical pages held by the hypervisor (not assigned to any VM).
@@ -24,7 +24,7 @@ pub ghost struct SwView {
     pub s2_map: Map<VmPageKey, S2Entry>,
 }
 
-impl SwView {
+impl SoftwareView {
     // ------------------------------------------------------------------
     // Trusted abstract predicate (uninterpreted)
     // ------------------------------------------------------------------

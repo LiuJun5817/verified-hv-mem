@@ -1,8 +1,8 @@
-//! The abstraction relation R: project `BudgetSpec::State` → `SwView`.
+//! The abstraction relation R: project `BudgetSpec::State` → `SoftwareView`.
 //!
 //! `<BudgetSpec::State as View>::view` maps the state machine's own state (its
 //! `zone_ids` and per-zone `GhostZone` region sets) to the security model's
-//! `SwView`.  Projecting the machine's real state lets [`super::refine`] use the
+//! `SoftwareView`.  Projecting the machine's real state lets [`super::refine`] use the
 //! machine's real `invariant()` as the contract invariant.
 //!
 //! This module defines the projection and its building blocks:
@@ -21,13 +21,14 @@
 //! is `vaddr / SPEC_PAGE_SIZE`.  Because the page size is a *constant*, the
 //! page↔byte arithmetic below is linear and Verus discharges it with no proof body.
 use crate::address::addr::SpecVAddr;
-use crate::address::frame::{MemAttr, SpecFrame};
+use crate::address::frame::SpecFrame;
 use crate::address::region::{MemoryRegion, SPEC_PAGE_SIZE};
 use crate::hv_mem::spec::budget::{
     zone_budget, zone_budget_in_all_regions, zone_budget_pairwise_disjoint, BudgetSpec,
 };
 use crate::hv_mem::spec::{all_regions, all_regions_disjoint, GhostZone};
-use crate::machine::software::{Region, SwView};
+use crate::machine::convert::{attr_to_perms, gpa_of_vaddr, phys_page_of_paddr};
+use crate::machine::software::{Region, SoftwareView};
 use crate::machine::types::*;
 use vstd::prelude::*;
 
@@ -36,20 +37,16 @@ verus! {
 // ───────────────────────── per-region geometry ──────────────────────────────
 // The *concrete* per-region geometry: what physical page / guest page / stage-2
 // entry each page of a region maps to.  Built on the canonical region geometry
-// from the `MemorySet` layer (`MemoryRegion::spec_page_vaddr` / `spec_frame`).
-/// Access permissions of a region, from its `MemAttr`.
-pub open spec fn attr_to_perms(attr: MemAttr) -> AccessPerms {
-    AccessPerms { read: attr.readable, write: attr.writable, execute: attr.executable }
-}
-
-/// Machine physical page backing page `i` of region `r` (frame base, in page units).
+// (`MemoryRegion::spec_page_vaddr` / `spec_frame`) and the page-number primitives
+// from [`crate::machine::convert`].
+/// Machine physical page backing page `i` of region `r`.
 pub open spec fn region_phys_page(r: MemoryRegion, i: nat) -> PhysPage {
-    PhysPage(r.spec_frame(i).base.0 / SPEC_PAGE_SIZE)
+    phys_page_of_paddr(r.spec_frame(i).base)
 }
 
-/// Guest page of page `i` of region `r` (page vaddr, in page units).
+/// Guest page of page `i` of region `r`.
 pub open spec fn region_guest_page(r: MemoryRegion, i: nat) -> GuestPage {
-    GuestPage(r.spec_page_vaddr(i).0 / SPEC_PAGE_SIZE)
+    gpa_of_vaddr(r.spec_page_vaddr(i))
 }
 
 /// `r` backs physical page `p` at some page index.
@@ -140,7 +137,7 @@ pub proof fn lemma_same_phys_page_implies_pmem_overlap(
 ///
 /// This is the argument-side bridge for the `insert_region` / `remove_region`
 /// contract: the software-refinement proof turns the BudgetSpec region it fires
-/// into the `Region` the [`SwView`] step consumes.
+/// into the `Region` the [`SoftwareView`] step consumes.
 pub open spec fn region_to_abstract(zid: nat, r: MemoryRegion) -> Region {
     Region {
         vm: VmId(zid),
@@ -226,7 +223,7 @@ pub proof fn lemma_region_to_abstract_entries(zid: nat, r: MemoryRegion)
 /// **Trusted bridge.** If `region` is assignable in a BudgetSpec state, it is
 /// realized by a region in that VM's budget.  This is where the static region
 /// budget enters — as an *implementation-level* assumption relating the abstract,
-/// state-dependent `SwView::is_region_assignable` to `zone_budget`, *not* as a
+/// state-dependent `SoftwareView::is_region_assignable` to `zone_budget`, *not* as a
 /// machine-model assumption.  An axiom, not a deferred proof: `is_region_assignable`
 /// is uninterpreted, so this is a stated platform fact about the trusted interface.
 pub axiom fn axiom_assignable_from_budget(s: BudgetSpec::State, region: Region)
@@ -382,13 +379,13 @@ pub open spec fn state_s2_map(s: BudgetSpec::State) -> Map<VmPageKey, S2Entry> {
 
 // ───────────────────────── the abstraction relation R ───────────────────────
 impl View for BudgetSpec::State {
-    type V = SwView;
+    type V = SoftwareView;
 
-    /// R: project the machine state to the abstract `SwView`.  `vm_owned` and
+    /// R: project the machine state to the abstract `SoftwareView`.  `vm_owned` and
     /// `s2_map` come from the zones; `hypervisor_owned` is the unowned budget;
     /// `shared_pages` is empty (cross-VM sharing is out of scope).
-    open spec fn view(&self) -> SwView {
-        SwView {
+    open spec fn view(&self) -> SoftwareView {
+        SoftwareView {
             all_vms: Set::new(|vm: VmId| self.zone_ids.contains(vm.0)),
             hypervisor_owned: hypervisor_pool(self.zones),
             vm_owned: Map::new(
@@ -428,7 +425,7 @@ pub proof fn lemma_region_pages_in_all_budget(zid: nat, r: MemoryRegion)
 }
 
 /// Every stage-2 entry a zone installs targets a page that zone owns
-/// (the per-zone half of `SwView::translation_wf`).
+/// (the per-zone half of `SoftwareView::translation_wf`).
 pub proof fn lemma_zone_s2_target_owned(zid: nat, gz: GhostZone)
     ensures
         forall|k: VmPageKey| #[trigger]

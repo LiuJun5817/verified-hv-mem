@@ -1,4 +1,4 @@
-//! Proof obligations for the `SwView` state machine.
+//! Proof obligations for the `SoftwareView` state machine.
 //!
 //! `wf` is an inductive invariant: per-page, lifecycle, and region steps all
 //! preserve it (proved below).  This module is `admit`-free.
@@ -9,22 +9,22 @@
 //! 3. **region `wf`-preservation** — proved directly by set/map algebra.
 use vstd::prelude::*;
 
-use super::{Region, SwView};
+use super::{Region, SoftwareView};
 use crate::machine::types::*;
 
 verus! {
 
 // ─────────────────────────── per-page wf-preservation ───────────────────────
 pub proof fn lemma_map_step_preserves_wf(
-    s1: SwView,
-    s2: SwView,
+    s1: SoftwareView,
+    s2: SoftwareView,
     vm: VmId,
     gpa: GuestPage,
     entry: S2Entry,
 )
     requires
         s1.wf(),
-        SwView::map_step(s1, s2, vm, gpa, entry),
+        SoftwareView::map_step(s1, s2, vm, gpa, entry),
     ensures
         s2.wf(),
 {
@@ -40,10 +40,15 @@ pub proof fn lemma_map_step_preserves_wf(
     assert(s2.wf());
 }
 
-pub proof fn lemma_unmap_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId, gpa: GuestPage)
+pub proof fn lemma_unmap_step_preserves_wf(
+    s1: SoftwareView,
+    s2: SoftwareView,
+    vm: VmId,
+    gpa: GuestPage,
+)
     requires
         s1.wf(),
-        SwView::unmap_step(s1, s2, vm, gpa),
+        SoftwareView::unmap_step(s1, s2, vm, gpa),
     ensures
         s2.wf(),
 {
@@ -56,10 +61,15 @@ pub proof fn lemma_unmap_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId, gpa
     assert(s2.wf());
 }
 
-pub proof fn lemma_assign_page_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId, page: PhysPage)
+pub proof fn lemma_assign_page_step_preserves_wf(
+    s1: SoftwareView,
+    s2: SoftwareView,
+    vm: VmId,
+    page: PhysPage,
+)
     requires
         s1.wf(),
-        SwView::assign_page_step(s1, s2, vm, page),
+        SoftwareView::assign_page_step(s1, s2, vm, page),
     ensures
         s2.wf(),
 {
@@ -106,10 +116,15 @@ pub proof fn lemma_assign_page_step_preserves_wf(s1: SwView, s2: SwView, vm: VmI
     assert(s2.wf());
 }
 
-pub proof fn lemma_reclaim_page_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId, page: PhysPage)
+pub proof fn lemma_reclaim_page_step_preserves_wf(
+    s1: SoftwareView,
+    s2: SoftwareView,
+    vm: VmId,
+    page: PhysPage,
+)
     requires
         s1.wf(),
-        SwView::reclaim_page_step(s1, s2, vm, page),
+        SoftwareView::reclaim_page_step(s1, s2, vm, page),
         // Quiescence: no surviving translation or sharing edge targets `page`.
         forall|k: VmPageKey| #[trigger] s1.s2_map.contains_key(k) ==> s1.s2_map[k].page != page,
         forall|e: SharedPage| #[trigger] s1.shared_pages.contains(e) ==> e.page != page,
@@ -152,15 +167,15 @@ pub proof fn lemma_reclaim_page_step_preserves_wf(s1: SwView, s2: SwView, vm: Vm
 
 // ─────────────────────────── sharing wf-preservation ────────────────────────
 pub proof fn lemma_share_page_step_preserves_wf(
-    s1: SwView,
-    s2: SwView,
+    s1: SoftwareView,
+    s2: SoftwareView,
     left: VmId,
     right: VmId,
     page: PhysPage,
 )
     requires
         s1.wf(),
-        SwView::share_page_step(s1, s2, left, right, page),
+        SoftwareView::share_page_step(s1, s2, left, right, page),
     ensures
         s2.wf(),
 {
@@ -195,20 +210,20 @@ pub proof fn lemma_share_page_step_preserves_wf(
 }
 
 pub proof fn lemma_unshare_page_step_preserves_wf(
-    s1: SwView,
-    s2: SwView,
+    s1: SoftwareView,
+    s2: SoftwareView,
     left: VmId,
     right: VmId,
     page: PhysPage,
 )
     requires
         s1.wf(),
-        SwView::unshare_page_step(s1, s2, left, right, page),
+        SoftwareView::unshare_page_step(s1, s2, left, right, page),
         // No dangling: any mapping of `page` by an endpoint of the removed edge is
         // backed by *ownership*, so losing the share leaves no stranded translation.
         // (The analogue of `reclaim`'s quiescence, scoped to the edge's endpoints.)
-        forall|k: VmPageKey|
-            #[trigger] s1.s2_map.contains_key(k) && (k.vm == left || k.vm == right) && s1.s2_map[k].page
+        forall|k: VmPageKey| #[trigger]
+            s1.s2_map.contains_key(k) && (k.vm == left || k.vm == right) && s1.s2_map[k].page
                 == page ==> s1.vm_owned[k.vm].contains(page),
     ensures
         s2.wf(),
@@ -253,11 +268,11 @@ pub proof fn lemma_unshare_page_step_preserves_wf(
 }
 
 // ─────────────────────────── lifecycle wf-preservation ──────────────────────
-pub proof fn lemma_add_vm_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId)
+pub proof fn lemma_add_vm_step_preserves_wf(s1: SoftwareView, s2: SoftwareView, vm: VmId)
     requires
         s1.wf(),
-        SwView::add_vm_enabled(s1, vm),
-        SwView::add_vm_step(s1, s2, vm),
+        SoftwareView::add_vm_enabled(s1, vm),
+        SoftwareView::add_vm_step(s1, s2, vm),
     ensures
         s2.wf(),
 {
@@ -299,11 +314,11 @@ pub proof fn lemma_add_vm_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId)
     assert(s2.wf());
 }
 
-pub proof fn lemma_remove_vm_step_preserves_wf(s1: SwView, s2: SwView, vm: VmId)
+pub proof fn lemma_remove_vm_step_preserves_wf(s1: SoftwareView, s2: SoftwareView, vm: VmId)
     requires
         s1.wf(),
-        SwView::remove_vm_enabled(s1, vm),
-        SwView::remove_vm_step(s1, s2, vm),
+        SoftwareView::remove_vm_enabled(s1, vm),
+        SoftwareView::remove_vm_step(s1, s2, vm),
     ensures
         s2.wf(),
 {

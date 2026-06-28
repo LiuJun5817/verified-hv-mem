@@ -16,11 +16,12 @@ use super::spec::{
 use crate::{
     address::region::MemoryRegion,
     bitmap_allocator::bitmap_trait::BitmapAllocator,
+    machine::convert::pt_s2map_inner,
     global_allocator::GlobalAllocator,
     hardware::{HardwareInstr, MmuHardware},
-    machine::hardware::mmu::MmuS2MapToken,
+    hardware::spec::MmuS2MapToken,
     machine::types::VmId,
-    memory_set::{pt_s2map_inner, MemorySet},
+    memory_set::MemorySet,
     page_table::PageTable,
     sync::rwlock::{RwLock, RwReadGuard, RwWriteGuard},
 };

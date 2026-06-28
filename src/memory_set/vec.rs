@@ -11,8 +11,12 @@
 use super::*;
 use crate::address::addr::{PAddr, SpecVAddr};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
+use crate::machine::convert::{
+    frame_to_s2, gpa_of_vaddr, lemma_pt_s2map_inner_insert, lemma_pt_s2map_inner_remove,
+    lemma_vaddr_gpa_roundtrip, pt_s2map_inner,
+};
 use crate::hardware::{HardwareInstr, MmuHardware};
-use crate::machine::hardware::mmu::MmuS2MapToken;
+use crate::hardware::spec::MmuS2MapToken;
 use crate::machine::types::{GuestPage, VmId};
 use crate::machine::VmPageKey;
 use crate::page_table::{PTConstants, PageTable};

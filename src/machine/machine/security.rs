@@ -1,6 +1,5 @@
 #![allow(non_snake_case)]
 
-use super::refine::lemma_init_wf;
 use super::state::MachineState;
 use crate::machine::types::*;
 use vstd::prelude::*;
@@ -21,6 +20,25 @@ verus! {
 // Lemma order is irrelevant to verification; it follows the layering for reading.
 // ───────────────────────────────────────────────────────────────────────────
 impl MachineState {
+    /// The `init` configuration (`step.rs`) is `wf`.  In `init` the VM population,
+    /// ownership map, sharing graph, stage-2 map, TLB and CPU schedule are all empty,
+    /// so every `wf` clause quantifies over an empty domain and holds vacuously.
+    /// Base case of `reachable ⇒ wf`.
+    pub proof fn lemma_init_wf(s: MachineState)
+        requires
+            MachineState::init(s),
+        ensures
+            s.wf(),
+    {
+        // `vm_owned` and `all_vms` are both empty, so their domains coincide.
+        assert(s.vm_owned.dom() =~= s.all_vms());
+        assert(s.ownership_wf());
+        assert(s.sharing_wf());
+        assert(s.translation_wf());
+        assert(s.execution_wf());
+        assert(s.tlb_safe());
+    }
+
     // ─────────────────────────────── §0 threat model ─────────────────────────
     /// `s2` is reachable from `s1` by one step of some VM *other than* `subject`.
     /// The subject-vs-environment split exists only here, to state isolation; it
@@ -415,7 +433,7 @@ impl MachineState {
                 &&& trace[trace.len() - 1] == s
             };
         assert(trace.len() == acts.len() + 1);
-        lemma_init_wf(trace[0]);
+        Self::lemma_init_wf(trace[0]);
         Self::lemma_execution_wf(trace, acts, trace.len() - 1);
     }
 
