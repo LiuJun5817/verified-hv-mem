@@ -24,7 +24,7 @@ use crate::address::addr::SpecVAddr;
 use crate::address::frame::SpecFrame;
 use crate::address::region::{MemoryRegion, SPEC_PAGE_SIZE};
 use crate::hv_mem::spec::budget::{
-    zone_budget, zone_budget_in_all_regions, zone_budget_pairwise_disjoint, BudgetSpec,
+    zone_regions, zone_regions_in_all_regions, zone_regions_pairwise_disjoint, BudgetSpec,
 };
 use crate::hv_mem::spec::{all_regions, all_regions_disjoint, GhostZone};
 use crate::machine::convert::{
@@ -88,7 +88,7 @@ pub open spec fn region_s2_entries(zid: nat, region: MemoryRegion) -> Map<VmPage
 /// under which removing `r` actually frees its pages.
 pub open spec fn region_pmem_exclusive(gz: GhostZone, r: MemoryRegion) -> bool {
     forall|rr: MemoryRegion| #[trigger]
-        gz.regions().contains(rr) && rr != r ==> !rr.spec_overlaps_pmem(r)
+        gz.cpu_mem_set.regions.contains(rr) && rr != r ==> !rr.spec_overlaps_pmem(r)
 }
 
 // ───────────────────────── per-region page arithmetic ───────────────────────
@@ -226,7 +226,7 @@ pub proof fn lemma_region_to_abstract_entries(zid: nat, r: MemoryRegion)
 /// **Trusted bridge.** If `region` is assignable in a BudgetSpec state, it is
 /// realized by a region in that VM's budget.  This is where the static region
 /// budget enters — as an *implementation-level* assumption relating the abstract,
-/// state-dependent `SoftwareView::is_region_assignable` to `zone_budget`, *not* as a
+/// state-dependent `SoftwareView::is_region_assignable` to `zone_regions`, *not* as a
 /// machine-model assumption.  An axiom, not a deferred proof: `is_region_assignable`
 /// is uninterpreted, so this is a stated platform fact about the trusted interface.
 pub axiom fn axiom_assignable_from_budget(s: BudgetSpec::State, region: Region)
@@ -234,7 +234,7 @@ pub axiom fn axiom_assignable_from_budget(s: BudgetSpec::State, region: Region)
         s@.is_region_assignable(region),
     ensures
         exists|r: MemoryRegion| #[trigger]
-            zone_budget(region.vm.0).contains(r) && region_to_abstract(region.vm.0, r) == region,
+            zone_regions(region.vm.0).contains(r) && region_to_abstract(region.vm.0, r) == region,
 ;
 
 // ───────────────────── mapping ↔ region-page bridges ─────────────────────────
@@ -308,15 +308,18 @@ pub open spec fn zone_owned_pages(gz: GhostZone) -> Set<PhysPage> {
     Set::new(
         |p: PhysPage|
             exists|v: SpecVAddr| #[trigger]
-                gz.mem_set.mappings.contains_key(v) && frame_phys_page(gz.mem_set.mappings[v]) == p,
+                gz.cpu_mem_set.mappings.contains_key(v) && frame_phys_page(
+                    gz.cpu_mem_set.mappings[v],
+                ) == p,
     )
 }
 
 /// Stage-2 entries installed by a zone: one per mapped guest page.
 pub open spec fn zone_s2_entries(zid: nat, gz: GhostZone) -> Map<VmPageKey, S2Entry> {
     Map::new(
-        |k: VmPageKey| k.vm == VmId(zid) && gz.mem_set.mappings.contains_key(vaddr_of_gpa(k.gpa)),
-        |k: VmPageKey| frame_to_s2(gz.mem_set.mappings[vaddr_of_gpa(k.gpa)]),
+        |k: VmPageKey|
+            k.vm == VmId(zid) && gz.cpu_mem_set.mappings.contains_key(vaddr_of_gpa(k.gpa)),
+        |k: VmPageKey| frame_to_s2(gz.cpu_mem_set.mappings[vaddr_of_gpa(k.gpa)]),
     )
 }
 
@@ -326,8 +329,8 @@ pub open spec fn all_budget_pages() -> Set<PhysPage> {
     Set::new(
         |pp: PhysPage|
             exists|zid: nat, r: MemoryRegion|
-                #![trigger zone_budget(zid).contains(r), region_owns_page(r, pp)]
-                zone_budget(zid).contains(r) && region_owns_page(r, pp),
+                #![trigger zone_regions(zid).contains(r), region_owns_page(r, pp)]
+                zone_regions(zid).contains(r) && region_owns_page(r, pp),
     )
 }
 
@@ -391,7 +394,7 @@ pub proof fn lemma_zone_owned_in_all_owned(zones: Map<nat, GhostZone>, zid: nat,
 /// A budget region's pages are all budget pages.
 pub proof fn lemma_region_pages_in_all_budget(zid: nat, r: MemoryRegion)
     requires
-        zone_budget(zid).contains(r),
+        zone_regions(zid).contains(r),
     ensures
         forall|pp: PhysPage| #[trigger]
             region_pages(r).contains(pp) ==> all_budget_pages().contains(pp),
@@ -419,9 +422,9 @@ pub proof fn lemma_zone_s2_target_owned(zid: nat, gz: GhostZone)
         // The key is mapped at v = vaddr_of_gpa(k.gpa); its entry targets that
         // frame's physical page, which the zone owns via the very same v.
         let v = vaddr_of_gpa(k.gpa);
-        assert(gz.mem_set.mappings.contains_key(v));
-        assert(zone_s2_entries(zid, gz)[k].page == frame_phys_page(gz.mem_set.mappings[v]));
-        assert(zone_owned_pages(gz).contains(frame_phys_page(gz.mem_set.mappings[v])));  // witness v
+        assert(gz.cpu_mem_set.mappings.contains_key(v));
+        assert(zone_s2_entries(zid, gz)[k].page == frame_phys_page(gz.cpu_mem_set.mappings[v]));
+        assert(zone_owned_pages(gz).contains(frame_phys_page(gz.cpu_mem_set.mappings[v])));  // witness v
     }
 }
 
@@ -431,17 +434,18 @@ pub proof fn lemma_zone_owned_pages_region_witness(gz: GhostZone, p: PhysPage)
         gz.wf(),
         zone_owned_pages(gz).contains(p),
     ensures
-        exists|r: MemoryRegion| #[trigger] gz.regions().contains(r) && region_owns_page(r, p),
+        exists|r: MemoryRegion| #[trigger]
+            gz.cpu_mem_set.regions.contains(r) && region_owns_page(r, p),
 {
     let v = choose|v: SpecVAddr| #[trigger]
-        gz.mem_set.mappings.contains_key(v) && frame_phys_page(gz.mem_set.mappings[v]) == p;
-    let f = gz.mem_set.mappings[v];
-    assert(gz.mem_set.mappings.contains_pair(v, f));
+        gz.cpu_mem_set.mappings.contains_key(v) && frame_phys_page(gz.cpu_mem_set.mappings[v]) == p;
+    let f = gz.cpu_mem_set.mappings[v];
+    assert(gz.cpu_mem_set.mappings.contains_pair(v, f));
     // exact-dense soundness: (v, f) is exactly some region page and its frame.
     let (r, i) = choose|r: MemoryRegion, i: nat|
-        gz.regions().contains(r) && 0 <= i < r.pages && v == r.spec_page_vaddr(i) && f
+        gz.cpu_mem_set.regions.contains(r) && 0 <= i < r.pages && v == r.spec_page_vaddr(i) && f
             == r.spec_frame(i);
-    assert(gz.regions().contains(r) && 0 <= i < r.pages && v == r.spec_page_vaddr(i) && f
+    assert(gz.cpu_mem_set.regions.contains(r) && 0 <= i < r.pages && v == r.spec_page_vaddr(i) && f
         == r.spec_frame(i));
     assert(region_phys_page(r, i) == p);
     assert(region_owns_page(r, p));  // witness i
@@ -450,7 +454,7 @@ pub proof fn lemma_zone_owned_pages_region_witness(gz: GhostZone, p: PhysPage)
 /// An empty page table owns no pages.
 pub proof fn lemma_zone_owned_pages_empty(gz: GhostZone)
     requires
-        gz.mem_set.mappings =~= Map::<SpecVAddr, SpecFrame>::empty(),
+        gz.cpu_mem_set.mappings =~= Map::<SpecVAddr, SpecFrame>::empty(),
     ensures
         zone_owned_pages(gz) =~= Set::<PhysPage>::empty(),
 {
@@ -459,7 +463,7 @@ pub proof fn lemma_zone_owned_pages_empty(gz: GhostZone)
 /// An empty page table installs no stage-2 entries.
 pub proof fn lemma_zone_s2_entries_empty(zid: nat, gz: GhostZone)
     requires
-        gz.mem_set.mappings =~= Map::<SpecVAddr, SpecFrame>::empty(),
+        gz.cpu_mem_set.mappings =~= Map::<SpecVAddr, SpecFrame>::empty(),
     ensures
         zone_s2_entries(zid, gz) =~= Map::<VmPageKey, S2Entry>::empty(),
 {
@@ -495,31 +499,31 @@ pub proof fn lemma_state_owned_pages_disjoint(s: BudgetSpec::State)
             lemma_zone_owned_pages_region_witness(gz2, p);
 
             let r1 = choose|r: MemoryRegion|
-                #![trigger gz1.regions().contains(r)]
-                gz1.regions().contains(r) && region_owns_page(r, p);
-            assert(gz1.regions().contains(r1) && region_owns_page(r1, p));
+                #![trigger gz1.cpu_mem_set.regions.contains(r)]
+                gz1.cpu_mem_set.regions.contains(r) && region_owns_page(r, p);
+            assert(gz1.cpu_mem_set.regions.contains(r1) && region_owns_page(r1, p));
             let i1 = choose|i: nat| 0 <= i < r1.pages && region_phys_page(r1, i) == p;
             assert(0 <= i1 < r1.pages && region_phys_page(r1, i1) == p);
 
             let r2 = choose|r: MemoryRegion|
-                #![trigger gz2.regions().contains(r)]
-                gz2.regions().contains(r) && region_owns_page(r, p);
-            assert(gz2.regions().contains(r2) && region_owns_page(r2, p));
+                #![trigger gz2.cpu_mem_set.regions.contains(r)]
+                gz2.cpu_mem_set.regions.contains(r) && region_owns_page(r, p);
+            assert(gz2.cpu_mem_set.regions.contains(r2) && region_owns_page(r2, p));
             let i2 = choose|i: nat| 0 <= i < r2.pages && region_phys_page(r2, i) == p;
             assert(0 <= i2 < r2.pages && region_phys_page(r2, i2) == p);
 
             assert(r1.spec_valid());
             assert(r2.spec_valid());
 
-            assert(gz1.contains_region(r1));
-            assert(gz2.contains_region(r2));
-            assert(zone_budget(zid1).contains(r1));
-            assert(zone_budget(zid2).contains(r2));
+            assert(gz1.cpu_mem_set.regions.contains(r1));
+            assert(gz2.cpu_mem_set.regions.contains(r2));
+            assert(zone_regions(zid1).contains(r1));
+            assert(zone_regions(zid2).contains(r2));
 
-            zone_budget_pairwise_disjoint();
-            assert(!zone_budget(zid2).contains(r1));
+            zone_regions_pairwise_disjoint();
+            assert(!zone_regions(zid2).contains(r1));
             assert(r1 != r2);
-            zone_budget_in_all_regions();
+            zone_regions_in_all_regions();
             assert(all_regions().contains(r1) && all_regions().contains(r2));
             all_regions_disjoint();
             assert(!r1.spec_overlaps_pmem(r2));
@@ -536,7 +540,7 @@ pub proof fn lemma_state_owned_pages_disjoint(s: BudgetSpec::State)
 pub proof fn lemma_region_in_zone_owns_pages(gz: GhostZone, r: MemoryRegion)
     requires
         gz.wf(),
-        gz.contains_region(r),
+        gz.cpu_mem_set.regions.contains(r),
     ensures
         forall|p: PhysPage| #[trigger]
             region_pages(r).contains(p) ==> zone_owned_pages(gz).contains(p),
@@ -547,9 +551,9 @@ pub proof fn lemma_region_in_zone_owns_pages(gz: GhostZone, r: MemoryRegion)
     ) by {
         let i = choose|i: nat| 0 <= i < r.pages && region_phys_page(r, i) == p;
         let v = r.spec_page_vaddr(i);
-        assert(gz.regions().contains(r));
-        assert(gz.mem_set.mappings.contains_pair(v, r.spec_frame(i)));  // completeness clause
-        assert(frame_phys_page(gz.mem_set.mappings[v]) == p);
+        assert(gz.cpu_mem_set.regions.contains(r));
+        assert(gz.cpu_mem_set.mappings.contains_pair(v, r.spec_frame(i)));  // completeness clause
+        assert(frame_phys_page(gz.cpu_mem_set.mappings[v]) == p);
         assert(zone_owned_pages(gz).contains(p));  // witness v
     }
 }
@@ -558,16 +562,16 @@ pub proof fn lemma_region_in_zone_owns_pages(gz: GhostZone, r: MemoryRegion)
 pub proof fn lemma_region_in_zone_maps_gpa(gz: GhostZone, r: MemoryRegion, g: GuestPage)
     requires
         gz.wf(),
-        gz.contains_region(r),
+        gz.cpu_mem_set.regions.contains(r),
         region_owns_gpa(r, g),
     ensures
-        gz.mem_set.mappings.contains_key(vaddr_of_gpa(g)),
+        gz.cpu_mem_set.mappings.contains_key(vaddr_of_gpa(g)),
 {
     assert(r.spec_valid());  // r ∈ regions, gz.wf() ⇒ valid
     let i = choose|i: nat| 0 <= i < r.pages && region_guest_page(r, i) == g;
     let v = r.spec_page_vaddr(i);
-    assert(gz.regions().contains(r));
-    assert(gz.mem_set.mappings.contains_pair(v, r.spec_frame(i)));  // completeness clause
+    assert(gz.cpu_mem_set.regions.contains(r));
+    assert(gz.cpu_mem_set.mappings.contains_pair(v, r.spec_frame(i)));  // completeness clause
     lemma_gpa_vaddr_roundtrip(r, i);  // vaddr_of_gpa(region_guest_page(r,i)) == spec_page_vaddr(i)
     assert(vaddr_of_gpa(g) == v);
 }

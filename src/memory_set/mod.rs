@@ -105,6 +105,157 @@ impl SpecMemorySet {
             mappings: self.mappings.remove_keys(removed.spec_mappings().dom()),
         }
     }
+
+    /// Remove a specific region (by value) from the memory set, returning the new memory set.
+    ///
+    /// `remove_region(start)` equals `remove_region_exact(r)` for the unique region `r`
+    /// starting at `start` (regions are vmem-disjoint, so `start` determines `r`).
+    pub open spec fn remove_region_exact(&self, region: MemoryRegion) -> Self {
+        Self {
+            regions: self.regions.remove(region),
+            mappings: self.mappings.remove_keys(region.spec_mappings().dom()),
+        }
+    }
+
+    /// Inserting a fresh non-overlapping valid region keeps the memory set well-formed:
+    /// the page table grows by exactly the region's dense mappings, and the new
+    /// region's pages are vmem-disjoint from all old ones, so the exact-dense
+    /// consistency is preserved.
+    pub proof fn lemma_insert_region_wf(self, region: MemoryRegion)
+        requires
+            self.wf(),
+            region.spec_valid(),
+            !self.overlaps_vmem(region),
+            !self.regions.contains(region),
+        ensures
+            self.insert_region(region).wf(),
+    {
+        let new = self.insert_region(region);
+        let old_maps = self.mappings;
+        let region_maps = region.spec_mappings();
+        assert(new.regions =~= self.regions.insert(region));
+        assert(new.mappings == old_maps.union_prefer_right(region_maps));
+
+        // 1. regions valid
+        assert forall|r: MemoryRegion| #[trigger]
+            new.regions.contains(r) implies r.spec_valid() by {
+            if r != region {
+                assert(self.regions.contains(r));
+            }
+        }
+        // 2. regions non-overlapping (the new region vs each old one, both directions)
+        assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
+            new.regions.contains(r1) && #[trigger] new.regions.contains(r2) && r1
+                != r2 implies !r1.spec_overlaps_vmem(r2) by {
+            if r1 == region {
+                assert(self.regions.contains(r2) && !r2.spec_overlaps_vmem(region));
+                r2.lemma_overlaps_vmem_symmetric(region);
+            } else if r2 == region {
+                assert(self.regions.contains(r1) && !r1.spec_overlaps_vmem(region));
+            } else {
+                assert(self.regions.contains(r1) && self.regions.contains(r2));
+            }
+        }
+        // 3. completeness: every region page is mapped to its frame
+        assert forall|r: MemoryRegion, i: nat|
+            #![trigger new.regions.contains(r), r.spec_page_vaddr(i)]
+            new.regions.contains(r) && 0 <= i
+                < r.pages implies new.mappings.contains_pair(
+            r.spec_page_vaddr(i),
+            r.spec_frame(i),
+        ) by {
+            if r == region {
+                region.lemma_mappings_contains_pair(i);
+            } else {
+                assert(self.regions.contains(r));
+                assert(!region_maps.contains_key(r.spec_page_vaddr(i))) by {
+                    if region_maps.contains_key(r.spec_page_vaddr(i)) {
+                        let j = choose|j: nat|
+                            0 <= j < region.pages && r.spec_page_vaddr(i) == region.spec_page_vaddr(
+                                j,
+                            );
+                        MemoryRegion::lemma_pages_disjoint(r, region, i, j);
+                    }
+                }
+            }
+        }
+        // 4. soundness: every mapping is some region page's frame
+        assert forall|v: SpecVAddr, f: SpecFrame| #[trigger]
+            new.mappings.contains_pair(v, f) implies exists|r: MemoryRegion, i: nat|
+            #![trigger new.regions.contains(r), r.spec_page_vaddr(i)]
+            new.regions.contains(r) && 0 <= i < r.pages && v == r.spec_page_vaddr(i) && f
+                == r.spec_frame(i) by {
+            if region_maps.contains_key(v) {
+                region.lemma_mappings_sound(v);
+                assert(new.regions.contains(region));
+            } else {
+                assert(self.mappings.contains_pair(v, f));
+                let (r2, i2) = choose|r2: MemoryRegion, i2: nat|
+                    self.regions.contains(r2) && 0 <= i2 < r2.pages && v == r2.spec_page_vaddr(i2)
+                        && f == r2.spec_frame(i2);
+                assert(new.regions.contains(r2));
+            }
+        }
+    }
+
+    /// Removing a present region keeps the memory set well-formed: its (vmem-disjoint)
+    /// keys are deleted, leaving exactly the other regions' dense mappings.
+    pub proof fn lemma_remove_region_exact_wf(self, region: MemoryRegion)
+        requires
+            self.wf(),
+            self.regions.contains(region),
+        ensures
+            self.remove_region_exact(region).wf(),
+    {
+        let new = self.remove_region_exact(region);
+        let region_maps = region.spec_mappings();
+        assert(new.regions =~= self.regions.remove(region));
+        assert(new.mappings == self.mappings.remove_keys(region_maps.dom()));
+        assert(region.spec_valid());  // region ∈ regions, self.wf() ⇒ valid
+
+        // 1 & 2: regions are a subset of the old ones.
+        assert forall|r: MemoryRegion| #[trigger]
+            new.regions.contains(r) implies r.spec_valid() by {
+            assert(self.regions.contains(r));
+        }
+        assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
+            new.regions.contains(r1) && #[trigger] new.regions.contains(r2) && r1
+                != r2 implies !r1.spec_overlaps_vmem(r2) by {
+            assert(self.regions.contains(r1) && self.regions.contains(r2));
+        }
+        // 3. completeness: remaining region pages are not `region`'s pages, so they survive.
+        assert forall|r: MemoryRegion, i: nat|
+            #![trigger new.regions.contains(r), r.spec_page_vaddr(i)]
+            new.regions.contains(r) && 0 <= i
+                < r.pages implies new.mappings.contains_pair(
+            r.spec_page_vaddr(i),
+            r.spec_frame(i),
+        ) by {
+            assert(self.regions.contains(r) && r != region);
+            assert(!region_maps.dom().contains(r.spec_page_vaddr(i))) by {
+                if region_maps.contains_key(r.spec_page_vaddr(i)) {
+                    let j = choose|j: nat|
+                        0 <= j < region.pages && r.spec_page_vaddr(i) == region.spec_page_vaddr(j);
+                    MemoryRegion::lemma_pages_disjoint(r, region, i, j);
+                }
+            }
+        }
+        // 4. soundness: surviving mappings come from a remaining region (not `region`).
+        assert forall|v: SpecVAddr, f: SpecFrame| #[trigger]
+            new.mappings.contains_pair(v, f) implies exists|r: MemoryRegion, i: nat|
+            #![trigger new.regions.contains(r), r.spec_page_vaddr(i)]
+            new.regions.contains(r) && 0 <= i < r.pages && v == r.spec_page_vaddr(i) && f
+                == r.spec_frame(i) by {
+            assert(self.mappings.contains_pair(v, f));
+            let (r, i) = choose|r: MemoryRegion, i: nat|
+                self.regions.contains(r) && 0 <= i < r.pages && v == r.spec_page_vaddr(i) && f
+                    == r.spec_frame(i);
+            if r == region {
+                region.lemma_mappings_contains_pair(i);  // ⇒ v ∈ region's keys: contradiction
+            }
+            assert(new.regions.contains(r));
+        }
+    }
 }
 
 /// Specification of a memory set viewed by higher-level components.

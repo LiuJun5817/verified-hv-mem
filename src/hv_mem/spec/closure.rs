@@ -169,7 +169,7 @@ tokenized_state_machine! {
         /// P2 (ZoneIsolated): every mapped translation in a zone stays within the declaring
         /// region's physical range.
         ///
-        /// Derivation: `inv_zones_wf` gives `zone.wf()` which includes `zone.mem_set.wf()`,
+        /// Derivation: `inv_zones_wf` gives `zone.wf()` which includes `zone.cpu_mem_set.wf()`,
         /// so every region `r` in the zone satisfies `r.spec_valid()`.  For any virtual
         /// address `v` mapped in the zone, `SpecMemorySet::translate` chooses the same `r`
         /// that `contains_vaddr` witnesses.  `MemoryRegion::lemma_contains_vaddr_implies_contains_paddr`
@@ -177,23 +177,23 @@ tokenized_state_machine! {
         property! {
             zone_isolated(zid: nat, zone: GhostZone, v: SpecVAddr) {
                 have zones >= [zid => zone];
-                require(zone.mem_set.contains_vaddr(v));
+                require(zone.cpu_mem_set.contains_vaddr(v));
                 assert(zone.wf());
                 assert({
-                    let paddr = zone.mem_set.translate(v);
+                    let paddr = zone.cpu_mem_set.translate(v);
                     // Same predicate as `contains_vaddr` / `translate`, so the same
                     // region witness is chosen.
                     let r = choose|r: MemoryRegion|
-                        zone.mem_set.regions.contains(r) && #[trigger] r.spec_contains_vaddr(v);
+                        zone.cpu_mem_set.regions.contains(r) && #[trigger] r.spec_contains_vaddr(v);
                     r.spec_contains_paddr(paddr)
                 }) by {
-                    // inv_zones_wf => zone.wf() => zone.mem_set.wf()
-                    let paddr = zone.mem_set.translate(v);
-                    assert(zone.mem_set.wf());
-                    assert(zone.mem_set.contains_vaddr(v));  // from require
+                    // inv_zones_wf => zone.wf() => zone.cpu_mem_set.wf()
+                    let paddr = zone.cpu_mem_set.translate(v);
+                    assert(zone.cpu_mem_set.wf());
+                    assert(zone.cpu_mem_set.contains_vaddr(v));  // from require
                     let r = choose|r: MemoryRegion|
-                        zone.mem_set.regions.contains(r) && #[trigger] r.spec_contains_vaddr(v);
-                    assert(zone.mem_set.regions.contains(r) && r.spec_contains_vaddr(v));
+                        zone.cpu_mem_set.regions.contains(r) && #[trigger] r.spec_contains_vaddr(v);
+                    assert(zone.cpu_mem_set.regions.contains(r) && r.spec_contains_vaddr(v));
                     assert(r.spec_valid());
                     r.lemma_contains_vaddr_implies_contains_paddr(v);
                     assert(r.spec_contains_paddr(paddr));
@@ -219,7 +219,8 @@ tokenized_state_machine! {
                 require(!pre.zone_ids.contains(zid));
                 update zone_ids = pre.zone_ids.insert(zid);
                 add zones += [zid => GhostZone {
-                    mem_set: SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
+                    cpu_mem_set: SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
+                    iommu_mem_set: SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
                 }];
                 // region_closure is unchanged — empty zone contributes no regions.
             }
@@ -251,7 +252,7 @@ tokenized_state_machine! {
                 remove zones -= [zid => let zone];
                 require(region.spec_valid());
                 require(all_regions().contains(region));
-                require(!zone.mem_set.overlaps_vmem(region));
+                require(!zone.cpu_mem_set.overlaps_vmem(region));
                 require(!pre.region_closure.contains(region));
                 add zones += [zid => zone.insert_region(region)];
                 update region_closure = pre.region_closure.insert(region);
@@ -395,10 +396,17 @@ tokenized_state_machine! {
                     assert(old_zone.wf());
                     assert(new_zone == old_zone.insert_region(region));
                     // `region` is not already in this zone: `!pre.region_closure.contains(region)`
-                    // + `inv_region_closure` ⇒ it is in no zone.  Then the GhostZone
-                    // wf-preservation lemma discharges `new_zone.wf()`.
-                    assert(!old_zone.contains_region(region));
-                    old_zone.lemma_insert_region_wf(region);
+                    // + `inv_region_closure` ⇒ it is in no zone.  Then the SpecMemorySet
+                    // wf-preservation lemma discharges `new_zone.cpu_mem_set.wf()`.
+                    assert(!old_zone.contains_region(region)) by {
+                        if old_zone.contains_region(region) {
+                            assert(pre.region_closure.contains(region));
+                        }
+                    }
+                    assert(!old_zone.cpu_mem_set.regions.contains(region));
+                    assert(new_zone.cpu_mem_set == old_zone.cpu_mem_set.insert_region(region));
+                    old_zone.cpu_mem_set.lemma_insert_region_wf(region);
+                    assert(new_zone.iommu_mem_set == old_zone.iommu_mem_set);
                     assert(new_zone.wf());
                 } else {
                     assert(post.zones[zid2] == pre.zones[zid2]);

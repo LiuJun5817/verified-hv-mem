@@ -20,9 +20,9 @@ use super::view::*;
 use crate::address::addr::SpecVAddr;
 use crate::address::frame::SpecFrame;
 use crate::address::region::MemoryRegion;
-use crate::machine::convert::{frame_phys_page, vaddr_of_gpa};
-use crate::hv_mem::spec::budget::{zone_budget, zone_budget_in_all_regions, BudgetSpec};
+use crate::hv_mem::spec::budget::{zone_regions, zone_regions_in_all_regions, BudgetSpec};
 use crate::hv_mem::spec::{all_regions, all_regions_disjoint, all_regions_valid, GhostZone};
+use crate::machine::convert::{frame_phys_page, vaddr_of_gpa};
 use crate::machine::software::{Region, SoftwareView};
 use crate::machine::types::*;
 use crate::memory_set::SpecMemorySet;
@@ -134,7 +134,11 @@ impl SoftwareRefinement for BudgetSpec::State {
     proof fn add_vm(self, vm: VmId) -> (post: Self) {
         // Fire the `add_zone` macro transition; `post.invariant()` comes from the macro.
         let empty_zone = GhostZone {
-            mem_set: SpecMemorySet {
+            cpu_mem_set: SpecMemorySet {
+                regions: Set::<MemoryRegion>::empty(),
+                mappings: Map::empty(),
+            },
+            iommu_mem_set: SpecMemorySet {
                 regions: Set::<MemoryRegion>::empty(),
                 mappings: Map::empty(),
             },
@@ -219,8 +223,8 @@ impl SoftwareRefinement for BudgetSpec::State {
         // (1) Recover the budget region via the trusted environment bridge.
         axiom_assignable_from_budget(self, region);
         let r = choose|r: MemoryRegion|
-            zone_budget(zid).contains(r) && region_to_abstract(zid, r) == region;
-        zone_budget_in_all_regions();
+            zone_regions(zid).contains(r) && region_to_abstract(zid, r) == region;
+        zone_regions_in_all_regions();
         all_regions_valid();
         assert(all_regions().contains(r) && r.spec_valid());
 
@@ -237,7 +241,7 @@ impl SoftwareRefinement for BudgetSpec::State {
         assert(region.wf());  // enabled ⇒ count > 0
         assert(region.pages().contains(p0));
         // !contains_region(r): r's pages are free, but a contained region's pages are owned.
-        if gz.contains_region(r) {
+        if gz.cpu_mem_set.regions.contains(r) {
             lemma_region_in_zone_owns_pages(gz, r);
             assert(zone_owned_pages(gz).contains(p0));
             lemma_zone_owned_in_all_owned(self.zones, zid, p0);  // p0 ∈ all_owned
@@ -247,13 +251,13 @@ impl SoftwareRefinement for BudgetSpec::State {
         }
         // !overlaps_vmem(r): an overlapping zone region shares a gpa, which is mapped.
 
-        if gz.mem_set.overlaps_vmem(r) {
+        if gz.cpu_mem_set.overlaps_vmem(r) {
             let r2 = choose|r2: MemoryRegion|
-                gz.mem_set.regions.contains(r2) && r2.spec_overlaps_vmem(r);
+                gz.cpu_mem_set.regions.contains(r2) && r2.spec_overlaps_vmem(r);
             assert(r2.spec_valid());  // mem_set.wf ⇒ regions valid
             lemma_vmem_overlap_implies_shared_gpa(r2, r);
             let g = choose|g: GuestPage| region_owns_gpa(r2, g) && region_owns_gpa(r, g);
-            assert(gz.contains_region(r2));
+            assert(gz.cpu_mem_set.regions.contains(r2));
             lemma_region_in_zone_maps_gpa(gz, r2, g);
             let k = VmPageKey { vm, gpa: g };
             assert(zone_s2_entries(zid, gz).contains_key(k));  // ⇒ k ∈ self@.s2_map
@@ -263,7 +267,7 @@ impl SoftwareRefinement for BudgetSpec::State {
         }
         // (4) Fire the `insert_region` macro transition; `post.invariant()` from the macro.
 
-        let post = BudgetSpec::take_step::insert_region(self, zid, r);
+        let post = BudgetSpec::take_step::cpu_insert_region(self, zid, r);
         assert(post.zone_ids == self.zone_ids);
         assert(post.zones == self.zones.insert(zid, self.zones[zid].insert_region(r)));
 
@@ -292,8 +296,8 @@ impl SoftwareRefinement for BudgetSpec::State {
         // (1) Recover the budget region via the trusted environment bridge.
         axiom_assignable_from_budget(self, region);
         let r = choose|r: MemoryRegion|
-            zone_budget(zid).contains(r) && region_to_abstract(zid, r) == region;
-        zone_budget_in_all_regions();
+            zone_regions(zid).contains(r) && region_to_abstract(zid, r) == region;
+        zone_regions_in_all_regions();
         all_regions_valid();
         all_regions_disjoint();
         assert(all_regions().contains(r) && r.spec_valid());
@@ -314,9 +318,10 @@ impl SoftwareRefinement for BudgetSpec::State {
         assert(self@.vm_owned[vm].contains(p0));  // enabled ⇒ region.pages() ⊆ vm_owned
         assert(self@.vm_owned[vm] == zone_owned_pages(gz));  // view
         lemma_zone_owned_pages_region_witness(gz, p0);
-        let r2 = choose|rr: MemoryRegion| gz.regions().contains(rr) && region_owns_page(rr, p0);
-        assert(gz.contains_region(r2));
-        assert(zone_budget(zid).contains(r2));  // inv: zone regions ⊆ budget
+        let r2 = choose|rr: MemoryRegion|
+            gz.cpu_mem_set.regions.contains(rr) && region_owns_page(rr, p0);
+        assert(gz.cpu_mem_set.regions.contains(r2));
+        assert(zone_regions(zid).contains(r2));  // inv: zone regions ⊆ budget
         assert(all_regions().contains(r2) && r2.spec_valid());
         if r2 != r {
             let i2 = choose|i: nat| 0 <= i < r2.pages && region_phys_page(r2, i) == p0;
@@ -325,20 +330,22 @@ impl SoftwareRefinement for BudgetSpec::State {
             assert(!r2.spec_overlaps_pmem(r));  // all_regions_disjoint
             assert(false);
         }
-        assert(gz.contains_region(r));
+        assert(gz.cpu_mem_set.regions.contains(r));
 
         // pmem-exclusivity holds for any budget region: distinct `all_regions` are disjoint.
         assert(region_pmem_exclusive(gz, r)) by {
             assert forall|rr: MemoryRegion|
-                gz.regions().contains(rr) && rr != r implies !rr.spec_overlaps_pmem(r) by {
-                assert(gz.contains_region(rr));  // fires the budget inv
-                assert(zone_budget(zid).contains(rr));  // inv
+                gz.cpu_mem_set.regions.contains(rr) && rr != r implies !rr.spec_overlaps_pmem(
+                r,
+            ) by {
+                assert(gz.cpu_mem_set.regions.contains(rr));  // fires the budget inv
+                assert(zone_regions(zid).contains(rr));  // inv
                 assert(all_regions().contains(rr));
             }
         }
 
         // (4) Fire the `remove_region` macro transition; `post.invariant()` from the macro.
-        let post = BudgetSpec::take_step::remove_region(self, zid, r);
+        let post = BudgetSpec::take_step::cpu_remove_region(self, zid, r);
         assert(post.zone_ids == self.zone_ids);
         assert(post.zones == self.zones.insert(zid, self.zones[zid].remove_region(r)));
 
@@ -367,16 +374,16 @@ pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion
     requires
         gz.wf(),
         region.spec_valid(),
-        !gz.mem_set.overlaps_vmem(region),
+        !gz.cpu_mem_set.overlaps_vmem(region),
     ensures
         zone_owned_pages(gz.insert_region(region)) =~= zone_owned_pages(gz).union(
             region_pages(region),
         ),
 {
     let new_gz = gz.insert_region(region);
-    let om = gz.mem_set.mappings;
+    let om = gz.cpu_mem_set.mappings;
     let rm = region.spec_mappings();
-    assert(new_gz.mem_set.mappings == om.union_prefer_right(rm));
+    assert(new_gz.cpu_mem_set.mappings == om.union_prefer_right(rm));
 
     // Key domains are disjoint.
     assert forall|v: SpecVAddr| om.contains_key(v) implies !rm.contains_key(v) by {
@@ -386,9 +393,9 @@ pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion
             let f = om[v];
             assert(om.contains_pair(v, f));
             let (r2, i2) = choose|r2: MemoryRegion, i2: nat|
-                gz.regions().contains(r2) && 0 <= i2 < r2.pages && v == r2.spec_page_vaddr(i2) && f
-                    == r2.spec_frame(i2);
-            assert(gz.regions().contains(r2));
+                gz.cpu_mem_set.regions.contains(r2) && 0 <= i2 < r2.pages && v
+                    == r2.spec_page_vaddr(i2) && f == r2.spec_frame(i2);
+            assert(gz.cpu_mem_set.regions.contains(r2));
             assert(!r2.spec_overlaps_vmem(region));
             MemoryRegion::lemma_pages_disjoint(r2, region, i2, j);  // r2 page i2 != region page j == v
         }
@@ -401,19 +408,19 @@ pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion
         // (⟹)
         if zone_owned_pages(new_gz).contains(p) {
             let v = choose|v: SpecVAddr| #[trigger]
-                new_gz.mem_set.mappings.contains_key(v) && frame_phys_page(
-                    new_gz.mem_set.mappings[v],
+                new_gz.cpu_mem_set.mappings.contains_key(v) && frame_phys_page(
+                    new_gz.cpu_mem_set.mappings[v],
                 ) == p;
             if rm.contains_key(v) {
                 region.lemma_mappings_sound(v);
                 let i = choose|i: nat|
                     0 <= i < region.pages && v == region.spec_page_vaddr(i) && rm[v]
                         == region.spec_frame(i);
-                assert(new_gz.mem_set.mappings[v] == rm[v]);
+                assert(new_gz.cpu_mem_set.mappings[v] == rm[v]);
                 assert(region_phys_page(region, i) == p);
                 assert(region_owns_page(region, p));  // witness i
             } else {
-                assert(om.contains_key(v) && new_gz.mem_set.mappings[v] == om[v]);
+                assert(om.contains_key(v) && new_gz.cpu_mem_set.mappings[v] == om[v]);
                 assert(zone_owned_pages(gz).contains(p));  // witness v
             }
         }
@@ -423,7 +430,8 @@ pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion
             let v = choose|v: SpecVAddr| #[trigger]
                 om.contains_key(v) && frame_phys_page(om[v]) == p;
             assert(!rm.contains_key(v));
-            assert(new_gz.mem_set.mappings.contains_key(v) && new_gz.mem_set.mappings[v] == om[v]);
+            assert(new_gz.cpu_mem_set.mappings.contains_key(v) && new_gz.cpu_mem_set.mappings[v]
+                == om[v]);
             assert(zone_owned_pages(new_gz).contains(p));  // witness v
         }
         // (⟸ region)
@@ -433,7 +441,7 @@ pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion
             region.lemma_mappings_contains_pair(i);
             let v = region.spec_page_vaddr(i);
             assert(rm.contains_pair(v, region.spec_frame(i)));
-            assert(new_gz.mem_set.mappings.contains_key(v) && new_gz.mem_set.mappings[v]
+            assert(new_gz.cpu_mem_set.mappings.contains_key(v) && new_gz.cpu_mem_set.mappings[v]
                 == region.spec_frame(i));
             assert(frame_phys_page(region.spec_frame(i)) == p);
             assert(zone_owned_pages(new_gz).contains(p));  // witness v
@@ -448,7 +456,7 @@ pub proof fn lemma_insert_region_all_owned(zones: Map<nat, GhostZone>, zid: nat,
         zones.contains_key(zid),
         zones[zid].wf(),
         r.spec_valid(),
-        !zones[zid].mem_set.overlaps_vmem(r),
+        !zones[zid].cpu_mem_set.overlaps_vmem(r),
     ensures
         all_owned_pages(zones.insert(zid, zones[zid].insert_region(r))) =~= all_owned_pages(
             zones,
@@ -499,16 +507,16 @@ pub proof fn lemma_insert_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRe
     requires
         gz.wf(),
         r.spec_valid(),
-        !gz.mem_set.overlaps_vmem(r),
+        !gz.cpu_mem_set.overlaps_vmem(r),
     ensures
         zone_s2_entries(zid, gz.insert_region(r)) =~= zone_s2_entries(zid, gz).union_prefer_right(
             region_s2_entries(zid, r),
         ),
 {
     let new_gz = gz.insert_region(r);
-    let om = gz.mem_set.mappings;
+    let om = gz.cpu_mem_set.mappings;
     let rm = r.spec_mappings();
-    let nm = new_gz.mem_set.mappings;
+    let nm = new_gz.cpu_mem_set.mappings;
     assert(nm == om.union_prefer_right(rm));
     let zg = zone_s2_entries(zid, gz);
     let re = region_s2_entries(zid, r);
@@ -546,7 +554,7 @@ pub proof fn lemma_insert_region_state_s2_map(
         pre.invariant(),
         pre.zones.contains_key(zid),
         r.spec_valid(),
-        !pre.zones[zid].mem_set.overlaps_vmem(r),
+        !pre.zones[zid].cpu_mem_set.overlaps_vmem(r),
         post.zone_ids == pre.zone_ids,
         post.zones == pre.zones.insert(zid, pre.zones[zid].insert_region(r)),
     ensures
@@ -585,15 +593,15 @@ pub proof fn lemma_insert_region_state_s2_map(
 pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
     requires
         gz.wf(),
-        gz.contains_region(r),
+        gz.cpu_mem_set.regions.contains(r),
         region_pmem_exclusive(gz, r),
     ensures
         zone_owned_pages(gz.remove_region(r)) =~= zone_owned_pages(gz).difference(region_pages(r)),
 {
     let new_gz = gz.remove_region(r);
-    let om = gz.mem_set.mappings;
+    let om = gz.cpu_mem_set.mappings;
     let rm = r.spec_mappings();
-    let nm = new_gz.mem_set.mappings;
+    let nm = new_gz.cpu_mem_set.mappings;
     assert(nm == om.remove_keys(rm.dom()));
     assert(r.spec_valid());  // r ∈ regions, gz.wf() ⇒ valid
 
@@ -611,9 +619,9 @@ pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
                 let f = om[v];
                 assert(om.contains_pair(v, f));
                 let (r2, i2) = choose|r2: MemoryRegion, i2: nat|
-                    gz.regions().contains(r2) && 0 <= i2 < r2.pages && v == r2.spec_page_vaddr(i2)
-                        && f == r2.spec_frame(i2);
-                assert(gz.regions().contains(r2));
+                    gz.cpu_mem_set.regions.contains(r2) && 0 <= i2 < r2.pages && v
+                        == r2.spec_page_vaddr(i2) && f == r2.spec_frame(i2);
+                assert(gz.cpu_mem_set.regions.contains(r2));
                 assert(region_phys_page(r2, i2) == p);
                 if r2 == r {
                     r.lemma_mappings_contains_pair(i2);  // ⇒ v ∈ rm.dom(): contradiction
@@ -621,7 +629,7 @@ pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
                 assert(r2 != r);
                 assert(r2.spec_valid());
                 assert(!r2.spec_overlaps_pmem(r));  // region_pmem_exclusive
-                assert(gz.regions().contains(r));  // from contains_region(r)
+                assert(gz.cpu_mem_set.regions.contains(r));  // from contains_region(r)
                 lemma_same_phys_page_implies_pmem_overlap(r2, i2, r, i);
                 assert(false);
             }
@@ -636,7 +644,7 @@ pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
                 let i = choose|i: nat|
                     0 <= i < r.pages && v == r.spec_page_vaddr(i) && rm[v] == r.spec_frame(i);
                 // gz.wf() completeness pins om[v] to r's frame, so p is one of r's pages.
-                assert(gz.regions().contains(r));
+                assert(gz.cpu_mem_set.regions.contains(r));
                 assert(om.contains_pair(r.spec_page_vaddr(i), r.spec_frame(i)));
                 assert(om[v] == r.spec_frame(i));
                 assert(region_phys_page(r, i) == p);
@@ -655,7 +663,7 @@ pub proof fn lemma_remove_region_all_owned(pre: BudgetSpec::State, zid: nat, r: 
     requires
         pre.invariant(),
         pre.zones.contains_key(zid),
-        pre.zones[zid].contains_region(r),
+        pre.zones[zid].cpu_mem_set.regions.contains(r),
         region_pmem_exclusive(pre.zones[zid], r),
     ensures
         all_owned_pages(pre.zones.insert(zid, pre.zones[zid].remove_region(r))) =~= all_owned_pages(
@@ -674,10 +682,10 @@ pub proof fn lemma_remove_region_all_owned(pre: BudgetSpec::State, zid: nat, r: 
         region_pages(r).contains(p) implies zone_owned_pages(zones[zid]).contains(p) by {
         let i = choose|i: nat| 0 <= i < r.pages && region_phys_page(r, i) == p;
         let v = r.spec_page_vaddr(i);
-        assert(zones[zid].regions().contains(r));
+        assert(zones[zid].cpu_mem_set.regions.contains(r));
         // completeness clause of `zones[zid].wf()` fires on (r, i):
-        assert(zones[zid].mem_set.mappings.contains_pair(v, r.spec_frame(i)));
-        assert(frame_phys_page(zones[zid].mem_set.mappings[v]) == p);
+        assert(zones[zid].cpu_mem_set.mappings.contains_pair(v, r.spec_frame(i)));
+        assert(frame_phys_page(zones[zid].cpu_mem_set.mappings[v]) == p);
         assert(zone_owned_pages(zones[zid]).contains(p));  // witness v
     }
 
@@ -721,16 +729,16 @@ pub proof fn lemma_remove_region_all_owned(pre: BudgetSpec::State, zid: nat, r: 
 pub proof fn lemma_remove_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRegion)
     requires
         gz.wf(),
-        gz.contains_region(r),
+        gz.cpu_mem_set.regions.contains(r),
     ensures
         zone_s2_entries(zid, gz.remove_region(r)) =~= zone_s2_entries(zid, gz).remove_keys(
             region_s2_entries(zid, r).dom(),
         ),
 {
     let new_gz = gz.remove_region(r);
-    let om = gz.mem_set.mappings;
+    let om = gz.cpu_mem_set.mappings;
     let rm = r.spec_mappings();
-    let nm = new_gz.mem_set.mappings;
+    let nm = new_gz.cpu_mem_set.mappings;
     assert(nm == om.remove_keys(rm.dom()));
     assert(r.spec_valid());  // r ∈ regions, gz.wf() ⇒ valid
     let zg = zone_s2_entries(zid, gz);
@@ -760,7 +768,7 @@ pub proof fn lemma_remove_region_state_s2_map(
     requires
         pre.invariant(),
         pre.zones.contains_key(zid),
-        pre.zones[zid].contains_region(r),
+        pre.zones[zid].cpu_mem_set.regions.contains(r),
         post.zone_ids == pre.zone_ids,
         post.zones == pre.zones.insert(zid, pre.zones[zid].remove_region(r)),
     ensures
