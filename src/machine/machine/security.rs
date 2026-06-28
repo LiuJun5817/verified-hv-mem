@@ -1,9 +1,9 @@
 #![allow(non_snake_case)]
 
-use vstd::prelude::*;
 use super::refine::lemma_init_wf;
 use super::state::MachineState;
 use crate::machine::types::*;
+use vstd::prelude::*;
 
 verus! {
 
@@ -351,11 +351,12 @@ impl MachineState {
             MachineState::is_execution(trace, acts),
             trace[0].all_vms().contains(subject),
             trace[0].private_page(subject, page),
-            forall|i: int| 0 <= i < acts.len() ==> !(#[trigger] MachineState::declassifies(
-                acts[i],
-                subject,
-                page,
-            )),
+            forall|i: int|
+                0 <= i < acts.len() ==> !(#[trigger] MachineState::declassifies(
+                    acts[i],
+                    subject,
+                    page,
+                )),
             0 <= k < trace.len(),
         ensures
             trace[k].all_vms().contains(subject),
@@ -477,11 +478,12 @@ impl MachineState {
             trace[0].wf(),
             trace[0].all_vms().contains(subject),
             trace[0].private_page(subject, page),
-            forall|j: int| 0 <= j < acts.len() ==> !(#[trigger] MachineState::declassifies(
-                acts[j],
-                subject,
-                page,
-            )),
+            forall|j: int|
+                0 <= j < acts.len() ==> !(#[trigger] MachineState::declassifies(
+                    acts[j],
+                    subject,
+                    page,
+                )),
             0 <= k < trace.len(),
             trace[k].all_vms().contains(vm),
             vm != subject,
@@ -514,11 +516,12 @@ impl MachineState {
             trace[0].wf(),
             trace[0].all_vms().contains(subject),
             trace[0].private_page(subject, page),
-            forall|j: int| 0 <= j < acts.len() ==> !(#[trigger] MachineState::declassifies(
-                acts[j],
-                subject,
-                page,
-            )),
+            forall|j: int|
+                0 <= j < acts.len() ==> !(#[trigger] MachineState::declassifies(
+                    acts[j],
+                    subject,
+                    page,
+                )),
             0 <= i < acts.len(),
             MachineState::env_reachable(trace[i], trace[i + 1], subject),
             trace[i].read_observation(cpu, subject, gva) is Some,

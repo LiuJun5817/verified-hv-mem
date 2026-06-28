@@ -14,34 +14,13 @@ verus! {
 // `machine::machine::refine`.
 // ---------------------------------------------------------------------------
 impl HwView {
-    /// Mark any TLB entries for `(vm, gpa)` as pending invalidation.
+    /// Hardware MMU silently fills the TLB with a hardware-reachable stage-2 entry.
     ///
-    /// Called alongside a software map/unmap step.  The actual TLB shootdown
-    /// is performed later via [`tlbi_ipa_broadcast_step`] (the broadcast
-    /// `TLBI IPAS2E1IS` exposed by `HardwareOps::issue_tlbi_s2`).
-    pub open spec fn pending_invalidation_step(
-        s1: HwView,
-        s2: HwView,
-        vm: VmId,
-        gpa: GuestPage,
-    ) -> bool {
-        let targets = Set::new(
-            |key: TlbKey| key.vm == vm && key.gpa == gpa && s1.tlb.contains_key(key),
-        );
-        &&& s2.pending_invalidations == s1.pending_invalidations.union(targets)
-        &&& s2.tlb == s1.tlb
-        &&& s2.active_vm == s1.active_vm
-        &&& s2.memory == s1.memory
-    }
-
-    /// Hardware MMU silently fills the TLB with a stage-2 PTE.
-    ///
-    /// `s2_map` is provided as an argument because the TLB fill reads the
-    /// current page-table contents, which live in the software state.
+    /// The fill reads `s1.s2map` (the walker-reachable map), so it can never cache a
+    /// translation the walker cannot reach.
     pub open spec fn tlb_fill_step(
         s1: HwView,
         s2: HwView,
-        s2_map: Map<VmPageKey, S2Entry>,
         cpu: CpuId,
         vm: VmId,
         gpa: GuestPage,
@@ -49,59 +28,59 @@ impl HwView {
         let tkey = TlbKey::new(cpu, vm, gpa);
         let skey = VmPageKey::new(vm, gpa);
         &&& s1.active_vm.contains_key(cpu) && s1.active_vm[cpu] == vm
-        &&& s2_map.contains_key(skey)
-        &&& !s1.pending_invalidations.contains(tkey)
-        &&& s2.pending_invalidations == s1.pending_invalidations
+        &&& s1.s2map.contains_key(skey)
+        &&& s2.s2map == s1.s2map
         &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory
         &&& s2.tlb == s1.tlb.insert(
             tkey,
             TlbEntry {
-                page: s2_map[skey].page,
-                access: s2_map[skey].access,
-                generation: s2_map[skey].generation,
+                page: s1.s2map[skey].page,
+                access: s1.s2map[skey].access,
+                generation: s1.s2map[skey].generation,
             },
         )
     }
 
-    /// Remove a single TLB entry for `(cpu, vm, gpa)` and clear its pending
-    /// flag.
+    /// Atomic break-before-make unmap: drop `(vm, gpa)` from the hardware-reachable
+    /// map **and** flush its cached TLB entries together.
     ///
-    /// On AArch64: this is the effect of one `TLBI IPAS2E1IS` acknowledgement.
-    pub open spec fn tlbi_step(
+    /// This bundles the completing `DSB ISH` (which makes the invalid PTE
+    /// walker-visible, dropping the page from `s2map`) with the `TLBI IPAS2E1IS`
+    /// broadcast (which clears the stale cached entries).  Bundling them keeps
+    /// `tlb_safe` inductive: there is no intermediate state in which the page has
+    /// left `s2map` while a cached entry survives.  Mirrors `MmuSpec.unmap_invalidate`.
+    pub open spec fn unmap_invalidate_step(
         s1: HwView,
         s2: HwView,
-        cpu: CpuId,
         vm: VmId,
         gpa: GuestPage,
     ) -> bool {
-        let tkey = TlbKey::new(cpu, vm, gpa);
-        &&& s2.tlb == s1.tlb.remove(tkey)
-        &&& s2.pending_invalidations == s1.pending_invalidations.remove(tkey)
+        let skey = VmPageKey::new(vm, gpa);
+        let targets = Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa);
+        &&& s2.s2map == s1.s2map.remove(skey)
+        &&& s2.tlb == s1.tlb.remove_keys(targets)
         &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory
     }
 
-    /// Broadcast a stage-2 TLB invalidation for the IPA `(vm, gpa)` across every
-    /// PE in the inner-shareable domain.
-    ///
-    /// On AArch64: a single `TLBI IPAS2E1IS` instruction.  Whereas [`tlbi_step`]
-    /// models one per-CPU acknowledgement, this models the broadcast as a whole:
-    /// every cached entry `(*, vm, gpa)` is removed together with its pending
-    /// flag — the net effect that holds once the following completion `DSB ISH`
-    /// retires.  Used by the map/unmap maintenance sequence to re-establish TLB
-    /// coherence synchronously with a stage-2 mapping edit.
-    pub open spec fn tlbi_ipa_broadcast_step(
+    /// The map-side `DSB ISH`: make a freshly written PTE walker-reachable by adding
+    /// `(vm, gpa) => entry` to the hardware-reachable map.  No `TLBI` — break-before-
+    /// make on the map side needs none (the page was absent, so it had no cached
+    /// entry), so the TLB is untouched.  Mirrors `MmuSpec.map`.
+    pub open spec fn map_step(
         s1: HwView,
         s2: HwView,
         vm: VmId,
         gpa: GuestPage,
+        entry: S2Entry,
     ) -> bool {
-        let targets = Set::new(
-            |key: TlbKey| key.vm == vm && key.gpa == gpa && s1.tlb.contains_key(key),
-        );
-        &&& s2.tlb == s1.tlb.remove_keys(targets)
-        &&& s2.pending_invalidations == s1.pending_invalidations.difference(targets)
+        let skey = VmPageKey::new(vm, gpa);
+        // Break-before-make on the map side: the page must be currently unreachable,
+        // so (by `tlb_safe`) it has no stale cached entry to disagree with `entry`.
+        &&& !s1.s2map.contains_key(skey)
+        &&& s2.s2map == s1.s2map.insert(skey, entry)
+        &&& s2.tlb == s1.tlb
         &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory
     }
@@ -112,7 +91,7 @@ impl HwView {
     pub open spec fn context_switch_step(s1: HwView, s2: HwView, cpu: CpuId, vm: VmId) -> bool {
         &&& s2.active_vm == s1.active_vm.insert(cpu, vm)
         &&& s2.tlb == s1.tlb
-        &&& s2.pending_invalidations == s1.pending_invalidations
+        &&& s2.s2map == s1.s2map
         &&& s2.memory == s1.memory
     }
 
@@ -143,7 +122,7 @@ impl HwView {
         value: DataWord,
     ) -> bool {
         &&& s2.tlb == s1.tlb
-        &&& s2.pending_invalidations == s1.pending_invalidations
+        &&& s2.s2map == s1.s2map
         &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory.insert(pa, value)
     }

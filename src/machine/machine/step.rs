@@ -153,6 +153,11 @@ impl MachineState {
             key,
             entry,
         )
+        // the hardware-reachable map catches up in the same atomic step (sync preserved)
+        &&& s2.hw_s2map == s1.hw_s2map.insert(
+            key,
+            entry,
+        )
         // synchronous TLB invalidation of the edited mapping
         &&& s2.tlb == s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))
     }
@@ -173,9 +178,9 @@ impl MachineState {
     /// abstraction therefore pushes a *break-before-make* obligation onto the
     /// implementation: the abstract atomic step corresponds to "all CPUs have acked
     /// the invalidation", not to instantaneous wall-clock invalidation.  A faithful
-    /// async model would reuse `HwView::pending_invalidations` — split the flush into
-    /// a broadcast step plus per-CPU acks, weaken `tlb_safe` to "coherent except for
-    /// pending keys", and require `pending` empty for the page at reclaim — a
+    /// async model would re-introduce a pending-invalidation set — split the flush
+    /// into a broadcast step plus per-CPU acks, weaken `tlb_safe` to "coherent except
+    /// for pending keys", and require pending empty for the page at reclaim — a
     /// memory-model refinement reserved for future work.
     pub open spec fn hv_unmap_step(s1: Self, s2: Self, vm: VmId, gpa: GuestPage) -> bool {
         let key = VmPageKey::new(vm, gpa);
@@ -187,6 +192,7 @@ impl MachineState {
         &&& s2.same_memory_as(&s1)
         &&& s2.active_vm == s1.active_vm
         &&& s2.s2_map == s1.s2_map.remove(key)
+        &&& s2.hw_s2map == s1.hw_s2map.remove(key)
         &&& s2.tlb == s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))
     }
 
@@ -276,6 +282,7 @@ impl MachineState {
         &&& s2.same_ownership_as(&s1)
         &&& s2.same_memory_as(&s1)
         &&& s2.s2_map == s1.s2_map
+        &&& s2.hw_s2map == s1.hw_s2map
         &&& s2.tlb == s1.tlb
         &&& s2.active_vm == s1.active_vm.insert(cpu, vm)
     }
@@ -351,6 +358,7 @@ impl MachineState {
         &&& s.vm_owned == Map::<VmId, Set<PhysPage>>::empty()
         &&& s.shared_pages == Set::<SharedPage>::empty()
         &&& s.s2_map == Map::<VmPageKey, S2Entry>::empty()
+        &&& s.hw_s2map == Map::<VmPageKey, S2Entry>::empty()
         &&& s.tlb == Map::<TlbKey, TlbEntry>::empty()
         &&& s.active_vm == Map::<CpuId, VmId>::empty()
     }
@@ -370,11 +378,8 @@ impl MachineState {
     /// caller wanting a run from boot additionally conjoins `init(trace[0])`.
     pub open spec fn is_execution(trace: Seq<MachineState>, acts: Seq<MachineAction>) -> bool {
         &&& trace.len() == acts.len() + 1
-        &&& forall|i: int| 0 <= i < acts.len() ==> #[trigger] MachineState::step(
-            trace[i],
-            trace[i + 1],
-            acts[i],
-        )
+        &&& forall|i: int|
+            0 <= i < acts.len() ==> #[trigger] MachineState::step(trace[i], trace[i + 1], acts[i])
     }
 
     /// A state is **reachable** if some execution starting from an `init` state ends

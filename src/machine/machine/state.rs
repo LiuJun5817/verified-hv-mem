@@ -18,7 +18,12 @@ pub ghost struct MachineState {
     pub hypervisor_owned: Set<PhysPage>,
     pub vm_owned: Map<VmId, Set<PhysPage>>,
     pub shared_pages: Set<SharedPage>,
+    /// The **software-maintained** stage-2 map (page-table bytes; from `SwView`).
     pub s2_map: Map<VmPageKey, S2Entry>,
+    /// The **hardware-reachable** stage-2 map (walker view; from `HwView`).  Equal to
+    /// `s2_map` at well-formed states (the [`sync`](MachineState::sync) invariant);
+    /// the TLB caches *this* map, and translation resolves through it.
+    pub hw_s2map: Map<VmPageKey, S2Entry>,
     pub tlb: Map<TlbKey, TlbEntry>,
     pub active_vm: Map<CpuId, VmId>,
     pub memory: Map<PhysWordAddr, DataWord>,
@@ -33,6 +38,7 @@ impl MachineState {
             vm_owned: sw.vm_owned,
             shared_pages: sw.shared_pages,
             s2_map: sw.s2_map,
+            hw_s2map: hw.s2map,
             tlb: hw.tlb,
             active_vm: hw.active_vm,
             memory: hw.memory,
@@ -112,6 +118,7 @@ impl MachineState {
 
     pub open spec fn same_translation_as(&self, other: &Self) -> bool {
         &&& self.s2_map == other.s2_map
+        &&& self.hw_s2map == other.hw_s2map
         &&& self.tlb == other.tlb
         &&& self.active_vm == other.active_vm
     }
@@ -130,8 +137,8 @@ impl MachineState {
         let s2_key = VmPageKey::new(vm, gpa);
         if self.tlb.contains_key(key) {
             Option::Some(self.tlb[key].as_s2_entry())
-        } else if self.s2_map.contains_key(s2_key) {
-            Option::Some(self.s2_map[s2_key])
+        } else if self.hw_s2map.contains_key(s2_key) {
+            Option::Some(self.hw_s2map[s2_key])
         } else {
             Option::None
         }
@@ -169,15 +176,23 @@ impl MachineState {
         }
     }
 
-    /// Every cached TLB entry agrees with the stage-2 map (synchronous coherence —
-    /// mapping edits flush stale entries, so there is no pending state).
+    /// Every cached TLB entry agrees with the **hardware-reachable** map (the TLB
+    /// caches that map; synchronous coherence — mapping edits flush stale entries).
     pub open spec fn tlb_safe(&self) -> bool {
         forall|key: TlbKey| #[trigger]
             self.tlb.contains_key(key) ==> {
                 let s2_key = VmPageKey::new(key.vm, key.gpa);
-                &&& self.s2_map.contains_key(s2_key)
-                &&& self.tlb[key].as_s2_entry() == self.s2_map[s2_key]
+                &&& self.hw_s2map.contains_key(s2_key)
+                &&& self.tlb[key].as_s2_entry() == self.hw_s2map[s2_key]
             }
+    }
+
+    /// **Sync — the cross-layer well-formedness clause.** The hardware-reachable map
+    /// equals the software-maintained map.  Holds at every well-formed state; the
+    /// break-before-make window where they diverge lives below this abstraction (at
+    /// the `MmuSpec`/`BudgetSpec` token level), not here.
+    pub open spec fn sync(&self) -> bool {
+        self.hw_s2map == self.s2_map
     }
 
     pub open spec fn ownership_wf(&self) -> bool {
@@ -220,6 +235,7 @@ impl MachineState {
         &&& self.translation_wf()
         &&& self.execution_wf()
         &&& self.tlb_safe()
+        &&& self.sync()
     }
 }
 

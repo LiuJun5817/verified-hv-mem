@@ -1,6 +1,9 @@
 use vstd::prelude::*;
 
 use super::state::MachineState;
+use crate::machine::hardware::proof::{
+    lemma_map_preserves_tlb_safe, lemma_unmap_invalidate_preserves_tlb_safe,
+};
 use crate::machine::hardware::HardwareOps;
 use crate::machine::hardware::HwView;
 use crate::machine::software::proof::{
@@ -53,6 +56,49 @@ pub proof fn lemma_sw_machine_wf_equiv(sw: SwView, hw: HwView)
 }
 
 // ---------------------------------------------------------------------------
+// Sync bridge: synced views ⟹ a well-formed machine state.
+// ---------------------------------------------------------------------------
+/// **The point-4 payoff.** A software view and a hardware view that are each
+/// internally well-formed and *synced* — the hardware-reachable map equals the
+/// software-maintained one (`hw.s2map == sw.s2_map`) — assemble into a `wf`
+/// `MachineState`.
+///
+/// This is where the forced lock invariant pays off: the implementation drives the
+/// `MmuSpec`/`BudgetSpec` tokens so that their reachable/maintained maps agree
+/// (sync), and `tlb_safe` rides the `MmuSpec` invariant; this lemma turns that into
+/// the full machine `wf` on which the isolation theorems rest.  The scheduler
+/// hypothesis (every running vm is live) is the only `wf` clause spanning neither
+/// view alone.
+pub proof fn lemma_synced_views_wf(sw: SwView, hw: HwView)
+    requires
+        sw.wf(),
+        hw.wf(),
+        hw.s2map == sw.s2_map,
+        forall|cpu: CpuId| #[trigger]
+            hw.active_vm.contains_key(cpu) ==> sw.all_vms.contains(hw.active_vm[cpu]),
+    ensures
+        MachineState::assemble(sw, hw).wf(),
+{
+    let m = MachineState::assemble(sw, hw);
+    // ownership / sharing / translation clauses from the SW view.
+    lemma_sw_machine_wf_equiv(sw, hw);
+    // execution_wf and sync from the field copies.
+    assert(m.execution_wf());
+    assert(m.sync());
+    // tlb_safe: identical to `hw.tlb_safe()` (both over `hw.s2map` and `hw.tlb`).
+    assert(m.tlb_safe()) by {
+        assert forall|k: TlbKey| #[trigger] m.tlb.contains_key(k) implies {
+            let sk = VmPageKey::new(k.vm, k.gpa);
+            &&& m.hw_s2map.contains_key(sk)
+            &&& m.tlb[k].as_s2_entry() == m.hw_s2map[sk]
+        } by {
+            assert(hw.tlb.contains_key(k));
+        }
+    }
+    assert(m.wf());
+}
+
+// ---------------------------------------------------------------------------
 // The initial state is well-formed — base case of `reachable ⇒ wf`.
 // ---------------------------------------------------------------------------
 /// The `init` configuration (`step.rs`) is `wf`.  In `init` the VM population,
@@ -76,29 +122,17 @@ pub proof fn lemma_init_wf(s: MachineState)
 // ------------------------------------------------------------------
 // Stage-2 mapping management
 // ------------------------------------------------------------------
-/// A SW map step, composed with the **complete** stage-2 TLB-maintenance
-/// sequence that accompanies the PTE write, refines the machine-level
-/// `hv_map_step`.
+/// A SW map step composed with the atomic hardware [`map_step`](HwView::map_step)
+/// (the map-side `DSB ISH` that makes the fresh PTE walker-reachable) refines the
+/// machine-level `hv_map_step`.
 ///
-/// The high-level `hv_map_step` models TLB invalidation *synchronously*: the
-/// stale `(vm, gpa)` entries are flushed atomically with the mapping edit, and
-/// the post-state is `tlb_safe`.  To discharge that abstraction soundly the
-/// hardware side must actually run the maintenance to completion, not merely
-/// mark the entries pending.  The sequence is the break-before-make TLB
-/// shootdown:
-///
-/// 1. `pending_invalidation_step` — broadcast intent (mark `(vm, gpa)` pending);
-/// 2. `tlbi_ipa_broadcast_step`   — `TLBI IPAS2E1IS`, invalidate the IPA on all PEs;
-/// 3. `dsb_step`                  — `DSB ISH`, wait for completion on every PE.
-///
-/// Only after the completing `DSB` retires is no PE holding the stale entry, so
-/// it is `hw2` (the post-DSB state) that the synchronous flush refines.
+/// Break-before-make on the map side needs no `TLBI`: `map_step` requires the page
+/// currently unreachable, so by `tlb_safe` it has no stale cached entry, and the
+/// synchronous flush in `hv_map_step` is therefore vacuous.
 pub proof fn refine_hv_map(
     sw1: SwView,
     sw2: SwView,
     hw1: HwView,
-    hw_pend: HwView,
-    hw_tlbi: HwView,
     hw2: HwView,
     vm: VmId,
     gpa: GuestPage,
@@ -106,9 +140,7 @@ pub proof fn refine_hv_map(
 )
     requires
         SwView::map_step(sw1, sw2, vm, gpa, entry),
-        HwView::pending_invalidation_step(hw1, hw_pend, vm, gpa),
-        HwView::tlbi_ipa_broadcast_step(hw_pend, hw_tlbi, vm, gpa),
-        HwView::dsb_step(hw_tlbi, hw2),
+        HwView::map_step(hw1, hw2, vm, gpa, entry),
         MachineState::assemble(sw1, hw1).wf(),
     ensures
         MachineState::hv_map_step(
@@ -124,67 +156,67 @@ pub proof fn refine_hv_map(
     let key = VmPageKey::new(vm, gpa);
     let targets = s1.invalidation_targets(vm, gpa);
 
-    // ── The maintenance sequence flushes exactly the stale (vm, gpa) entries. ──
-    // The pending broadcast and the DSB leave the TLB untouched; the broadcast
-    // TLBI removes the (vm, gpa) entries.  Its target set is computed on
-    // `hw_pend.tlb == hw1.tlb`, so it coincides with `s1.invalidation_targets`.
-    assert(targets =~= Set::new(
-        |k: TlbKey| k.vm == vm && k.gpa == gpa && hw_pend.tlb.contains_key(k),
-    ));
-    assert(s2.tlb =~= s1.tlb.remove_keys(targets));
-    assert(s2.active_vm == s1.active_vm);
-    assert(s2.memory == s1.memory);
-
-    // The SW step leaves identity, ownership and sharing untouched; only `s2_map`
-    // grows by the new entry.  Make these field equalities explicit so the `wf`
-    // sub-invariants can be inherited from `s1`.
-    assert(s2.all_vms == s1.all_vms);
-    assert(s2.vm_owned == s1.vm_owned);
-    assert(s2.hypervisor_owned == s1.hypervisor_owned);
-    assert(s2.shared_pages == s1.shared_pages);
-    assert(s2.s2_map == s1.s2_map.insert(key, entry));
-
-    // ── s2.wf() ────────────────────────────────────────────────────────────
-    // SW clauses (ownership/sharing/translation) via the bridge + the SwView map
-    // proof; the two cross-cutting clauses inline.
+    // SW side: wf + the `s2_map` insert.
     lemma_sw_machine_wf_equiv(sw1, hw1);
     assert(sw1.wf());
     lemma_map_step_preserves_wf(sw1, sw2, vm, gpa, entry);
     lemma_sw_machine_wf_equiv(sw2, hw2);
-    assert(s2.execution_wf());
-    // tlb_safe: a surviving cached entry `k` was not flushed, so (k.vm, k.gpa) ≠
-    // (vm, gpa); its s2-key is untouched by the insert and its cached value is
-    // untouched by the flush, so the agreement from `s1.tlb_safe` carries over.
+
+    // Field deltas: `s2_map` (SW) and `hw_s2map` (HW) both grow by `key`; the rest fixed.
+    assert(s2.s2_map == s1.s2_map.insert(key, entry));
+    assert(s2.hw_s2map == s1.hw_s2map.insert(key, entry));
+    assert(s2.all_vms == s1.all_vms);
+    assert(s2.vm_owned == s1.vm_owned);
+    assert(s2.hypervisor_owned == s1.hypervisor_owned);
+    assert(s2.shared_pages == s1.shared_pages);
+    assert(s2.active_vm == s1.active_vm);
+    assert(s2.memory == s1.memory);
+
+    // The flush is vacuous: the page was unreachable (`map_step` freshness), so by
+    // `tlb_safe` no cached entry names `(vm, gpa)`, hence `remove_keys(targets)` is id.
     assert(s1.tlb_safe());
-    assert forall|k: TlbKey| #[trigger] s2.tlb.contains_key(k) implies {
-        let sk = VmPageKey::new(k.vm, k.gpa);
-        &&& s2.s2_map.contains_key(sk)
-        &&& s2.tlb[k].as_s2_entry() == s2.s2_map[sk]
-    } by {
-        assert(s1.tlb.contains_key(k) && !targets.contains(k));
-        assert(VmPageKey::new(k.vm, k.gpa) != key);
+    assert(!hw1.s2map.contains_key(key));
+    assert forall|k: TlbKey| s1.tlb.contains_key(k) implies !targets.contains(k) by {
+        if targets.contains(k) {
+            assert(s1.hw_s2map.contains_key(VmPageKey::new(k.vm, k.gpa)));
+        }
     }
+    assert(s2.tlb =~= s1.tlb.remove_keys(targets));
+
+    // sync(s2): both maps grew by the same `key => entry` from a synced `s1`.
+    assert(s1.sync());
+    assert(s2.hw_s2map =~= s2.s2_map);
+
+    // tlb_safe(s2): MachineState `tlb_safe` is exactly the HW one over `hw_s2map`.
+    lemma_map_preserves_tlb_safe(hw1, hw2, vm, gpa, entry);
+    assert(s2.tlb_safe()) by {
+        assert forall|k: TlbKey| #[trigger] s2.tlb.contains_key(k) implies {
+            let sk = VmPageKey::new(k.vm, k.gpa);
+            &&& s2.hw_s2map.contains_key(sk)
+            &&& s2.tlb[k].as_s2_entry() == s2.hw_s2map[sk]
+        } by {
+            assert(hw2.tlb.contains_key(k));
+        }
+    }
+    assert(s2.execution_wf());
     assert(s2.wf());
 }
 
-/// A SW unmap step, composed with the same complete TLB-maintenance sequence as
-/// `refine_hv_map` (`pending → TLBI IPAS2E1IS → DSB ISH`), refines
-/// `hv_unmap_step`.
+/// A SW unmap step composed with the atomic hardware
+/// [`unmap_invalidate_step`](HwView::unmap_invalidate_step) (the `DSB ISH` +
+/// `TLBI IPAS2E1IS` that drops the page from the reachable map and flushes its
+/// cached entries together) refines `hv_unmap_step`.
 pub proof fn refine_hv_unmap(
     sw1: SwView,
     sw2: SwView,
     hw1: HwView,
-    hw_pend: HwView,
-    hw_tlbi: HwView,
     hw2: HwView,
     vm: VmId,
     gpa: GuestPage,
 )
     requires
         SwView::unmap_step(sw1, sw2, vm, gpa),
-        HwView::pending_invalidation_step(hw1, hw_pend, vm, gpa),
-        HwView::tlbi_ipa_broadcast_step(hw_pend, hw_tlbi, vm, gpa),
-        HwView::dsb_step(hw_tlbi, hw2),
+        HwView::unmap_invalidate_step(hw1, hw2, vm, gpa),
         MachineState::assemble(sw1, hw1).wf(),
     ensures
         MachineState::hv_unmap_step(
@@ -199,38 +231,41 @@ pub proof fn refine_hv_unmap(
     let key = VmPageKey::new(vm, gpa);
     let targets = s1.invalidation_targets(vm, gpa);
 
-    // Same flush as the map case: the broadcast TLBI removes exactly the (vm, gpa)
-    // entries; pending broadcast and DSB leave the TLB untouched.
-    assert(targets =~= Set::new(
-        |k: TlbKey| k.vm == vm && k.gpa == gpa && hw_pend.tlb.contains_key(k),
-    ));
-    assert(s2.tlb =~= s1.tlb.remove_keys(targets));
-    assert(s2.active_vm == s1.active_vm);
-    assert(s2.memory == s1.memory);
-    assert(s2.all_vms == s1.all_vms);
-    assert(s2.vm_owned == s1.vm_owned);
-    assert(s2.hypervisor_owned == s1.hypervisor_owned);
-    assert(s2.shared_pages == s1.shared_pages);
-    assert(s2.s2_map == s1.s2_map.remove(key));
-
-    // s2.wf(): SW clauses via the bridge + the SwView unmap proof; the two
-    // cross-cutting clauses inline.
+    // SW side: wf + the `s2_map` remove.
     lemma_sw_machine_wf_equiv(sw1, hw1);
     assert(sw1.wf());
     lemma_unmap_step_preserves_wf(sw1, sw2, vm, gpa);
     lemma_sw_machine_wf_equiv(sw2, hw2);
-    assert(s2.execution_wf());
-    // tlb_safe: a surviving cached key `k` was not flushed ⇒ (k.vm, k.gpa) ≠ (vm, gpa),
-    // so its s2-key survives the `remove` with an unchanged value.
-    assert(s1.tlb_safe());
-    assert forall|k: TlbKey| #[trigger] s2.tlb.contains_key(k) implies {
-        let sk = VmPageKey::new(k.vm, k.gpa);
-        &&& s2.s2_map.contains_key(sk)
-        &&& s2.tlb[k].as_s2_entry() == s2.s2_map[sk]
-    } by {
-        assert(s1.tlb.contains_key(k) && !targets.contains(k));
-        assert(VmPageKey::new(k.vm, k.gpa) != key);
+
+    // Field deltas: `s2_map` (SW) and `hw_s2map` (HW) both lose `key`.
+    assert(s2.s2_map == s1.s2_map.remove(key));
+    assert(s2.hw_s2map == s1.hw_s2map.remove(key));
+    assert(s2.all_vms == s1.all_vms);
+    assert(s2.vm_owned == s1.vm_owned);
+    assert(s2.hypervisor_owned == s1.hypervisor_owned);
+    assert(s2.shared_pages == s1.shared_pages);
+    assert(s2.active_vm == s1.active_vm);
+    assert(s2.memory == s1.memory);
+
+    // The atomic step's unguarded flush set coincides with `invalidation_targets`.
+    assert(s2.tlb =~= s1.tlb.remove_keys(targets));
+
+    // sync(s2): both maps lost the same `key` from a synced `s1`.
+    assert(s1.sync());
+    assert(s2.hw_s2map =~= s2.s2_map);
+
+    // tlb_safe(s2) via the HW lemma (MachineState `tlb_safe` == HW one over `hw_s2map`).
+    lemma_unmap_invalidate_preserves_tlb_safe(hw1, hw2, vm, gpa);
+    assert(s2.tlb_safe()) by {
+        assert forall|k: TlbKey| #[trigger] s2.tlb.contains_key(k) implies {
+            let sk = VmPageKey::new(k.vm, k.gpa);
+            &&& s2.hw_s2map.contains_key(sk)
+            &&& s2.tlb[k].as_s2_entry() == s2.hw_s2map[sk]
+        } by {
+            assert(hw2.tlb.contains_key(k));
+        }
     }
+    assert(s2.execution_wf());
     assert(s2.wf());
 }
 
@@ -992,7 +1027,38 @@ pub proof fn lemma_remove_reclaim_edge(s1: SwView, region: Region, i: nat)
 // `invalidation_targets` is empty at every map.  The TLB is therefore fixed (`hw`)
 // across the whole insert trace.
 // ---------------------------------------------------------------------------
-/// Each partial-insert state, assembled with the fixed `hw`, is `wf`.
+/// `hw` with its reachable map forced to `sw.s2_map` — the hardware state at a
+/// well-formed (synced) point.  Used to assemble trace states so that the `sync`
+/// invariant holds at every partial: `hw_s2map` tracks the partial's `s2_map`.
+pub open spec fn synced_hw(sw: SwView, hw: HwView) -> HwView {
+    HwView { s2map: sw.s2_map, ..hw }
+}
+
+/// At a synced point (`hw.s2map == sw.s2_map`) overriding the reachable map is a
+/// no-op, so the synced assembly coincides with the plain one.
+pub proof fn lemma_synced_hw_id(sw: SwView, hw: HwView)
+    requires
+        hw.s2map == sw.s2_map,
+    ensures
+        MachineState::assemble(sw, synced_hw(sw, hw)) == MachineState::assemble(sw, hw),
+{
+    assert(MachineState::assemble(sw, synced_hw(sw, hw)) =~= MachineState::assemble(sw, hw));
+}
+
+/// Machine partial-insert state: the SW `insert_partial`, assembled with the synced
+/// `hw` (reachable map tracks `s2_map`; TLB fixed at `hw.tlb`).
+pub open spec fn insert_machine_partial(
+    sw1: SwView,
+    hw: HwView,
+    region: Region,
+    a: nat,
+    m: nat,
+) -> MachineState {
+    let sp = insert_partial(sw1, region, a, m);
+    MachineState::assemble(sp, synced_hw(sp, hw))
+}
+
+/// Each partial-insert state is `wf`.
 pub proof fn lemma_insert_partial_machine_wf(
     sw1: SwView,
     hw: HwView,
@@ -1006,32 +1072,36 @@ pub proof fn lemma_insert_partial_machine_wf(
         m <= a,
         a <= region.count,
     ensures
-        MachineState::assemble(insert_partial(sw1, region, a, m), hw).wf(),
+        insert_machine_partial(sw1, hw, region, a, m).wf(),
 {
     let sp = insert_partial(sw1, region, a, m);
     let m1 = MachineState::assemble(sw1, hw);
-    let m2 = MachineState::assemble(sp, hw);
+    let m2 = MachineState::assemble(sp, synced_hw(sp, hw));
     // SW clauses via the bridge + the SwView partial-`wf` proof.
     lemma_sw_machine_wf_equiv(sw1, hw);
     assert(sw1.wf());
     lemma_insert_partial_wf(sw1, region, a, m);
-    lemma_sw_machine_wf_equiv(sp, hw);
+    lemma_sw_machine_wf_equiv(sp, synced_hw(sp, hw));
     // execution_wf: `active_vm` and `all_vms` are unchanged.
     assert(m2.all_vms == m1.all_vms);
     assert(m2.active_vm == m1.active_vm);
     assert(m1.execution_wf());
     assert(m2.execution_wf());
-    // tlb_safe: `tlb == hw.tlb` is unchanged; `s2_map` grew only by fresh region
-    // entries, whose keys are unmapped in `sw1`, so every cached key's lookup is
-    // unaffected and keeps the value `s1.tlb_safe` provided.
+    // sync holds by construction (`synced_hw` forces `hw_s2map == s2_map`).
+    assert(m2.hw_s2map == m2.s2_map);
+    // tlb_safe (over `hw_s2map == s2_map`): `tlb == hw.tlb` unchanged; `s2_map` grew
+    // only by fresh region entries (keys unmapped in `sw1`), so each cached key's
+    // lookup keeps the value `m1.tlb_safe` provided.
     assert(m1.tlb_safe());
+    assert(m1.sync());
     assert forall|k: TlbKey| #[trigger] m2.tlb.contains_key(k) implies {
         let sk = VmPageKey::new(k.vm, k.gpa);
-        &&& m2.s2_map.contains_key(sk)
-        &&& m2.tlb[k].as_s2_entry() == m2.s2_map[sk]
+        &&& m2.hw_s2map.contains_key(sk)
+        &&& m2.tlb[k].as_s2_entry() == m2.hw_s2map[sk]
     } by {
         let sk = VmPageKey::new(k.vm, k.gpa);
         assert(m1.tlb.contains_key(k));
+        assert(m1.hw_s2map.contains_key(sk) && m1.tlb[k].as_s2_entry() == m1.hw_s2map[sk]);
         assert(sw1.s2_map.contains_key(sk));
         assert(!entry_prefix(region, m).dom().contains(sk)) by {
             if entry_prefix(region, m).dom().contains(sk) {
@@ -1039,6 +1109,7 @@ pub proof fn lemma_insert_partial_machine_wf(
                 assert(!sw1.s2_map.contains_key(sk));  // enabled: region entries unmapped
             }
         }
+        assert(m2.hw_s2map[sk] == sw1.s2_map[sk]);
     }
     assert(m2.wf());
 }
@@ -1053,8 +1124,8 @@ pub proof fn lemma_insert_map_machine_edge(sw1: SwView, hw: HwView, region: Regi
         i < region.count,
     ensures
         MachineState::hv_map_step(
-            MachineState::assemble(insert_partial(sw1, region, (i + 1) as nat, i), hw),
-            MachineState::assemble(insert_partial(sw1, region, (i + 1) as nat, (i + 1) as nat), hw),
+            insert_machine_partial(sw1, hw, region, (i + 1) as nat, i),
+            insert_machine_partial(sw1, hw, region, (i + 1) as nat, (i + 1) as nat),
             region.vm,
             region.guest_page(i),
             S2Entry { page: region.phys_page(i), access: region.access, generation: 0 },
@@ -1064,38 +1135,25 @@ pub proof fn lemma_insert_map_machine_edge(sw1: SwView, hw: HwView, region: Regi
     let gpa = region.guest_page(i);
     let entry = S2Entry { page: region.phys_page(i), access: region.access, generation: 0 };
     let from_sw = insert_partial(sw1, region, (i + 1) as nat, i);
-    let s1 = MachineState::assemble(from_sw, hw);
-    let s2 = MachineState::assemble(
-        insert_partial(sw1, region, (i + 1) as nat, (i + 1) as nat),
-        hw,
-    );
+    let to_sw = insert_partial(sw1, region, (i + 1) as nat, (i + 1) as nat);
+    let hw1 = synced_hw(from_sw, hw);
+    let hw2 = synced_hw(to_sw, hw);
     let key = VmPageKey::new(vm, gpa);
     lemma_sw_machine_wf_equiv(sw1, hw);
     assert(sw1.wf());
-    // SW map step between the two partials (gives the `s2_map` insert).
+    // SW map step between the two partials (gives `to_sw.s2_map == from_sw.s2_map.insert`).
     lemma_insert_map_edge(sw1, region, i);
-    // `wf` of both endpoints.
+    // `wf` of the source endpoint (the synced partial).
     lemma_insert_partial_machine_wf(sw1, hw, region, (i + 1) as nat, i);
-    lemma_insert_partial_machine_wf(sw1, hw, region, (i + 1) as nat, (i + 1) as nat);
-    // owned_or_shared(vm, phys_page(i)): it lies in `from`'s vm-owned prefix.
-    assert(phys_prefix(region, (i + 1) as nat).contains(region.phys_page(i)));
-    assert(s1.vm_owned[vm].contains(entry.page));
-    assert(s1.vm_owned.contains_key(vm));
-    // The flush is vacuous: no cached entry names the freshly-mapped gpa.
-    assert(s1.invalidation_targets(vm, gpa) =~= Set::<TlbKey>::empty()) by {
-        assert(s1.tlb_safe());
-        assert forall|k: TlbKey| #[trigger]
-            s1.tlb.contains_key(k) && k.vm == vm && k.gpa == gpa implies false by {
-            assert(s1.s2_map.contains_key(VmPageKey::new(k.vm, k.gpa)));  // tlb_safe
-            assert(VmPageKey::new(k.vm, k.gpa) == key);
-            assert(!from_sw.s2_map.contains_key(key)) by {
-                assert(region.entries().contains_key(key));  // key is region entry i
-                assert(!sw1.s2_map.contains_key(key));  // enabled: region entries unmapped
-                assert(!entry_prefix(region, i).dom().contains(key));  // index i not < i
-            }
-        }
+    // The freshly-mapped gpa is unreachable in `from_sw` (region entry, unmapped in sw1).
+    assert(!from_sw.s2_map.contains_key(key)) by {
+        assert(region.entries().contains_key(key));
+        assert(!sw1.s2_map.contains_key(key));
+        assert(!entry_prefix(region, i).dom().contains(key));  // index i not < i
     }
-    assert(s2.tlb =~= s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa)));
+    // The hardware side is exactly `map_step`: reachable map grows by `key`, TLB fixed.
+    assert(HwView::map_step(hw1, hw2, vm, gpa, entry));
+    refine_hv_map(from_sw, to_sw, hw1, hw2, vm, gpa, entry);
 }
 
 /// Edge `j` of the machine insert trace: assign region page `i = j/2` (even `j`)
@@ -1128,7 +1186,7 @@ pub proof fn lemma_insert_region_machine_trace(sw1: SwView, sw2: SwView, hw: HwV
             {
                 &&& trace.len() == 2 * region.count + 1
                 &&& trace[0] == MachineState::assemble(sw1, hw)
-                &&& trace[trace.len() - 1] == MachineState::assemble(sw2, hw)
+                &&& trace[trace.len() - 1] == MachineState::assemble(sw2, synced_hw(sw2, hw))
                 &&& forall|j: int|
                     0 <= j < 2 * region.count ==> #[trigger] insert_hv_edge(
                         trace[j],
@@ -1144,13 +1202,9 @@ pub proof fn lemma_insert_region_machine_trace(sw1: SwView, sw2: SwView, hw: HwV
     assert(sw1.wf());
     let trace = Seq::new(
         (2 * n + 1) as nat,
-        |j: int|
-            MachineState::assemble(
-                insert_partial(sw1, region, ((j + 1) / 2) as nat, (j / 2) as nat),
-                hw,
-            ),
+        |j: int| insert_machine_partial(sw1, hw, region, ((j + 1) / 2) as nat, (j / 2) as nat),
     );
-    // Endpoints: the SW partials collapse to `sw1` / `sw2`, then assemble with `hw`.
+    // Endpoints: the SW partials collapse to `sw1` / `sw2`.
     assert(phys_prefix(region, 0) =~= Set::<PhysPage>::empty());
     assert(entry_prefix(region, 0) =~= Map::<VmPageKey, S2Entry>::empty());
     assert(phys_prefix(region, n) =~= region.pages());
@@ -1161,7 +1215,12 @@ pub proof fn lemma_insert_region_machine_trace(sw1: SwView, sw2: SwView, hw: HwV
         assert(sw1.vm_owned.insert(region.vm, sw1.vm_owned[region.vm]) =~= sw1.vm_owned);
         assert(sw1.s2_map.union_prefer_right(entry_prefix(region, 0)) =~= sw1.s2_map);
     }
-    assert(trace[trace.len() - 1] == MachineState::assemble(sw2, hw)) by {
+    // trace[0]: `synced_hw(sw1, hw) == hw` since `s1` is synced (wf precondition).
+    assert(trace[0] == MachineState::assemble(sw1, hw)) by {
+        assert(MachineState::assemble(sw1, hw).sync());
+        lemma_synced_hw_id(sw1, hw);
+    }
+    assert(trace[trace.len() - 1] == MachineState::assemble(sw2, synced_hw(sw2, hw))) by {
         assert(trace.len() - 1 == 2 * n);
         assert((2 * n + 1) / 2 == n && (2 * n) / 2 == n) by (nonlinear_arith);
         assert(sw1.vm_owned[region.vm].union(phys_prefix(region, n))
@@ -1181,10 +1240,17 @@ pub proof fn lemma_insert_region_machine_trace(sw1: SwView, sw2: SwView, hw: HwV
             assert(i < n);
             lemma_insert_assign_edge(sw1, region, i);
             lemma_insert_partial_machine_wf(sw1, hw, region, i, i);
+            // assign keeps `s2_map` fixed, so the two partials share the synced `hw`.
+            assert(insert_partial(sw1, region, i, i).s2_map == insert_partial(
+                sw1,
+                region,
+                (i + 1) as nat,
+                i,
+            ).s2_map);
             refine_hv_assign_page(
                 insert_partial(sw1, region, i, i),
                 insert_partial(sw1, region, (i + 1) as nat, i),
-                hw,
+                synced_hw(insert_partial(sw1, region, i, i), hw),
                 region.vm,
                 region.phys_page(i),
             );
@@ -1227,7 +1293,7 @@ pub open spec fn tlb_prefix_keys(region: Region, u: nat) -> Set<TlbKey> {
 pub open spec fn hw_unmapped(hw: HwView, region: Region, u: nat) -> HwView {
     HwView {
         tlb: hw.tlb.remove_keys(tlb_prefix_keys(region, u)),
-        pending_invalidations: hw.pending_invalidations,
+        s2map: hw.s2map,
         memory: hw.memory,
         active_vm: hw.active_vm,
     }
@@ -1247,7 +1313,8 @@ pub open spec fn remove_machine_partial(
     u: nat,
     r: nat,
 ) -> MachineState {
-    MachineState::assemble(remove_partial(sw1, region, u, r), hw_unmapped(hw, region, u))
+    let sp = remove_partial(sw1, region, u, r);
+    MachineState::assemble(sp, synced_hw(sp, hw_unmapped(hw, region, u)))
 }
 
 /// Each partial-remove state is `wf`.
@@ -1272,31 +1339,35 @@ pub proof fn lemma_remove_partial_machine_wf(
     lemma_sw_machine_wf_equiv(sw1, hw);
     assert(sw1.wf());
     lemma_remove_partial_wf(sw1, region, u, r);
-    lemma_sw_machine_wf_equiv(sp, hw_unmapped(hw, region, u));
+    lemma_sw_machine_wf_equiv(sp, synced_hw(sp, hw_unmapped(hw, region, u)));
     // execution_wf: active_vm / all_vms unchanged.
     assert(mp.all_vms == m1.all_vms);
     assert(mp.active_vm == m1.active_vm);
     assert(m1.execution_wf());
     assert(mp.execution_wf());
-    // tlb_safe: a surviving cached key `k` (∉ tlb_prefix_keys(u)) has `sk ∉
-    // entry_prefix(u).dom()`, so the s2_map removal keeps `sw1`'s value, matching
-    // `m1.tlb_safe`; the cached value is unchanged by the flush.
+    // sync holds by construction.
+    assert(mp.hw_s2map == mp.s2_map);
+    // tlb_safe (over `hw_s2map == s2_map`): a surviving cached key `k` (∉
+    // tlb_prefix_keys(u)) has `sk ∉ entry_prefix(u).dom()`, so the s2_map removal
+    // keeps `sw1`'s value, matching `m1.tlb_safe`.
     assert(m1.tlb_safe());
+    assert(m1.sync());
     assert forall|k: TlbKey| #[trigger] mp.tlb.contains_key(k) implies {
         let sk = VmPageKey::new(k.vm, k.gpa);
-        &&& mp.s2_map.contains_key(sk)
-        &&& mp.tlb[k].as_s2_entry() == mp.s2_map[sk]
+        &&& mp.hw_s2map.contains_key(sk)
+        &&& mp.tlb[k].as_s2_entry() == mp.hw_s2map[sk]
     } by {
         let sk = VmPageKey::new(k.vm, k.gpa);
         assert(m1.tlb.contains_key(k) && !tlb_prefix_keys(region, u).contains(k));
         assert(mp.tlb[k] == m1.tlb[k]);
-        assert(sw1.s2_map.contains_key(sk));  // m1.tlb_safe
+        assert(m1.hw_s2map.contains_key(sk) && m1.tlb[k].as_s2_entry() == m1.hw_s2map[sk]);
+        assert(sw1.s2_map.contains_key(sk));  // m1.tlb_safe + m1.sync
         assert(!entry_prefix(region, u).dom().contains(sk)) by {
             if entry_prefix(region, u).dom().contains(sk) {
                 assert(tlb_prefix_keys(region, u).contains(k));
             }
         }
-        assert(mp.s2_map[sk] == sw1.s2_map[sk]);
+        assert(mp.hw_s2map[sk] == sw1.s2_map[sk]);
     }
     assert(mp.wf());
 }
@@ -1422,7 +1493,7 @@ pub proof fn lemma_remove_region_machine_trace(sw1: SwView, sw2: SwView, hw: HwV
                 &&& trace[0] == MachineState::assemble(sw1, hw)
                 &&& trace[trace.len() - 1] == MachineState::assemble(
                     sw2,
-                    hw_after_unmap_region(hw, region),
+                    synced_hw(sw2, hw_after_unmap_region(hw, region)),
                 )
                 &&& forall|j: int|
                     0 <= j < 2 * region.count ==> #[trigger] remove_hv_edge(
@@ -1456,8 +1527,10 @@ pub proof fn lemma_remove_region_machine_trace(sw1: SwView, sw2: SwView, hw: HwV
         assert(hw.tlb.remove_keys(tlb_prefix_keys(region, 0)) =~= hw.tlb);
     }
     // trace[last]: full prefixes ⟹ remove_partial(n,n)==sw2 and hw_unmapped(n)==hw'.
-    assert(trace[trace.len() - 1] == MachineState::assemble(sw2, hw_after_unmap_region(hw, region)))
-        by {
+    assert(trace[trace.len() - 1] == MachineState::assemble(
+        sw2,
+        synced_hw(sw2, hw_after_unmap_region(hw, region)),
+    )) by {
         assert(trace.len() - 1 == 2 * n);
         assert((2 * n + 1) / 2 == n && (2 * n) / 2 == n) by (nonlinear_arith);
         assert(sw1.hypervisor_owned.union(phys_prefix(region, n)) =~= sw1.hypervisor_owned.union(

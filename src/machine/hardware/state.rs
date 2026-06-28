@@ -7,40 +7,42 @@ verus! {
 /// The concrete, execution-visible substrate of running guests.
 ///
 /// `HwView` holds the part of the machine a VM — or the security property —
-/// can *observe or perturb*: the data memory reachable through translation, the
-/// TLB that caches translations and may lag a mapping edit, and the per-CPU VM
-/// schedule.  Everything *authoritative* (ownership, the intended mapping
-/// `s2_map`, the memory partition) is policy and lives in
-/// [`crate::machine::software::SwView`].
+/// can *observe or perturb*: the **hardware-reachable** stage-2 map, the TLB that
+/// caches translations and may lag a mapping edit, the data memory reachable
+/// through translation, and the per-CPU VM schedule.  Everything *authoritative*
+/// (ownership, the intended mapping `SwView::s2_map`, the memory partition) is
+/// policy and lives in [`crate::machine::software::SwView`].
 ///
-/// # The MMU is split deliberately, and the halves meet at `s2_map`
+/// # Two stage-2 maps: hardware-reachable here, software-maintained in `SwView`
 ///
-/// An MMU is a *page-table walk* plus a *TLB*.  These are different kinds of
-/// thing, so they live in different layers:
+/// `HwView::s2map` is what a page-table walk currently **reaches** (the walker
+/// view); [`SwView::s2_map`](crate::machine::software::SwView) is what the page
+/// table **bytes say** (the software-maintained view).  They are the same kind of
+/// distinction as `MmuSpec` vs `BudgetSpec`: between a `pt.unmap` (which drops the
+/// page from the byte view immediately) and the following `DSB` (which drops it
+/// from the walker view), the two diverge — that is the break-before-make window.
+/// Their agreement, [`MachineState::sync`](crate::machine::machine::MachineState),
+/// is a machine-level well-formedness clause, *not* a hardware invariant.
 ///
-/// * The **walk** is a stateless function `memory → mapping`.  It has nothing to
-///   persist, so it is modelled as a *refinement*, not as state: the
-///   `page_table` module's `view` (`ExPageTable → PageTableState`) **is** the
-///   walk, and its result is exactly `SwView::s2_map`.  Re-encoding it here would
-///   either assume the memory→mapping link (no assurance) or re-derive the walk
-///   over flat memory (breaking the abstraction), so it is intentionally absent.
-/// * The **TLB** is a *stateful* cache of that result that can go **stale** —
-///   which is the whole reason it needs first-class state and a coherence
-///   invariant (`MachineState::tlb_safe`).  Hence it lives here.
+/// # `tlb_safe` is a hardware invariant
 ///
-/// They join at `s2_map`: the walk produces it; the TLB caches it; `tlb_safe`
-/// says the cache agrees with it.  The model fills the TLB from `s2_map`
-/// (not from raw page-table bytes), which is sound precisely because
-/// `s2_map == walk(memory)` by the `page_table` refinement.
+/// The TLB caches the *hardware-reachable* map, so coherence — every cached entry
+/// agrees with `s2map` — is expressible purely over `HwView` and holds at every
+/// hardware state ([`tlb_safe`](HwView::tlb_safe)).  Invalidation is modelled
+/// atomically (the `DSB`+`TLBI` of an unmap drop the page from `s2map` and flush
+/// its cached entries together), so there is no state in which a cached entry
+/// outlives its mapping; hence `tlb_safe` is inductive here.  There is therefore no
+/// "being-invalidated" window and no pending-invalidation state to track.
 ///
 /// These fields are never stored in exec variables; callers supply them as
 /// `Ghost<HwView>` witnesses that are erased at compile time.
 pub ghost struct HwView {
     /// Current TLB contents, keyed by `(cpu, vm, gpa)`.
     pub tlb: Map<TlbKey, TlbEntry>,
-    /// TLB keys whose invalidation has been broadcast but not yet acknowledged
-    /// by all CPUs.
-    pub pending_invalidations: Set<TlbKey>,
+    /// The **hardware-reachable** stage-2 map (the walker view): what a page-table
+    /// walk resolves right now.  Lags the page-table bytes (`SwView::s2_map`) until
+    /// the completing `DSB` of a mapping edit.
+    pub s2map: Map<VmPageKey, S2Entry>,
     /// The VM-observable **data plane**: physical memory values at addresses that
     /// translations resolve to (VM-owned ∪ shared pages).  This is *not* a model
     /// of all DRAM — page-table bytes and hypervisor-internal memory are
@@ -52,15 +54,23 @@ pub ghost struct HwView {
 }
 
 impl HwView {
-    /// Hardware well-formedness: every pending invalidation refers to a TLB entry
-    /// that is actually cached.
-    ///
-    /// This is the pure-hardware invariant.  Cross-cutting TLB coherence
-    /// (`tlb_safe`) additionally relates the TLB to the software `s2_map`, so it
-    /// lives at the assembled `MachineState` rather than here.
-    pub open spec fn wf(&self) -> bool {
+    /// **TLB coherence — the load-bearing hardware invariant.** Every cached entry's
+    /// page is still hardware-reachable (`s2map` contains it) and the cached value
+    /// agrees with `s2map`.  Purely over `HwView`: the TLB caches the
+    /// hardware-reachable map, so no software reference is needed.
+    pub open spec fn tlb_safe(&self) -> bool {
         forall|key: TlbKey| #[trigger]
-            self.pending_invalidations.contains(key) ==> self.tlb.contains_key(key)
+            self.tlb.contains_key(key) ==> {
+                let sk = VmPageKey::new(key.vm, key.gpa);
+                &&& self.s2map.contains_key(sk)
+                &&& self.tlb[key].as_s2_entry() == self.s2map[sk]
+            }
+    }
+
+    /// Hardware well-formedness: TLB coherence (invalidation is atomic, so this is
+    /// the whole hardware invariant).
+    pub open spec fn wf(&self) -> bool {
+        self.tlb_safe()
     }
 }
 

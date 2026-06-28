@@ -52,5 +52,6 @@
 //! | [`transition`]  | how the projection moves under each insert/remove transition  |
 //! | [`refine`]      | `impl SoftwareOps for BudgetSpec::State` (the contract proof)  |
 pub mod refine;
+pub mod sync;
 pub mod transition;
 pub mod view;
