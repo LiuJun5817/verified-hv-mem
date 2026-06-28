@@ -33,6 +33,11 @@ pub open spec fn phys_page_of_paddr(pa: SpecPAddr) -> PhysPage {
     PhysPage(pa.0 / SPEC_PAGE_SIZE)
 }
 
+/// The machine physical page a page-table frame backs.
+pub open spec fn frame_phys_page(f: SpecFrame) -> PhysPage {
+    phys_page_of_paddr(f.base)
+}
+
 /// The model access permissions of a page-table memory attribute.
 pub open spec fn attr_to_perms(attr: MemAttr) -> AccessPerms {
     AccessPerms { read: attr.readable, write: attr.writable, execute: attr.executable }
@@ -43,7 +48,16 @@ pub open spec fn attr_to_perms(attr: MemAttr) -> AccessPerms {
 // view) to the model's `Map<GuestPage, S2Entry>` (the MMU-reachable stage-2 map).
 /// The stage-2 entry a page-table frame projects to.
 pub open spec fn frame_to_s2(f: SpecFrame) -> S2Entry {
-    S2Entry { page: phys_page_of_paddr(f.base), access: attr_to_perms(f.attr), generation: 0 }
+    S2Entry { page: frame_phys_page(f), access: attr_to_perms(f.attr), generation: 0 }
+}
+
+/// `vaddr_of_gpa` is injective (multiplication by the constant page size).
+pub proof fn lemma_vaddr_of_gpa_injective(g1: GuestPage, g2: GuestPage)
+    requires
+        vaddr_of_gpa(g1) == vaddr_of_gpa(g2),
+    ensures
+        g1 == g2,
+{
 }
 
 /// One zone's MMU-reachable stage-2 slice (`gpa -> S2Entry`) induced by its

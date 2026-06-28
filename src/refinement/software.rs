@@ -20,6 +20,7 @@ use super::view::*;
 use crate::address::addr::SpecVAddr;
 use crate::address::frame::SpecFrame;
 use crate::address::region::MemoryRegion;
+use crate::machine::convert::{frame_phys_page, vaddr_of_gpa};
 use crate::hv_mem::spec::budget::{zone_budget, zone_budget_in_all_regions, BudgetSpec};
 use crate::hv_mem::spec::{all_regions, all_regions_disjoint, all_regions_valid, GhostZone};
 use crate::machine::software::{Region, SoftwareView};
@@ -521,10 +522,10 @@ pub proof fn lemma_insert_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRe
         #![trigger lhs[k]]
         #![trigger rhs[k]]
         lhs.contains_key(k) implies lhs[k] == rhs[k] by {
-        let v = gpa_to_vaddr(k.gpa);
+        let v = vaddr_of_gpa(k.gpa);
         lemma_region_gpa_mapped_iff(r, k.gpa);
         if rm.contains_key(v) {
-            lemma_region_s2_value(zid, r, k);  // re.contains_key(k), re[k] == frame_s2_entry(rm[v])
+            lemma_region_s2_value(zid, r, k);  // re.contains_key(k), re[k] == frame_to_s2(rm[v])
             assert(nm[v] == rm[v]);  // union prefers right
         } else {
             assert(om.contains_key(v) && nm[v] == om[v]);
@@ -744,7 +745,7 @@ pub proof fn lemma_remove_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRe
         #![trigger lhs[k]]
         #![trigger rhs[k]]
         lhs.contains_key(k) implies lhs[k] == rhs[k] by {
-        let v = gpa_to_vaddr(k.gpa);
+        let v = vaddr_of_gpa(k.gpa);
         assert(nm[v] == om[v]);  // surviving key keeps its value
     }
 }

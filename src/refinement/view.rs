@@ -27,7 +27,10 @@ use crate::hv_mem::spec::budget::{
     zone_budget, zone_budget_in_all_regions, zone_budget_pairwise_disjoint, BudgetSpec,
 };
 use crate::hv_mem::spec::{all_regions, all_regions_disjoint, GhostZone};
-use crate::machine::convert::{attr_to_perms, gpa_of_vaddr, phys_page_of_paddr};
+use crate::machine::convert::{
+    attr_to_perms, frame_phys_page, frame_to_s2, gpa_of_vaddr, lemma_vaddr_of_gpa_injective,
+    phys_page_of_paddr, vaddr_of_gpa,
+};
 use crate::machine::software::{Region, SoftwareView};
 use crate::machine::types::*;
 use vstd::prelude::*;
@@ -234,42 +237,18 @@ pub axiom fn axiom_assignable_from_budget(s: BudgetSpec::State, region: Region)
             zone_budget(region.vm.0).contains(r) && region_to_abstract(region.vm.0, r) == region,
 ;
 
-// ───────────────────── mapping → machine-page helpers ───────────────────────
-// Reinterpret a byte-addressed `mem_set.mappings` entry in the machine's
-// page-numbered view.  `gpa_to_vaddr` is multiplication by the constant page
-// size, so its round-trip and injectivity need no proof body.
-/// The mapped virtual byte address of guest page `gpa`.
-pub open spec fn gpa_to_vaddr(gpa: GuestPage) -> SpecVAddr {
-    SpecVAddr(gpa.0 * SPEC_PAGE_SIZE)
-}
-
-/// The machine physical page a mapped frame backs.
-pub open spec fn frame_phys_page(f: SpecFrame) -> PhysPage {
-    PhysPage(f.base.0 / SPEC_PAGE_SIZE)
-}
-
-/// The stage-2 entry a mapped frame induces.
-pub open spec fn frame_s2_entry(f: SpecFrame) -> S2Entry {
-    S2Entry { page: frame_phys_page(f), access: attr_to_perms(f.attr), generation: 0 }
-}
-
+// ───────────────────── mapping ↔ region-page bridges ─────────────────────────
+// The byte-view ↔ page-number conversions (`vaddr_of_gpa`, `frame_phys_page`,
+// `frame_to_s2`) live in [`crate::machine::convert`]; here are only the
+// region-specific facts relating them to `MemoryRegion`'s geometry.
 /// Round-trip: the mapped vaddr of a region page is the page-aligned image of its
-/// guest page — `gpa_to_vaddr ∘ region_guest_page = spec_page_vaddr`.
+/// guest page — `vaddr_of_gpa ∘ region_guest_page = spec_page_vaddr`.
 pub proof fn lemma_gpa_vaddr_roundtrip(r: MemoryRegion, i: nat)
     requires
         r.spec_valid(),
         0 <= i < r.pages,
     ensures
-        gpa_to_vaddr(region_guest_page(r, i)) == r.spec_page_vaddr(i),
-{
-}
-
-/// `gpa_to_vaddr` is injective (it is multiplication by the page size).
-pub proof fn lemma_gpa_to_vaddr_injective(g1: GuestPage, g2: GuestPage)
-    requires
-        gpa_to_vaddr(g1) == gpa_to_vaddr(g2),
-    ensures
-        g1 == g2,
+        vaddr_of_gpa(region_guest_page(r, i)) == r.spec_page_vaddr(i),
 {
 }
 
@@ -280,9 +259,9 @@ pub proof fn lemma_region_gpa_mapped_iff(r: MemoryRegion, gpa: GuestPage)
     requires
         r.spec_valid(),
     ensures
-        r.spec_mappings().contains_key(gpa_to_vaddr(gpa)) <==> region_owns_gpa(r, gpa),
+        r.spec_mappings().contains_key(vaddr_of_gpa(gpa)) <==> region_owns_gpa(r, gpa),
 {
-    let v = gpa_to_vaddr(gpa);
+    let v = vaddr_of_gpa(gpa);
     if region_owns_gpa(r, gpa) {
         let i = choose|i: nat| 0 <= i < r.pages && region_guest_page(r, i) == gpa;
         lemma_gpa_vaddr_roundtrip(r, i);
@@ -295,8 +274,8 @@ pub proof fn lemma_region_gpa_mapped_iff(r: MemoryRegion, gpa: GuestPage)
             0 <= i < r.pages && v == r.spec_page_vaddr(i) && r.spec_mappings()[v] == r.spec_frame(
                 i,
             );
-        lemma_gpa_vaddr_roundtrip(r, i);  // gpa_to_vaddr(region_guest_page(r,i)) == v == gpa_to_vaddr(gpa)
-        lemma_gpa_to_vaddr_injective(region_guest_page(r, i), gpa);
+        lemma_gpa_vaddr_roundtrip(r, i);  // vaddr_of_gpa(region_guest_page(r,i)) == v == vaddr_of_gpa(gpa)
+        lemma_vaddr_of_gpa_injective(region_guest_page(r, i), gpa);
         assert(region_owns_gpa(r, gpa));  // witness i
     }
 }
@@ -310,13 +289,13 @@ pub proof fn lemma_region_s2_value(zid: nat, r: MemoryRegion, k: VmPageKey)
         region_owns_gpa(r, k.gpa),
     ensures
         region_s2_entries(zid, r).contains_key(k),
-        region_s2_entries(zid, r)[k] == frame_s2_entry(r.spec_mappings()[gpa_to_vaddr(k.gpa)]),
+        region_s2_entries(zid, r)[k] == frame_to_s2(r.spec_mappings()[vaddr_of_gpa(k.gpa)]),
 {
-    let v = gpa_to_vaddr(k.gpa);
+    let v = vaddr_of_gpa(k.gpa);
     assert(region_s2_entries(zid, r).contains_key(k));
     let j = choose|j: nat| 0 <= j < r.pages && region_guest_page(r, j) == k.gpa;
     assert(0 <= j < r.pages && region_guest_page(r, j) == k.gpa);
-    assert(region_s2_entries(zid, r)[k] == frame_s2_entry(r.spec_frame(j)));
+    assert(region_s2_entries(zid, r)[k] == frame_to_s2(r.spec_frame(j)));
     lemma_gpa_vaddr_roundtrip(r, j);
     assert(v == r.spec_page_vaddr(j));
     r.lemma_mappings_contains_pair(j);
@@ -336,8 +315,8 @@ pub open spec fn zone_owned_pages(gz: GhostZone) -> Set<PhysPage> {
 /// Stage-2 entries installed by a zone: one per mapped guest page.
 pub open spec fn zone_s2_entries(zid: nat, gz: GhostZone) -> Map<VmPageKey, S2Entry> {
     Map::new(
-        |k: VmPageKey| k.vm == VmId(zid) && gz.mem_set.mappings.contains_key(gpa_to_vaddr(k.gpa)),
-        |k: VmPageKey| frame_s2_entry(gz.mem_set.mappings[gpa_to_vaddr(k.gpa)]),
+        |k: VmPageKey| k.vm == VmId(zid) && gz.mem_set.mappings.contains_key(vaddr_of_gpa(k.gpa)),
+        |k: VmPageKey| frame_to_s2(gz.mem_set.mappings[vaddr_of_gpa(k.gpa)]),
     )
 }
 
@@ -437,9 +416,9 @@ pub proof fn lemma_zone_s2_target_owned(zid: nat, gz: GhostZone)
         zone_s2_entries(zid, gz).contains_key(k) implies zone_owned_pages(gz).contains(
         zone_s2_entries(zid, gz)[k].page,
     ) by {
-        // The key is mapped at v = gpa_to_vaddr(k.gpa); its entry targets that
+        // The key is mapped at v = vaddr_of_gpa(k.gpa); its entry targets that
         // frame's physical page, which the zone owns via the very same v.
-        let v = gpa_to_vaddr(k.gpa);
+        let v = vaddr_of_gpa(k.gpa);
         assert(gz.mem_set.mappings.contains_key(v));
         assert(zone_s2_entries(zid, gz)[k].page == frame_phys_page(gz.mem_set.mappings[v]));
         assert(zone_owned_pages(gz).contains(frame_phys_page(gz.mem_set.mappings[v])));  // witness v
@@ -582,15 +561,15 @@ pub proof fn lemma_region_in_zone_maps_gpa(gz: GhostZone, r: MemoryRegion, g: Gu
         gz.contains_region(r),
         region_owns_gpa(r, g),
     ensures
-        gz.mem_set.mappings.contains_key(gpa_to_vaddr(g)),
+        gz.mem_set.mappings.contains_key(vaddr_of_gpa(g)),
 {
     assert(r.spec_valid());  // r ∈ regions, gz.wf() ⇒ valid
     let i = choose|i: nat| 0 <= i < r.pages && region_guest_page(r, i) == g;
     let v = r.spec_page_vaddr(i);
     assert(gz.regions().contains(r));
     assert(gz.mem_set.mappings.contains_pair(v, r.spec_frame(i)));  // completeness clause
-    lemma_gpa_vaddr_roundtrip(r, i);  // gpa_to_vaddr(region_guest_page(r,i)) == spec_page_vaddr(i)
-    assert(gpa_to_vaddr(g) == v);
+    lemma_gpa_vaddr_roundtrip(r, i);  // vaddr_of_gpa(region_guest_page(r,i)) == spec_page_vaddr(i)
+    assert(vaddr_of_gpa(g) == v);
 }
 
 /// Two valid, vmem-overlapping regions share a guest page — the vmem analogue of
