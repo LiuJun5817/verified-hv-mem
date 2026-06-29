@@ -178,19 +178,19 @@ fn main() {
 
     assert_eq!(gb_alloc.base.0, 0x1000);
 
-    let client = gb_alloc.register_client();
-    println!("client registered");
+    // let client = gb_alloc.register_client();
+    // println!("client registered");
 
-    let (frame0, client) = Frame::new(client);
+    let (frame0, client) = Frame::new(Tracked::assume_new());
     assert_eq!(frame0.start_paddr(), 0x1000);
     println!("after alloc: frame = 0x{:x}", frame0.start_paddr());
 
-    let (frame1, client) = Frame::new(client);
+    let (frame1, client1) = Frame::new(Tracked::assume_new());
     assert_eq!(frame1.start_paddr(), 0x2000);
     println!("after alloc: frame = 0x{:x}", frame1.start_paddr());
 
     let released_paddr = frame0.start_paddr();
-    let client = frame0.dealloc(client);
+    let client = frame0.dealloc(client1);
     println!("after dealloc: released frame = 0x{:x}", released_paddr);
 
     let (frame2, mut client) = Frame::new(client);

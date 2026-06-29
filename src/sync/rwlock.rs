@@ -1,4 +1,6 @@
 use core::marker::PhantomData;
+use core::result::Result::{Ok, Err};
+use core::option::Option::{self, Some, None};
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::atomic_ghost::*;
 use vstd::cell::CellId;

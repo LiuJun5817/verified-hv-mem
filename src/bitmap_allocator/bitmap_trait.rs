@@ -3,6 +3,8 @@ use vstd::{prelude::*, seq_lib::*};
 verus! {
 
 use core::ops::Range;
+use core::option::Option;
+use core::marker::Sized;
 
 /// Allocator that uses a bitmap to track resource usage (0: allocated, 1: free).
 pub trait BitmapAllocator {

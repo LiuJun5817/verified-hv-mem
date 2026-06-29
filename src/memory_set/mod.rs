@@ -11,7 +11,7 @@ use crate::{
     global_allocator::GlobalAllocator,
     page_table::{PTConstants, PageTable},
 };
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 use vstd::prelude::*;
 use vstd::tokens::InstanceId;
 

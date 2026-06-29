@@ -1,6 +1,7 @@
 use vstd::prelude::*;
 
 verus! {
+use core::prelude::rust_2024::derive;
 
 use super::{
     addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},

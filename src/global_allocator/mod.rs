@@ -21,6 +21,8 @@ use crate::address::{
 };
 use crate::bitmap_allocator::{bitmap_trait::BitmapAllocator, bitmap_impl::BitAlloc1M};
 use crate::sync::mutex::{Mutex, MutexGuard};
+use core::unreachable;
+use core::unimplemented;
 
 /// Frame ID
 pub type FrameID = nat;

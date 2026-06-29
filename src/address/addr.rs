@@ -2,6 +2,7 @@
 use vstd::prelude::*;
 
 verus! {
+use core::prelude::rust_2024::derive;
 
 /// Representing virtual address.
 pub struct SpecVAddr(pub nat);
