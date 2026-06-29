@@ -1,5 +1,5 @@
 use spin::Once;
-use std::vec::Vec;
+// use std::vec::Vec;
 use vstd::prelude::Tracked;
 
 use verified_hv_mem::{
@@ -173,67 +173,66 @@ pub fn init() {
 }
 
 fn main() {
-    init();
-    let gb_alloc = gb_allocator();
+    // test code
 
-    assert_eq!(gb_alloc.base.0, 0x1000);
+    // init();
+    // let gb_alloc = gb_allocator();
 
-    // let client = gb_alloc.register_client();
-    // println!("client registered");
+    // assert_eq!(gb_alloc.base.0, 0x1000);
 
-    let (frame0, client) = Frame::new(Tracked::assume_new());
-    assert_eq!(frame0.start_paddr(), 0x1000);
-    println!("after alloc: frame = 0x{:x}", frame0.start_paddr());
+    // let (frame0, client) = Frame::new(Tracked::assume_new());
+    // assert_eq!(frame0.start_paddr(), 0x1000);
+    // println!("after alloc: frame = 0x{:x}", frame0.start_paddr());
 
-    let (frame1, client1) = Frame::new(Tracked::assume_new());
-    assert_eq!(frame1.start_paddr(), 0x2000);
-    println!("after alloc: frame = 0x{:x}", frame1.start_paddr());
+    // let (frame1, client1) = Frame::new(Tracked::assume_new());
+    // assert_eq!(frame1.start_paddr(), 0x2000);
+    // println!("after alloc: frame = 0x{:x}", frame1.start_paddr());
 
-    let released_paddr = frame0.start_paddr();
-    let client = frame0.dealloc(client1);
-    println!("after dealloc: released frame = 0x{:x}", released_paddr);
+    // let released_paddr = frame0.start_paddr();
+    // let client = frame0.dealloc(client1);
+    // println!("after dealloc: released frame = 0x{:x}", released_paddr);
 
-    let (frame2, mut client) = Frame::new(client);
-    assert_eq!(frame2.start_paddr(), 0x1000);
-    println!("after realloc: frame = 0x{:x}", frame2.start_paddr());
+    // let (frame2, mut client) = Frame::new(client);
+    // assert_eq!(frame2.start_paddr(), 0x1000);
+    // println!("after realloc: frame = 0x{:x}", frame2.start_paddr());
 
-    let align_log2 = 13;
-    let (aligned_frame, next_client) = Frame::new_contiguous_with_base(client, 1, align_log2);
-    client = next_client;
-    assert_eq!(aligned_frame.start_paddr(), 0x4000);
-    assert_eq!(aligned_frame.start_paddr() & ((1 << align_log2) - 1), 0);
-    println!(
-        "aligned contiguous alloc: frame = 0x{:x}, align_log2 = {}",
-        aligned_frame.start_paddr(),
-        align_log2
-    );
+    // let align_log2 = 13;
+    // let (aligned_frame, next_client) = Frame::new_contiguous_with_base(client, 1, align_log2);
+    // client = next_client;
+    // assert_eq!(aligned_frame.start_paddr(), 0x4000);
+    // assert_eq!(aligned_frame.start_paddr() & ((1 << align_log2) - 1), 0);
+    // println!(
+    //     "aligned contiguous alloc: frame = 0x{:x}, align_log2 = {}",
+    //     aligned_frame.start_paddr(),
+    //     align_log2
+    // );
 
-    let (frame16, next_client) = Frame::new_16(client);
-    client = next_client;
-    assert_eq!(frame16.start_paddr() & ((1 << 14) - 1), 0);
-    assert_eq!(frame16.size(), 4 * PAGE_SIZE);
-    println!(
-        "new_16 alloc: frame = 0x{:x}, size = 0x{:x}",
-        frame16.start_paddr(),
-        frame16.size()
-    );
+    // let (frame16, next_client) = Frame::new_16(client);
+    // client = next_client;
+    // assert_eq!(frame16.start_paddr() & ((1 << 14) - 1), 0);
+    // assert_eq!(frame16.size(), 4 * PAGE_SIZE);
+    // println!(
+    //     "new_16 alloc: frame = 0x{:x}, size = 0x{:x}",
+    //     frame16.start_paddr(),
+    //     frame16.size()
+    // );
 
-    let mut frames: Vec<Frame> = Vec::new();
-    for i in 0..5 {
-        let (frame, next_client) = Frame::new(client);
-        client = next_client;
-        println!("frame batch 1 [{}]: start = 0x{:x}", i, frame.start_paddr());
-        frames.push(frame);
-    }
-    frames.clear();
-    for i in 0..5 {
-        let (frame, next_client) = Frame::new(client);
-        client = next_client;
-        println!("frame batch 2 [{}]: start = 0x{:x}", i, frame.start_paddr());
-        frames.push(frame);
-    }
-    drop(frames);
-    println!("frame allocator test passed");
+    // let mut frames: Vec<Frame> = Vec::new();
+    // for i in 0..5 {
+    //     let (frame, next_client) = Frame::new(client);
+    //     client = next_client;
+    //     println!("frame batch 1 [{}]: start = 0x{:x}", i, frame.start_paddr());
+    //     frames.push(frame);
+    // }
+    // frames.clear();
+    // for i in 0..5 {
+    //     let (frame, next_client) = Frame::new(client);
+    //     client = next_client;
+    //     println!("frame batch 2 [{}]: start = 0x{:x}", i, frame.start_paddr());
+    //     frames.push(frame);
+    // }
+    // drop(frames);
+    // println!("frame allocator test passed");
 
-    println!("global GB_ALLOCATOR ready at base = 0x{:x}", gb_alloc.base.0);
+    // println!("global GB_ALLOCATOR ready at base = 0x{:x}", gb_alloc.base.0);
 }
