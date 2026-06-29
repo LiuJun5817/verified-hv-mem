@@ -343,7 +343,7 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 assert(!s2@.value().contains_key(GuestPage(ipa_page as nat)));
             }
             s2 = if iommu {
-                mmu.iommu_map_dsb(s2, ipa_page, vm, Ghost(frame_to_s2(frame@)))
+                mmu.iommu_map_sync(s2, ipa_page, vm, Ghost(frame_to_s2(frame@)))
             } else {
                 mmu.map_dsb(s2, ipa_page, vm, Ghost(frame_to_s2(frame@)))
             };
@@ -689,13 +689,13 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
             // FORCED per-page DSB + stage-2 TLBI: the slice token loses exactly this
             // page — provable only because the real instructions run.
             s2 = if iommu {
-                mmu.iommu_unmap_dsb_tlbi(s2, ipa_page, vm)
+                mmu.iommu_unmap_invalidate(s2, ipa_page, vm)
             } else {
                 mmu.unmap_dsb_tlbi(s2, ipa_page, vm)
             };
             proof {
                 // `pt.unmap` removed `vaddr`; the slice loses exactly its guest page,
-                // which is the `(vm, gpa)` that `unmap_dsb_tlbi` flushed.
+                // which is the `(vm, gpa)` that the unmap maintenance flushed.
                 assert(PAGE_SIZE as nat == SPEC_PAGE_SIZE);
                 assert(GuestPage(ipa_page as nat) == gpa_of_vaddr(vaddr@));
                 lemma_pt_s2map_inner_remove(old_mappings, vaddr@);

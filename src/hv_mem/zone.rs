@@ -750,7 +750,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         }
         let ghost old_mem_set = mem_set@;
         // Pull the IOMMU slice token out and thread it through `mem_set.insert` with
-        // `iommu = true`, which fires the SMMU `iommu_map_dsb` per inserted page.
+        // `iommu = true`, which fires the SMMU `iommu_map_sync` per inserted page.
         let tracked ZoneRwContent::<M, BudgetProtocol> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,

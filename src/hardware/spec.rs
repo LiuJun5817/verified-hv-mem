@@ -1,7 +1,17 @@
-//! The **standalone tokenized MMU state machine** (`MmuSpec`): the hardware-side
+//! The **standalone tokenized stage-2 state machine** (`MmuSpec`): the hardware-side
 //! analog of `BudgetSpec`, whose tokens are *unforgeable* so the implementation
-//! cannot fabricate a favourable MMU state in ghost code.  It models the two
-//! stateful pieces of an MMU, both `#[sharding(variable)]`:
+//! cannot fabricate a favourable hardware state in ghost code.
+//!
+//! `MmuSpec` is **regime-neutral** — it captures the law obeyed by *any* stage-2
+//! translation unit (a walker-reachable map + a TLB filled autonomously) — and is
+//! **instantiated twice**: once for the CPU **MMU** and once for the **SMMU**
+//! (IOMMU).  The two instances have disjoint tokens (a CPU `TLBI` advances only the
+//! CPU instance's `tlb`; an SMMU `CMD_TLBI_S2_IPA` only the SMMU's), so they model
+//! the two physically separate TLBs without any cross-talk.  Only the real
+//! instructions differ, and those are split into [`MmuInstr`](crate::hardware::MmuInstr)
+//! / [`SmmuInstr`](crate::hardware::SmmuInstr).
+//!
+//! It models the two stateful pieces of a stage-2 unit, both `#[sharding(variable)]`:
 //!
 //! * [`s2map`](MmuSpec::State::s2map) — the **MMU-reachable** stage-2 mappings
 //!   (what a page-table walk currently resolves);
