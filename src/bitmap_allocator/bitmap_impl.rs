@@ -82,8 +82,10 @@ verus! {
 use super::bitmap_trait::*;
 use core::ops::Range;
 use core::marker::Sized;
+use core::marker::Copy;
+use core::clone::Clone;
 use core::option::Option::{self, Some, None};
-use core::prelude::rust_2024::derive;
+use core::prelude::rust_2021::derive;
 
 pub trait BitAllocView {
     /// Specification function to view the internal u16 as a sequence of booleans.
@@ -421,7 +423,7 @@ impl<T: BitAllocView + Copy> Clone for BitAllocCascade16<T> {
     }
 }
 
-impl<T: BitAllocView + core::marker::Copy> BitAllocView for BitAllocCascade16<T> {
+impl<T: BitAllocView + Copy> BitAllocView for BitAllocCascade16<T> {
     open spec fn view(&self) -> Seq<bool> {
         // 把 16 个子分配器的 view 拼接在一起
         let sub_len = T::spec_cap() as int;
@@ -979,7 +981,7 @@ pub open spec fn view_index_mapping(ba: Seq<bool>, i: int, sub_ba: Seq<bool>, ca
     forall|j: int| 0 <= j < cap ==> ba[(cap * i + j)] == sub_ba[j]
 }
 
-impl<T: BitAlloc + core::marker::Copy> BitAlloc for BitAllocCascade16<T> {
+impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
     fn alloc(&mut self) -> (res: Option<usize>) {
         let ghost cap = T::spec_cap() as int;
         if !self.any() {
@@ -2024,7 +2026,7 @@ impl<T: BitAlloc + core::marker::Copy> BitAlloc for BitAllocCascade16<T> {
     }
 }
 
-impl<T: BitAllocView + core::marker::Copy> BitAllocCascade16<T> {
+impl<T: BitAllocView + Copy> BitAllocCascade16<T> {
     /// Lemma: Ensures the parent view correctly maps each index range to its corresponding child sub-allocator.
     proof fn lemma_maintain_view_indexs_mapping(&self)
         requires

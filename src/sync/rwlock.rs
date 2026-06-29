@@ -12,6 +12,8 @@ use vstd::multiset::*;
 use vstd::open_atomic_invariant;
 use vstd::prelude::*;
 use vstd::rwlock::RwLock as VerusRwLock;
+use core::unreachable;
+use core::unimplemented;
 
 // The tokenized state machine is unchanged.
 tokenized_state_machine! {
