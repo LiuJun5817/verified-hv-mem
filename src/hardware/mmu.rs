@@ -69,6 +69,25 @@ pub trait HardwareInstr {
     ///
     /// On AArch64: `ISB`.  Synchronizes only the executing PE's own context.
     fn issue_isb();
+
+    // ------------------------------------------------------------------
+    // IOMMU (SMMU) stage-2 maintenance
+    // ------------------------------------------------------------------
+    /// Invalidate the SMMU stage-2 TLB for the IPA `(stream, gpa)`.
+    ///
+    /// On Arm SMMUv3 this is a `CMD_TLBI_S2_IPA` command enqueued on the command
+    /// queue (the IPA travels as `Addr = IPA >> 12`, the 4K guest page number; the
+    /// VMID comes from the device's STE/CD).  Unlike the CPU `TLBI`, the SMMU is an
+    /// MMIO device, so the "instruction" is a command-queue write; it must be
+    /// followed by [`issue_iommu_sync`] before the new translation may be relied on.
+    fn issue_tlbi_s2_iommu(ipa_page: usize);
+
+    /// SMMU command-queue synchronization barrier (`CMD_SYNC`).
+    ///
+    /// Completes all preceding command-queue commands — the SMMU analog of the CPU
+    /// `DSB ISH` for stage-2 maintenance.  After it returns, the preceding
+    /// `CMD_TLBI_S2_IPA` (or a fresh stage-2 PTE) is guaranteed observed by the SMMU.
+    fn issue_iommu_sync();
 }
 
 /// Concrete MMU hardware handle: the owner of the `MmuSpec` instance and the
@@ -193,6 +212,74 @@ impl<I: HardwareInstr> MmuHardware<I> {
         let ghost gpa = GuestPage(ipa_page as nat);
         let tracked s2 = s2_tok.get();
         I::issue_dsb_ish();
+        let tracked new_tok = self.instance.borrow().map(vm@, gpa, entry@, s2);
+        Tracked(new_tok)
+    }
+
+    /// IOMMU (SMMU) counterpart of [`unmap_dsb_tlbi`](Self::unmap_dsb_tlbi).
+    ///
+    /// Issues the SMMU stage-2 invalidation (`CMD_TLBI_S2_IPA`) and the command-queue
+    /// completion barrier (`CMD_SYNC`), firing the same abstract `unmap_invalidate`
+    /// transition (the model is domain-agnostic — only the real instructions differ).
+    /// Used on the IOMMU `MmuHardware` instance (separate from the CPU one).
+    pub fn iommu_unmap_dsb_tlbi(
+        &mut self,
+        s2_tok: Tracked<MmuS2MapToken>,
+        ipa_page: usize,
+        vm: Ghost<VmId>,
+    ) -> (res: Tracked<MmuS2MapToken>)
+        requires
+            old(self).wf(),
+            s2_tok@.instance_id() == old(self).inst_id(),
+            s2_tok@.key() == vm@,
+        ensures
+            self.wf(),
+            self.inst_id() == old(self).inst_id(),
+            self.live_vms() == old(self).live_vms(),
+            res@.instance_id() == self.inst_id(),
+            res@.key() == vm@,
+            res@.value() == s2_tok@.value().remove(GuestPage(ipa_page as nat)),
+    {
+        let ghost gpa = GuestPage(ipa_page as nat);
+        let tracked s2 = s2_tok.get();
+        I::issue_tlbi_s2_iommu(ipa_page);
+        I::issue_iommu_sync();
+        let tracked new_tok = self.instance.borrow().unmap_invalidate(
+            vm@,
+            gpa,
+            s2,
+            self.tlb.borrow_mut(),
+        );
+        Tracked(new_tok)
+    }
+
+    /// IOMMU (SMMU) counterpart of [`map_dsb`](Self::map_dsb).
+    ///
+    /// Issues the SMMU command-queue completion barrier (`CMD_SYNC`) so the freshly
+    /// written stage-2 PTE is observed, firing the same abstract `map` transition.
+    pub fn iommu_map_dsb(
+        &mut self,
+        s2_tok: Tracked<MmuS2MapToken>,
+        ipa_page: usize,
+        vm: Ghost<VmId>,
+        entry: Ghost<S2Entry>,
+    ) -> (res: Tracked<MmuS2MapToken>)
+        requires
+            old(self).wf(),
+            s2_tok@.instance_id() == old(self).inst_id(),
+            s2_tok@.key() == vm@,
+            !s2_tok@.value().contains_key(GuestPage(ipa_page as nat)),
+        ensures
+            self.wf(),
+            self.inst_id() == old(self).inst_id(),
+            self.live_vms() == old(self).live_vms(),
+            res@.instance_id() == self.inst_id(),
+            res@.key() == vm@,
+            res@.value() == s2_tok@.value().insert(GuestPage(ipa_page as nat), entry@),
+    {
+        let ghost gpa = GuestPage(ipa_page as nat);
+        let tracked s2 = s2_tok.get();
+        I::issue_iommu_sync();
         let tracked new_tok = self.instance.borrow().map(vm@, gpa, entry@, s2);
         Tracked(new_tok)
     }

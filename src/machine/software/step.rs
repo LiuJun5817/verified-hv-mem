@@ -153,6 +153,10 @@ impl SoftwareView {
         )
         &&& s2.shared_pages == s1.shared_pages
         &&& s2.s2_map == s1.s2_map.union_prefer_right(region.entries())
+        // A CPU region insert leaves the IOMMU contexts untouched.
+        &&& s2.iommu_s2_map == s1.iommu_s2_map
+        &&& s2.iommu_owned == s1.iommu_owned
+        &&& s2.iommu_shared == s1.iommu_shared
     }
 
     /// Bulk unmap + reclaim a whole `region` (counterpart of `HvMem::remove_region`).
@@ -169,6 +173,10 @@ impl SoftwareView {
         )
         &&& s2.shared_pages == s1.shared_pages
         &&& s2.s2_map == s1.s2_map.remove_keys(region.entries().dom())
+        // A CPU region remove leaves the IOMMU contexts untouched.
+        &&& s2.iommu_s2_map == s1.iommu_s2_map
+        &&& s2.iommu_owned == s1.iommu_owned
+        &&& s2.iommu_shared == s1.iommu_shared
     }
 
     // -----------------------------------------------------------------------

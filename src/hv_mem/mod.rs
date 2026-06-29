@@ -57,6 +57,8 @@ pub struct HvMemKey {
     pub cell_id: CellId,
     /// MMU instance ID.
     pub mmu_inst_id: InstanceId,
+    /// IOMMU MMU instance ID (separate `MmuHardware` instance for the SMMU stage-2).
+    pub iommu_mmu_inst_id: InstanceId,
 }
 
 /// Tracked content protected by `HvMem`'s `RwLock`.
@@ -139,6 +141,11 @@ impl<PT, M, A, P, I> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P, I>
                 #![trigger zone_list[i]]
                 0 <= i < zone_list.len() ==> zone_list[i].mmu_inst_id()
                     == k.mmu_inst_id
+            // Each exec zone is bound to the same IOMMU MMU instance.
+            &&& forall|i: int|
+                #![trigger zone_list[i]]
+                0 <= i < zone_list.len() ==> zone_list[i].iommu_mmu_inst_id()
+                    == k.iommu_mmu_inst_id
             // Each zone in the list is well-formed.
             &&& forall|i: int| #![auto] 0 <= i < zone_list.len() ==> zone_list[i].wf()
         }
@@ -212,8 +219,13 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     /// 3. Delegate Zone assembly to `Zone::new` (infallible).
     /// 4. Push the new `Zone`, return the zone list to its `PCell`, and release
     ///    the write lock.
-    pub fn add_zone(&self, zid: usize, pt_constants: PTConstants, mmu: &mut MmuHardware<I>) -> (res:
-        Result<(), ()>)
+    pub fn add_zone(
+        &self,
+        zid: usize,
+        pt_constants: PTConstants,
+        mmu: &mut MmuHardware<I>,
+        iommu_mmu: &mut MmuHardware<I>,
+    ) -> (res: Result<(), ()>)
         requires
             self.invariants(),
             pt_constants@.valid(),
@@ -223,14 +235,19 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             pt_constants.arch@.leaf_frame_size() == FrameSize::Size4K,
             old(mmu).wf(),
             old(mmu).inst_id() == self.lock.k@.mmu_inst_id,
-            // The MMU must not yet know this vm — the caller's obligation (trusted
+            old(iommu_mmu).wf(),
+            old(iommu_mmu).inst_id() == self.lock.k@.iommu_mmu_inst_id,
+            // Neither MMU may yet know this vm — the caller's obligation (trusted
             // configuration, like zone budgets); discharged once HvMem carries a
             // `mmu.live_vms() == zone_ids` invariant (a later refinement step).
             !old(mmu).live_vms().contains(VmId(zid as nat)),
+            !old(iommu_mmu).live_vms().contains(VmId(zid as nat)),
         ensures
             res is Ok ==> self.invariants(),
             mmu.wf(),
             mmu.inst_id() == old(mmu).inst_id(),
+            iommu_mmu.wf(),
+            iommu_mmu.inst_id() == old(iommu_mmu).inst_id(),
     {
         // ── Step 1: acquire HvMem write lock ──────────────────────────────────
         let guard = self.lock.lock_write();
@@ -268,6 +285,11 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                 forall|k: int|
                     #![trigger zones@[k]]
                     0 <= k < zones@.len() ==> zones@[k].mmu_inst_id() == self.lock.k@.mmu_inst_id,
+                // IOMMU-instance consistency.
+                forall|k: int|
+                    #![trigger zones@[k]]
+                    0 <= k < zones@.len() ==> zones@[k].iommu_mmu_inst_id()
+                        == self.lock.k@.iommu_mmu_inst_id,
                 // Pairwise distinct IDs.
                 forall|k: int, l: int|
                     #![auto]
@@ -275,9 +297,11 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                         != zones@[l].zone_id,
                 // All zones well-formed.
                 forall|k: int| #![auto] 0 <= k < zones@.len() ==> zones@[k].wf(),
-                // The MMU handle is untouched by the scan (needed by the early Err exit).
+                // The MMU handles are untouched by the scan (needed by the early Err exit).
                 mmu.wf(),
                 mmu.inst_id() == self.lock.k@.mmu_inst_id,
+                iommu_mmu.wf(),
+                iommu_mmu.inst_id() == self.lock.k@.iommu_mmu_inst_id,
             decreases zones.len() - i,
         {
             if zones[i].zone_id == zid {
@@ -314,8 +338,11 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         // forced sync clause holds at birth because an empty mem_set projects to an
         // empty `s2map`.
         let s2map_tok = mmu.add_vm(Ghost(VmId(zid as nat)));
+        // Mint this zone's IOMMU slice token (empty) on the separate IOMMU instance.
+        let iommu_s2map_tok = iommu_mmu.add_vm(Ghost(VmId(zid as nat)));
         proof {
             assert(pt_s2map_inner(cpu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
+            assert(pt_s2map_inner(iommu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
         }
         let new_zone = Zone::<PT, M, A, P, I>::new(
             cpu_mem_set,
@@ -324,8 +351,10 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             Ghost(mem_inst_id),
             Ghost(self.allocator.inst_id()),
             Ghost(mmu.inst_id()),
+            Ghost(iommu_mmu.inst_id()),
             Tracked(zone_state),
             s2map_tok,
+            iommu_s2map_tok,
         );
         // Snapshot the pre-push zone list for use in the postcondition proof.
         let ghost old_zones = zones@;
@@ -389,6 +418,17 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                     } else {
                         // new_zone.mmu_inst_id() == mmu.inst_id() (Zone::new) ==
                         // k.mmu_inst_id (loop invariant, preserved by add_vm's stable inst_id).
+                        assert(new_zones[k] == new_zone);
+                    }
+                };
+                // 5c. IOMMU-instance consistency for all new zones.
+                assert forall|k: int|
+                    #![trigger new_zones[k]]
+                    0 <= k < new_zones.len() implies new_zones[k].iommu_mmu_inst_id()
+                    == self.lock.k@.iommu_mmu_inst_id by {
+                    if k < old_len {
+                        assert(old_zones[k].iommu_mmu_inst_id() == self.lock.k@.iommu_mmu_inst_id);
+                    } else {
                         assert(new_zones[k] == new_zone);
                     }
                 };
@@ -493,6 +533,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                 iommu_mem_set_perm: _,
                 zone_state,
                 s2map_tok: _,
+                iommu_s2map_tok: _,
             } = zone_content;
             P::remove_zone(&mut content.global_state, zone_state);
             // zone_handle (writer token) is consumed here via assume — the zone is
@@ -745,12 +786,21 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
     }
 
     /// Insert `region` into zone `zid`'s IOMMU-visible set using only the HvMem read lock.
-    pub fn insert_iommu_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+    pub fn insert_iommu_region(
+        &self,
+        zid: usize,
+        region: MemoryRegion,
+        iommu_mmu: &mut MmuHardware<I>,
+    ) -> (res: Result<(), ()>)
         requires
             self.invariants(),
             zone_regions(zid as nat).contains(region) || region == gic_region(),
+            old(iommu_mmu).wf(),
+            old(iommu_mmu).inst_id() == self.lock.k@.iommu_mmu_inst_id,
         ensures
             res is Ok ==> self.invariants(),
+            iommu_mmu.wf(),
+            iommu_mmu.inst_id() == old(iommu_mmu).inst_id(),
     {
         if !region.valid() {
             return Err(());
@@ -781,17 +831,36 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
             self.lock.unlock_read(guard);
             return Err(());
         }
-        let res = zones[i].insert_iommu_region(&self.allocator, Tracked(&global_state), region);
+        proof {
+            // IOMMU instance-id bridge: `HvMemPred` pins every zone's IOMMU instance,
+            // and the precondition pins `iommu_mmu.inst_id()` to it.
+            assert(zones[i as int].lock.k@.iommu_mmu_inst_id == iommu_mmu.inst_id());
+        }
+        let res = zones[i].insert_iommu_region(
+            &self.allocator,
+            Tracked(&global_state),
+            region,
+            iommu_mmu,
+        );
         self.lock.unlock_read(guard);
         res
     }
 
     /// Remove `region` from zone `zid`'s IOMMU-visible set using only the HvMem read lock.
-    pub fn remove_iommu_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
+    pub fn remove_iommu_region(
+        &self,
+        zid: usize,
+        region: MemoryRegion,
+        iommu_mmu: &mut MmuHardware<I>,
+    ) -> (res: Result<(), ()>)
         requires
             self.invariants(),
+            old(iommu_mmu).wf(),
+            old(iommu_mmu).inst_id() == self.lock.k@.iommu_mmu_inst_id,
         ensures
             res is Ok ==> self.invariants(),
+            iommu_mmu.wf(),
+            iommu_mmu.inst_id() == old(iommu_mmu).inst_id(),
     {
         if !region.valid() {
             return Err(());
@@ -820,7 +889,15 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
             self.lock.unlock_read(guard);
             return Err(());
         }
-        let res = zones[i].remove_iommu_region(&self.allocator, Tracked(&global_state), region);
+        proof {
+            assert(zones[i as int].lock.k@.iommu_mmu_inst_id == iommu_mmu.inst_id());
+        }
+        let res = zones[i].remove_iommu_region(
+            &self.allocator,
+            Tracked(&global_state),
+            region,
+            iommu_mmu,
+        );
         self.lock.unlock_read(guard);
         res
     }

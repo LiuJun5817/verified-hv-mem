@@ -186,6 +186,7 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         vm: Ghost<VmId>,
         mmu: &mut MmuHardware<I>,
         s2_tok: Tracked<MmuS2MapToken>,
+        iommu: bool,
     ) -> (res: Tracked<MmuS2MapToken>) {
         let mut s2 = s2_tok;
         // New region does not overlap with old regions
@@ -341,7 +342,11 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 // slice token), and `vbase` ∉ old_mappings ⇒ its gpa ∉ the slice.
                 assert(!s2@.value().contains_key(GuestPage(ipa_page as nat)));
             }
-            s2 = mmu.map_dsb(s2, ipa_page, vm, Ghost(frame_to_s2(frame@)));
+            s2 = if iommu {
+                mmu.iommu_map_dsb(s2, ipa_page, vm, Ghost(frame_to_s2(frame@)))
+            } else {
+                mmu.map_dsb(s2, ipa_page, vm, Ghost(frame_to_s2(frame@)))
+            };
             proof {
                 lemma_pt_s2map_inner_insert(old_mappings, vbase@, frame@);
             }
@@ -568,6 +573,7 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         vm: Ghost<VmId>,
         mmu: &mut MmuHardware<I>,
         s2_tok: Tracked<MmuS2MapToken>,
+        iommu: bool,
     ) -> (res: Tracked<MmuS2MapToken>) {
         let mut s2 = s2_tok;
         let len = self.regions.len();
@@ -682,7 +688,11 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
             let res = self.pt.unmap(allocator, vaddr);
             // FORCED per-page DSB + stage-2 TLBI: the slice token loses exactly this
             // page — provable only because the real instructions run.
-            s2 = mmu.unmap_dsb_tlbi(s2, ipa_page, vm);
+            s2 = if iommu {
+                mmu.iommu_unmap_dsb_tlbi(s2, ipa_page, vm)
+            } else {
+                mmu.unmap_dsb_tlbi(s2, ipa_page, vm)
+            };
             proof {
                 // `pt.unmap` removed `vaddr`; the slice loses exactly its guest page,
                 // which is the `(vm, gpa)` that `unmap_dsb_tlbi` flushed.

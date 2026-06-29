@@ -51,6 +51,30 @@ impl HardwareInstr for Aarch64Hw {
             asm!("isb");
         }
     }
+
+    #[verifier::external_body]
+    fn issue_tlbi_s2_iommu(_ipa_page: usize) {
+        // SMMUv3 stage-2 IPA invalidation: build a `CMD_TLBI_S2_IPA` command (with
+        // `Addr = ipa_page` and the VMID from the device context) and write it to the
+        // SMMU command queue (MMIO).  The SMMU is a device, not a CPU, so this is a
+        // queue write rather than a `TLBI` instruction; a `DSB ISH` orders the write
+        // to the queue, and `issue_iommu_sync` (CMD_SYNC) completes it.  Left as a
+        // documented trusted seam (the concrete MMIO base is platform configuration).
+        unsafe {
+            asm!("dsb ish");
+        }
+    }
+
+    #[verifier::external_body]
+    fn issue_iommu_sync() {
+        // SMMUv3 `CMD_SYNC`: write a CMD_SYNC to the command queue and poll the
+        // consumer index / wait for completion, guaranteeing preceding commands
+        // (CMD_TLBI_S2_IPA, configuration invalidations) are observed.  Ordered with
+        // a `DSB ISH`; the queue-polling MMIO is platform configuration.
+        unsafe {
+            asm!("dsb ish");
+        }
+    }
 }
 
 } // verus!

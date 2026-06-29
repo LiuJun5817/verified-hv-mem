@@ -599,6 +599,9 @@ pub open spec fn insert_partial(s1: SoftwareView, region: Region, a: nat, m: nat
         ),
         shared_pages: s1.shared_pages,
         s2_map: s1.s2_map.union_prefer_right(entry_prefix(region, m)),
+        iommu_s2_map: s1.iommu_s2_map,
+        iommu_owned: s1.iommu_owned,
+        iommu_shared: s1.iommu_shared,
     }
 }
 
@@ -832,6 +835,9 @@ pub open spec fn remove_partial(s1: SoftwareView, region: Region, u: nat, r: nat
         ),
         shared_pages: s1.shared_pages,
         s2_map: s1.s2_map.remove_keys(entry_prefix(region, u).dom()),
+        iommu_s2_map: s1.iommu_s2_map,
+        iommu_owned: s1.iommu_owned,
+        iommu_shared: s1.iommu_shared,
     }
 }
 

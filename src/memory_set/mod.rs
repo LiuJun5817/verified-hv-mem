@@ -318,6 +318,7 @@ pub trait MemorySet<PT, A, I> where
         vm: Ghost<VmId>,
         mmu: &mut MmuHardware<I>,
         s2_tok: Tracked<MmuS2MapToken>,
+        iommu: bool,
     ) -> (res: Tracked<MmuS2MapToken>)
         requires
             old(self).invariants(),
@@ -355,6 +356,7 @@ pub trait MemorySet<PT, A, I> where
         vm: Ghost<VmId>,
         mmu: &mut MmuHardware<I>,
         s2_tok: Tracked<MmuS2MapToken>,
+        iommu: bool,
     ) -> (res: Tracked<MmuS2MapToken>)
         requires
             old(self).invariants(),

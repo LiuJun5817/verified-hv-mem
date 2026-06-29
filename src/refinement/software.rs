@@ -104,7 +104,8 @@ impl SoftwareRefinement for BudgetSpec::State {
             #[trigger] self@.wf(),
     {
         let sw = self.view();
-        // sharing_wf: vacuous (shared_pages ≡ ∅).
+        // sharing_wf: vacuous (the CPU sharing graph is empty; GIC sharing is modeled
+        // separately via `iommu_shared`, see `lemma_reachable_iommu_separation`).
         assert(sw.shared_pages =~= Set::<SharedPage>::empty());
         assert(sw.sharing_wf());
 
@@ -282,6 +283,8 @@ impl SoftwareRefinement for BudgetSpec::State {
         ));
         assert(post@.s2_map =~= self@.s2_map.union_prefer_right(region.entries()));
         assert(post@.hypervisor_owned =~= self@.hypervisor_owned.difference(region.pages()));
+        // CPU insert leaves every zone's iommu_mem_set untouched ⇒ IOMMU view unchanged.
+        lemma_state_iommu_proj_unchanged(self, post);
         assert(SoftwareView::insert_region_step(self@, post@, region));
         post
     }
@@ -361,6 +364,8 @@ impl SoftwareRefinement for BudgetSpec::State {
         ));
         assert(post@.s2_map =~= self@.s2_map.remove_keys(region.entries().dom()));
         assert(post@.hypervisor_owned =~= self@.hypervisor_owned.union(region.pages()));
+        // CPU remove leaves every zone's iommu_mem_set untouched ⇒ IOMMU view unchanged.
+        lemma_state_iommu_proj_unchanged(self, post);
         assert(SoftwareView::remove_region_step(self@, post@, region));
         post
     }
