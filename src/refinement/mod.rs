@@ -23,11 +23,9 @@
 //!
 //! | module       | role                                                                 |
 //! |--------------|----------------------------------------------------------------------|
-//! | [`software`] | `SoftwareRefinement` contract + `impl` for `BudgetSpec::State` (+ projection-delta lemmas) |
+//! | [`software`] | `BudgetSpec::State` -> `SoftwareView` projection + `SoftwareRefinement` contract/impl |
 //! | [`hardware`] | `HardwareRefinement` contract + `impl` for `MmuSpec::State`           |
 //! | [`machine`]  | `(SoftwareView, HardwareView)` → `MachineState`, incl. the sync bridge |
-//! | [`view`]     | software-side projection `BudgetSpec::State` → `SoftwareView`         |
 pub mod hardware;
 pub mod machine;
 pub mod software;
-pub mod view;

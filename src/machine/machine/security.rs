@@ -13,7 +13,7 @@ verus! {
 //   §0 threat model                  — `env_reachable`
 //   §1 proof helpers                 — translation/ownership/word-arith bridges
 //   §2 single-step isolation         — read/write non-interference, one env step
-//   §3 maintenance (solves (a))      — privacy is preserved along a run
+//   §3 maintenance                   — privacy is preserved along a run
 //   §4 well-formedness along runs    — `wf` at every reachable state
 //   §5 trace-level isolation         — §2 lifted to whole interleaved runs
 //   §6 trace isolation from boot     — the "from-boot" corollaries

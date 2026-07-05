@@ -1,8 +1,7 @@
 use vstd::prelude::*;
 
 use super::hardware::HardwareRefinement;
-use super::software::SoftwareRefinement;
-use super::view::state_s2_map;
+use super::software::{state_s2_map, SoftwareRefinement};
 use crate::hardware::spec::MmuSpec;
 use crate::hv_mem::spec::budget::BudgetSpec;
 use crate::machine::convert::flatten_s2map;
@@ -125,6 +124,9 @@ pub proof fn refine_hv_map(
         SoftwareView::map_step(sw1, sw2, vm, gpa, entry),
         HardwareView::map_step(hw1, hw2, vm, gpa, entry),
         MachineState::assemble(sw1, hw1).wf(),
+        // MachineState is CPU-only, so it cannot supply the source's IOMMU well-formedness;
+        // the refinement assumes the full software state (incl. DMA separation) is wf.
+        sw1.iommu_wf(),
     ensures
         MachineState::hv_map_step(
             MachineState::assemble(sw1, hw1),
@@ -201,6 +203,7 @@ pub proof fn refine_hv_unmap(
         SoftwareView::unmap_step(sw1, sw2, vm, gpa),
         HardwareView::unmap_invalidate_step(hw1, hw2, vm, gpa),
         MachineState::assemble(sw1, hw1).wf(),
+        sw1.iommu_wf(),
     ensures
         MachineState::hv_unmap_step(
             MachineState::assemble(sw1, hw1),
@@ -265,6 +268,7 @@ pub proof fn refine_hv_assign_page(
     requires
         SoftwareView::assign_page_step(sw1, sw2, vm, page),
         MachineState::assemble(sw1, hw).wf(),
+        sw1.iommu_wf(),
     ensures
         MachineState::hv_assign_page_step(
             MachineState::assemble(sw1, hw),
@@ -301,6 +305,7 @@ pub proof fn refine_hv_reclaim_page(
     requires
         SoftwareView::reclaim_page_step(sw1, sw2, vm, page),
         MachineState::assemble(sw1, hw).wf(),
+        sw1.iommu_wf(),
         MachineState::assemble(sw1, hw).page_is_quiescent(page),
     ensures
         MachineState::hv_reclaim_page_step(
@@ -349,6 +354,7 @@ pub proof fn refine_hv_share_page(
     requires
         SoftwareView::share_page_step(sw1, sw2, left, right, page),
         MachineState::assemble(sw1, hw).wf(),
+        sw1.iommu_wf(),
     ensures
         MachineState::hv_share_page_step(
             MachineState::assemble(sw1, hw),
@@ -386,6 +392,7 @@ pub proof fn refine_hv_unshare_page(
     requires
         SoftwareView::unshare_page_step(sw1, sw2, left, right, page),
         MachineState::assemble(sw1, hw).wf(),
+        sw1.iommu_wf(),
         // No-dangling guard (cf. `hv_unshare_page_step`): an endpoint that maps
         // `page` must own it, so dropping the share strands no translation.
         forall|k: VmPageKey| #[trigger]
@@ -483,6 +490,7 @@ pub proof fn refine_hv_add_vm(sw1: SoftwareView, sw2: SoftwareView, hw: Hardware
         SoftwareView::add_vm_enabled(sw1, vm),
         SoftwareView::add_vm_step(sw1, sw2, vm),
         MachineState::assemble(sw1, hw).wf(),
+        sw1.iommu_wf(),
     ensures
         MachineState::hv_add_vm_step(
             MachineState::assemble(sw1, hw),
@@ -522,6 +530,7 @@ pub proof fn refine_hv_remove_vm(sw1: SoftwareView, sw2: SoftwareView, hw: Hardw
         SoftwareView::remove_vm_enabled(sw1, vm),
         SoftwareView::remove_vm_step(sw1, sw2, vm),
         MachineState::assemble(sw1, hw).wf(),
+        sw1.iommu_wf(),
         forall|k: TlbKey| #[trigger]
             MachineState::assemble(sw1, hw).tlb.contains_key(k) ==> k.vm != vm,
         forall|cpu: CpuId| #[trigger]
@@ -745,6 +754,31 @@ pub proof fn lemma_insert_partial_wf(s1: SoftwareView, region: Region, a: nat, m
             }
         }
     }
+    // IOMMU: `iommu_*` are framed from `s1`; only `vm_owned[vm]` grew (by prefix pages,
+    // all region pages).  Clauses (1),(3) and translation carry unchanged; clause (2)
+    // uses the enabled IOMMU guard — a region page is not another VM's private DMA page.
+    assert(s1.iommu_wf());
+    assert forall|v1: VmId, v2: VmId| #[trigger]
+        sp.all_vms.contains(v1) && #[trigger] sp.all_vms.contains(v2) && v1 != v2 implies (forall|
+        p: PhysPage,
+    | #[trigger] sp.iommu_owned[v1].contains(p) ==> !sp.vm_owned[v2].contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            sp.iommu_owned[v1].contains(p) implies !sp.vm_owned[v2].contains(p) by {
+            if v2 == vm && pp.contains(p) {
+                assert(region.pages().contains(p));  // prefix ⊆ region pages (a <= count)
+                assert(s1.all_vms.contains(v1));
+                assert(!s1.iommu_owned[v1].contains(p));  // enabled guard (v1 != region.vm)
+            } else if v2 == vm {
+                // p ∉ prefix ⇒ sp.vm_owned[vm].contains(p) == s1.vm_owned[vm].contains(p);
+                // s1 clause (2) then rules it out.
+                assert(s1.iommu_owned[v1].contains(p));
+            } else {
+                assert(s1.iommu_owned[v1].contains(p));  // vm_owned[v2] unchanged
+            }
+        }
+    }
+    assert(sp.iommu_ownership_wf());
+    assert(sp.iommu_translation_wf());
     assert(sp.wf());
 }
 
@@ -783,6 +817,13 @@ pub proof fn lemma_insert_assign_edge(s1: SoftwareView, region: Region, i: nat)
         (i + 1) as nat,
         i,
     ).vm_owned);
+    // IOMMU assign guard: `page` is a region page, so by the enabled IOMMU guard it is not
+    // any *other* VM's private DMA page (`from.iommu_owned == s1.iommu_owned`).
+    assert forall|v1: VmId| #[trigger] from.all_vms.contains(v1) && v1 != vm implies
+        !from.iommu_owned[v1].contains(page) by {
+        assert(region.pages().contains(page));
+        assert(s1.all_vms.contains(v1));
+    }
 }
 
 /// Odd edge `2*i+1`: mapping region entry `i` advances `(i+1, i) → (i+1, i+1)`.
@@ -954,6 +995,23 @@ pub proof fn lemma_remove_partial_wf(s1: SoftwareView, region: Region, u: nat, r
             assert(sp.shared_pages.contains(w));
         }
     }
+    // IOMMU: `iommu_*` are framed from `s1`; `vm_owned[vm]` only shrinks, so clause (2)
+    // relaxes and every `iommu_wf` clause carries.
+    assert(s1.iommu_wf());
+    assert forall|v1: VmId, v2: VmId| #[trigger]
+        sp.all_vms.contains(v1) && #[trigger] sp.all_vms.contains(v2) && v1 != v2 implies (forall|
+        p: PhysPage,
+    | #[trigger] sp.iommu_owned[v1].contains(p) ==> !sp.vm_owned[v2].contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            sp.iommu_owned[v1].contains(p) implies !sp.vm_owned[v2].contains(p) by {
+            if sp.vm_owned[v2].contains(p) {
+                assert(s1.vm_owned[v2].contains(p));  // sp[v2] ⊆ s1[v2]
+                assert(s1.iommu_owned[v1].contains(p));
+            }
+        }
+    }
+    assert(sp.iommu_ownership_wf());
+    assert(sp.iommu_translation_wf());
     assert(sp.wf());
 }
 
@@ -1076,6 +1134,7 @@ pub proof fn lemma_insert_partial_machine_wf(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::insert_region_enabled(sw1, region),
+        sw1.iommu_wf(),
         m <= a,
         a <= region.count,
     ensures
@@ -1133,6 +1192,7 @@ pub proof fn lemma_insert_map_machine_edge(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::insert_region_enabled(sw1, region),
+        sw1.iommu_wf(),
         i < region.count,
     ensures
         MachineState::hv_map_step(
@@ -1165,6 +1225,8 @@ pub proof fn lemma_insert_map_machine_edge(
     }
     // The hardware side is exactly `map_step`: reachable map grows by `key`, TLB fixed.
     assert(HardwareView::map_step(hw1, hw2, vm, gpa, entry));
+    // `from_sw`'s IOMMU well-formedness for `refine_hv_map` (MachineState is CPU-only).
+    lemma_insert_partial_wf(sw1, region, (i + 1) as nat, i);
     refine_hv_map(from_sw, to_sw, hw1, hw2, vm, gpa, entry);
 }
 
@@ -1196,6 +1258,7 @@ pub proof fn lemma_insert_region_machine_trace(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::insert_region_enabled(sw1, region),
+        sw1.iommu_wf(),
         SoftwareView::insert_region_step(sw1, sw2, region),
     ensures
         exists|trace: Seq<MachineState>|
@@ -1256,6 +1319,7 @@ pub proof fn lemma_insert_region_machine_trace(
         if j % 2 == 0 {
             assert(i < n);
             lemma_insert_assign_edge(sw1, region, i);
+            lemma_insert_partial_wf(sw1, region, i, i);  // from_sw.iommu_wf() for refine_hv_assign_page
             lemma_insert_partial_machine_wf(sw1, hw, region, i, i);
             // assign keeps `s2_map` fixed, so the two partials share the synced `hw`.
             assert(insert_partial(sw1, region, i, i).s2_map == insert_partial(
@@ -1345,6 +1409,7 @@ pub proof fn lemma_remove_partial_machine_wf(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::remove_region_enabled(sw1, region),
+        sw1.iommu_wf(),
         r <= u,
         u <= region.count,
     ensures
@@ -1400,6 +1465,7 @@ pub proof fn lemma_remove_unmap_machine_edge(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::remove_region_enabled(sw1, region),
+        sw1.iommu_wf(),
         i < region.count,
     ensures
         MachineState::hv_unmap_step(
@@ -1448,6 +1514,7 @@ pub proof fn lemma_remove_reclaim_machine_edge(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::remove_region_enabled(sw1, region),
+        sw1.iommu_wf(),
         i < region.count,
     ensures
         MachineState::hv_reclaim_page_step(
@@ -1516,6 +1583,7 @@ pub proof fn lemma_remove_region_machine_trace(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::remove_region_enabled(sw1, region),
+        sw1.iommu_wf(),
         SoftwareView::remove_region_step(sw1, sw2, region),
     ensures
         exists|trace: Seq<MachineState>|

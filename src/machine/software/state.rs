@@ -48,7 +48,7 @@ impl SoftwareView {
     /// Whether `region` is a unit assignable to its VM *in this state*.
     /// Uninterpreted at the machine level — an implementation characterizes it (via
     /// its region budget, a runtime check, …) with a refinement axiom (see
-    /// `crate::refinement::view::axiom_assignable_from_budget`).  Being
+    /// `crate::refinement::software::axiom_assignable_from_budget`).  Being
     /// state-dependent, the machine model makes no region-budget assumption of its own.
     pub uninterp spec fn is_region_assignable(self, region: Region) -> bool;
 
@@ -155,30 +155,31 @@ impl SoftwareView {
     /// may legitimately CPU-map *and* DMA-map the same page (both are drawn from its
     /// trusted `zone_regions`), so there is deliberately **no** same-VM
     /// `iommu_owned ∩ vm_owned = ∅` clause.  Proven for every reachable implementation
-    /// state by [`crate::refinement::view::lemma_reachable_iommu_separation`].
+    /// state by [`crate::refinement::software::lemma_reachable_iommu_separation`].
     ///
     /// Note there is **no** `iommu_owned ∩ hypervisor_owned = ∅` ("pool-disjoint")
     /// clause: a private IOMMU-only page (DMA-mapped but not CPU-mapped) projects *into*
     /// the hypervisor pool, so such a clause would be false at the projection.
     ///
-    /// Kept *separate* from [`wf`](Self::wf) for now: folding the IOMMU invariant into
-    /// the generic abstract transition system requires IOMMU-aware cross-VM guards on
-    /// the CPU page/region ops (`assign`/`insert_region` could move a page that another
-    /// VM still DMA-maps), which couples to the machine-refinement layer
-    /// (`refinement::machine` derives `SoftwareView::wf` through a CPU-only bridge and
-    /// the region-trace partials mutate `vm_owned`).  That fold lands with the
-    /// `MachineState` IOMMU rework.  The per-page DMA steps below preserve `iommu_wf`
-    /// outright (no cross-VM coupling); see `super::proof`.
+    /// Folded into [`wf`](Self::wf): the transition system preserves it inductively.
+    /// The CPU page/region ops that grow ownership (`assign_page` / `insert_region`)
+    /// carry an IOMMU-aware cross-VM guard (a page moved to a VM must not be another
+    /// VM's private DMA page), the VM-lifecycle ops (`add_vm` / `remove_vm`) maintain
+    /// `iommu_owned`'s domain, and the per-page DMA steps preserve it outright; see
+    /// `super::proof`.
     pub open spec fn iommu_wf(&self) -> bool {
         &&& self.iommu_ownership_wf()
         &&& self.iommu_translation_wf()
     }
 
-    /// Combined software well-formedness invariant.
+    /// Combined software well-formedness invariant.  Includes the IOMMU/DMA separation
+    /// (`iommu_wf`): every reachable state confines each VM's DMA to its private,
+    /// zone-disjoint pages plus the shared GIC.
     pub open spec fn wf(&self) -> bool {
         &&& self.ownership_wf()
         &&& self.sharing_wf()
         &&& self.translation_wf()
+        &&& self.iommu_wf()
     }
 }
 
