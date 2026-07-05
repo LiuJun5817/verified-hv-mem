@@ -6,8 +6,9 @@
 //! ```text
 //!         software                              hardware
 //!   SoftwareRefinement   (software.rs)    HardwareRefinement   (hardware.rs)
-//!     impl for BudgetSpec::State            impl for MmuSpec::State
-//!         │ view                                 │ view
+//!     impl for BudgetSpec::State            impl for HardwareSpec
+//!         │ view                         (MmuSpec::State, MmuSpec::State)
+//!         │                                      │ view
 //!     SoftwareView ◄──────── sync ──────────► HardwareView
 //!         └────────────► MachineState ◄──────────┘   (machine.rs)
 //! ```
@@ -24,7 +25,7 @@
 //! | module       | role                                                                 |
 //! |--------------|----------------------------------------------------------------------|
 //! | [`software`] | `BudgetSpec::State` -> `SoftwareView` projection + `SoftwareRefinement` contract/impl |
-//! | [`hardware`] | `HardwareRefinement` contract + `impl` for `MmuSpec::State`           |
+//! | [`hardware`] | `HardwareSpec` projection + `HardwareRefinement` contract/impl        |
 //! | [`machine`]  | `(SoftwareView, HardwareView)` → `MachineState`, incl. the sync bridge |
 pub mod hardware;
 pub mod machine;

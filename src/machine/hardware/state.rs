@@ -43,6 +43,12 @@ pub ghost struct HardwareView {
     /// walk resolves right now.  Lags the page-table bytes (`SoftwareView::s2_map`) until
     /// the completing `DSB` of a mapping edit.
     pub s2map: Map<VmPageKey, S2Entry>,
+    /// Current SMMU/IOMMU TLB contents.  This uses the same regime-neutral TLB key as
+    /// `MmuSpec`; the IOMMU instance is separate from the CPU MMU instance.
+    pub iommu_tlb: Map<TlbKey, TlbEntry>,
+    /// The **IOMMU hardware-reachable** stage-2 map.  This is the SMMU walker view,
+    /// synchronized against `SoftwareView::iommu_s2_map` at machine sync points.
+    pub iommu_s2map: Map<VmPageKey, S2Entry>,
     /// The VM-observable **data plane**: physical memory values at addresses that
     /// translations resolve to (VM-owned ∪ shared pages).  This is *not* a model
     /// of all DRAM — page-table bytes and hypervisor-internal memory are
@@ -67,10 +73,22 @@ impl HardwareView {
             }
     }
 
+    /// IOMMU TLB coherence, mirroring [`tlb_safe`](Self::tlb_safe) for the SMMU
+    /// walker-reachable map.
+    pub open spec fn iommu_tlb_safe(&self) -> bool {
+        forall|key: TlbKey| #[trigger]
+            self.iommu_tlb.contains_key(key) ==> {
+                let sk = VmPageKey::new(key.vm, key.gpa);
+                &&& self.iommu_s2map.contains_key(sk)
+                &&& self.iommu_tlb[key].as_s2_entry() == self.iommu_s2map[sk]
+            }
+    }
+
     /// Hardware well-formedness: TLB coherence (invalidation is atomic, so this is
     /// the whole hardware invariant).
     pub open spec fn wf(&self) -> bool {
-        self.tlb_safe()
+        &&& self.tlb_safe()
+        &&& self.iommu_tlb_safe()
     }
 }
 

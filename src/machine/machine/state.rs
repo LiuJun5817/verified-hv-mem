@@ -20,11 +20,22 @@ pub ghost struct MachineState {
     pub shared_pages: Set<SharedPage>,
     /// The **software-maintained** stage-2 map (page-table bytes; from `SoftwareView`).
     pub s2_map: Map<VmPageKey, S2Entry>,
+    /// The **software-maintained IOMMU** stage-2 map (SMMU page-table bytes; from
+    /// `SoftwareView`).
+    pub iommu_s2_map: Map<VmPageKey, S2Entry>,
+    /// Per-VM private DMA ownership, copied from `SoftwareView`.
+    pub iommu_owned: Map<VmId, Set<PhysPage>>,
+    /// VM-independent IOMMU-shared pages, copied from `SoftwareView`.
+    pub iommu_shared: Set<PhysPage>,
     /// The **hardware-reachable** stage-2 map (walker view; from `HardwareView`).  Equal to
     /// `s2_map` at well-formed states (the [`sync`](MachineState::sync) invariant);
     /// the TLB caches *this* map, and translation resolves through it.
     pub hw_s2map: Map<VmPageKey, S2Entry>,
+    /// The **IOMMU hardware-reachable** stage-2 map (SMMU walker view; from
+    /// `HardwareView`).  Equal to `iommu_s2_map` at well-formed states.
+    pub iommu_hw_s2map: Map<VmPageKey, S2Entry>,
     pub tlb: Map<TlbKey, TlbEntry>,
+    pub iommu_tlb: Map<TlbKey, TlbEntry>,
     pub active_vm: Map<CpuId, VmId>,
     pub memory: Map<PhysWordAddr, DataWord>,
 }
@@ -38,8 +49,13 @@ impl MachineState {
             vm_owned: sw.vm_owned,
             shared_pages: sw.shared_pages,
             s2_map: sw.s2_map,
+            iommu_s2_map: sw.iommu_s2_map,
+            iommu_owned: sw.iommu_owned,
+            iommu_shared: sw.iommu_shared,
             hw_s2map: hw.s2map,
+            iommu_hw_s2map: hw.iommu_s2map,
             tlb: hw.tlb,
+            iommu_tlb: hw.iommu_tlb,
             active_vm: hw.active_vm,
             memory: hw.memory,
         }
@@ -91,6 +107,13 @@ impl MachineState {
         Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa && self.tlb.contains_key(key))
     }
 
+    /// IOMMU TLB keys invalidated by an SMMU page edit.
+    pub open spec fn iommu_invalidation_targets(&self, vm: VmId, gpa: GuestPage) -> Set<TlbKey> {
+        Set::new(
+            |key: TlbKey| key.vm == vm && key.gpa == gpa && self.iommu_tlb.contains_key(key),
+        )
+    }
+
     /// `page` is referenced by no `s2_map` entry, no TLB entry, and no sharing edge.
     ///
     /// This is the model's *flush-before-free* gate: `hv_reclaim_page_step` requires
@@ -106,6 +129,17 @@ impl MachineState {
             self.shared_pages.contains(edge) ==> edge.page != page
     }
 
+    /// IOMMU flush-before-free gate: `page` is referenced by no IOMMU stage-2 entry and
+    /// no SMMU TLB entry.  Required by `hv_iommu_reclaim_page_step` so a page cannot lose
+    /// its DMA ownership while an SMMU translation to it still resolves (which would
+    /// strand a mapping targeting neither `iommu_owned` nor `iommu_shared`).
+    pub open spec fn iommu_page_is_quiescent(&self, page: PhysPage) -> bool {
+        &&& forall|key: VmPageKey| #[trigger]
+            self.iommu_s2_map.contains_key(key) ==> self.iommu_s2_map[key].page != page
+        &&& forall|key: TlbKey| #[trigger]
+            self.iommu_tlb.contains_key(key) ==> self.iommu_tlb[key].page != page
+    }
+
     pub open spec fn same_identity_as(&self, other: &Self) -> bool {
         self.all_vms == other.all_vms
     }
@@ -114,12 +148,17 @@ impl MachineState {
         &&& self.hypervisor_owned == other.hypervisor_owned
         &&& self.vm_owned == other.vm_owned
         &&& self.shared_pages == other.shared_pages
+        &&& self.iommu_owned == other.iommu_owned
+        &&& self.iommu_shared == other.iommu_shared
     }
 
     pub open spec fn same_translation_as(&self, other: &Self) -> bool {
         &&& self.s2_map == other.s2_map
         &&& self.hw_s2map == other.hw_s2map
         &&& self.tlb == other.tlb
+        &&& self.iommu_s2_map == other.iommu_s2_map
+        &&& self.iommu_hw_s2map == other.iommu_hw_s2map
+        &&& self.iommu_tlb == other.iommu_tlb
         &&& self.active_vm == other.active_vm
     }
 
@@ -165,6 +204,26 @@ impl MachineState {
         entry is Some && entry->Some_0.access.write
     }
 
+    /// Effective IOMMU translation.  The `stream` parameter reuses `CpuId` as the
+    /// regime-neutral TLB-index component from `MmuSpec`; it represents the SMMU
+    /// context that owns the cached translation.
+    pub open spec fn iommu_effective_entry(
+        &self,
+        stream: CpuId,
+        vm: VmId,
+        gpa: GuestPage,
+    ) -> Option<S2Entry> {
+        let key = TlbKey::new(stream, vm, gpa);
+        let s2_key = VmPageKey::new(vm, gpa);
+        if self.iommu_tlb.contains_key(key) {
+            Option::Some(self.iommu_tlb[key].as_s2_entry())
+        } else if self.iommu_hw_s2map.contains_key(s2_key) {
+            Option::Some(self.iommu_hw_s2map[s2_key])
+        } else {
+            Option::None
+        }
+    }
+
     pub open spec fn read_observation(&self, cpu: CpuId, vm: VmId, gva: GuestWordAddr) -> Option<
         DataWord,
     > {
@@ -187,12 +246,28 @@ impl MachineState {
             }
     }
 
+    /// SMMU TLB entries agree with the IOMMU hardware-reachable map.
+    pub open spec fn iommu_tlb_safe(&self) -> bool {
+        forall|key: TlbKey| #[trigger]
+            self.iommu_tlb.contains_key(key) ==> {
+                let s2_key = VmPageKey::new(key.vm, key.gpa);
+                &&& self.iommu_hw_s2map.contains_key(s2_key)
+                &&& self.iommu_tlb[key].as_s2_entry() == self.iommu_hw_s2map[s2_key]
+            }
+    }
+
     /// **Sync — the cross-layer well-formedness clause.** The hardware-reachable map
     /// equals the software-maintained map.  Holds at every well-formed state; the
     /// break-before-make window where they diverge lives below this abstraction (at
     /// the `MmuSpec`/`BudgetSpec` token level), not here.
     pub open spec fn sync(&self) -> bool {
         self.hw_s2map == self.s2_map
+    }
+
+    /// IOMMU sync: the SMMU walker-reachable map equals the software-maintained
+    /// IOMMU page-table view.
+    pub open spec fn iommu_sync(&self) -> bool {
+        self.iommu_hw_s2map == self.iommu_s2_map
     }
 
     pub open spec fn ownership_wf(&self) -> bool {
@@ -224,6 +299,36 @@ impl MachineState {
             }
     }
 
+    pub open spec fn iommu_ownership_wf(&self) -> bool {
+        &&& self.iommu_owned.dom() == self.all_vms()
+        &&& forall|vm1: VmId, vm2: VmId| #[trigger]
+            self.all_vms().contains(vm1) && #[trigger] self.all_vms().contains(vm2) && vm1 != vm2
+                ==> forall|page: PhysPage| #[trigger]
+                self.iommu_owned[vm1].contains(page) ==> !self.iommu_owned[vm2].contains(page)
+        &&& forall|vm1: VmId, vm2: VmId| #[trigger]
+            self.all_vms().contains(vm1) && #[trigger] self.all_vms().contains(vm2) && vm1 != vm2
+                ==> forall|page: PhysPage| #[trigger]
+                self.iommu_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(page)
+        &&& forall|vm: VmId| #[trigger]
+            self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
+                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
+    }
+
+    pub open spec fn iommu_translation_wf(&self) -> bool {
+        forall|key: VmPageKey| #[trigger]
+            self.iommu_s2_map.contains_key(key) ==> {
+                &&& self.all_vms().contains(key.vm)
+                &&& self.iommu_owned.contains_key(key.vm)
+                &&& (self.iommu_owned[key.vm].contains(self.iommu_s2_map[key].page)
+                    || self.iommu_shared.contains(self.iommu_s2_map[key].page))
+            }
+    }
+
+    pub open spec fn iommu_wf(&self) -> bool {
+        &&& self.iommu_ownership_wf()
+        &&& self.iommu_translation_wf()
+    }
+
     pub open spec fn execution_wf(&self) -> bool {
         forall|cpu: CpuId| #[trigger]
             self.active_vm.contains_key(cpu) ==> self.all_vms().contains(self.active_vm[cpu])
@@ -233,9 +338,12 @@ impl MachineState {
         &&& self.ownership_wf()
         &&& self.sharing_wf()
         &&& self.translation_wf()
+        &&& self.iommu_wf()
         &&& self.execution_wf()
         &&& self.tlb_safe()
+        &&& self.iommu_tlb_safe()
         &&& self.sync()
+        &&& self.iommu_sync()
     }
 }
 

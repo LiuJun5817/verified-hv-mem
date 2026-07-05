@@ -30,6 +30,24 @@ proof fn lemma_tlb_safe_unchanged(s1: HardwareView, s2: HardwareView)
     }
 }
 
+/// If `iommu_tlb` and `iommu_s2map` are unchanged, `iommu_tlb_safe` carries over.
+proof fn lemma_iommu_tlb_safe_unchanged(s1: HardwareView, s2: HardwareView)
+    requires
+        s1.iommu_tlb_safe(),
+        s2.iommu_tlb == s1.iommu_tlb,
+        s2.iommu_s2map == s1.iommu_s2map,
+    ensures
+        s2.iommu_tlb_safe(),
+{
+    assert forall|key: TlbKey| #[trigger] s2.iommu_tlb.contains_key(key) implies {
+        let sk = VmPageKey::new(key.vm, key.gpa);
+        &&& s2.iommu_s2map.contains_key(sk)
+        &&& s2.iommu_tlb[key].as_s2_entry() == s2.iommu_s2map[sk]
+    } by {
+        assert(s1.iommu_tlb.contains_key(key));
+    }
+}
+
 pub proof fn lemma_tlb_fill_preserves_wf(
     s1: HardwareView,
     s2: HardwareView,
@@ -57,6 +75,7 @@ pub proof fn lemma_tlb_fill_preserves_wf(
             assert(s1.tlb.contains_key(key));
         }
     }
+    lemma_iommu_tlb_safe_unchanged(s1, s2);
 }
 
 /// The atomic break-before-make unmap preserves `tlb_safe`: a surviving cached key
@@ -122,6 +141,66 @@ pub proof fn lemma_map_preserves_tlb_safe(
     }
 }
 
+/// IOMMU atomic unmap preserves SMMU TLB coherence.
+pub proof fn lemma_iommu_unmap_invalidate_preserves_iommu_tlb_safe(
+    hw1: HardwareView,
+    hw2: HardwareView,
+    vm: VmId,
+    gpa: GuestPage,
+)
+    requires
+        hw1.iommu_tlb_safe(),
+        HardwareView::iommu_unmap_invalidate_step(hw1, hw2, vm, gpa),
+    ensures
+        hw2.iommu_tlb_safe(),
+{
+    let skey = VmPageKey::new(vm, gpa);
+    let targets = Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa);
+    assert(hw2.iommu_s2map == hw1.iommu_s2map.remove(skey));
+    assert(hw2.iommu_tlb =~= hw1.iommu_tlb.remove_keys(targets));
+    assert forall|key: TlbKey| #[trigger] hw2.iommu_tlb.contains_key(key) implies {
+        let sk = VmPageKey::new(key.vm, key.gpa);
+        &&& hw2.iommu_s2map.contains_key(sk)
+        &&& hw2.iommu_tlb[key].as_s2_entry() == hw2.iommu_s2map[sk]
+    } by {
+        let sk = VmPageKey::new(key.vm, key.gpa);
+        assert(hw1.iommu_tlb.remove_keys(targets).contains_key(key));
+        assert(sk != skey);
+        assert(hw1.iommu_s2map.contains_key(sk) && hw1.iommu_tlb[key].as_s2_entry()
+            == hw1.iommu_s2map[sk]);
+        assert(hw1.iommu_s2map.remove(skey).contains_key(sk));
+    }
+}
+
+/// IOMMU map-side fence preserves SMMU TLB coherence.
+pub proof fn lemma_iommu_map_preserves_iommu_tlb_safe(
+    hw1: HardwareView,
+    hw2: HardwareView,
+    vm: VmId,
+    gpa: GuestPage,
+    entry: S2Entry,
+)
+    requires
+        hw1.iommu_tlb_safe(),
+        HardwareView::iommu_map_step(hw1, hw2, vm, gpa, entry),
+    ensures
+        hw2.iommu_tlb_safe(),
+{
+    let skey = VmPageKey::new(vm, gpa);
+    assert forall|key: TlbKey| #[trigger] hw2.iommu_tlb.contains_key(key) implies {
+        let sk = VmPageKey::new(key.vm, key.gpa);
+        &&& hw2.iommu_s2map.contains_key(sk)
+        &&& hw2.iommu_tlb[key].as_s2_entry() == hw2.iommu_s2map[sk]
+    } by {
+        let sk = VmPageKey::new(key.vm, key.gpa);
+        assert(hw1.iommu_tlb.contains_key(key));
+        assert(hw1.iommu_s2map.contains_key(sk) && hw1.iommu_tlb[key].as_s2_entry()
+            == hw1.iommu_s2map[sk]);
+        assert(sk != skey);
+        assert(hw2.iommu_s2map == hw1.iommu_s2map.insert(skey, entry));
+    }
+}
+
 pub proof fn lemma_unmap_invalidate_preserves_wf(
     s1: HardwareView,
     s2: HardwareView,
@@ -135,6 +214,7 @@ pub proof fn lemma_unmap_invalidate_preserves_wf(
         s2.wf(),
 {
     lemma_unmap_invalidate_preserves_tlb_safe(s1, s2, vm, gpa);
+    lemma_iommu_tlb_safe_unchanged(s1, s2);
 }
 
 pub proof fn lemma_map_preserves_wf(
@@ -151,6 +231,40 @@ pub proof fn lemma_map_preserves_wf(
         s2.wf(),
 {
     lemma_map_preserves_tlb_safe(s1, s2, vm, gpa, entry);
+    lemma_iommu_tlb_safe_unchanged(s1, s2);
+}
+
+pub proof fn lemma_iommu_unmap_invalidate_preserves_wf(
+    s1: HardwareView,
+    s2: HardwareView,
+    vm: VmId,
+    gpa: GuestPage,
+)
+    requires
+        s1.wf(),
+        HardwareView::iommu_unmap_invalidate_step(s1, s2, vm, gpa),
+    ensures
+        s2.wf(),
+{
+    lemma_tlb_safe_unchanged(s1, s2);
+    lemma_iommu_unmap_invalidate_preserves_iommu_tlb_safe(s1, s2, vm, gpa);
+}
+
+pub proof fn lemma_iommu_map_preserves_wf(
+    s1: HardwareView,
+    s2: HardwareView,
+    vm: VmId,
+    gpa: GuestPage,
+    entry: S2Entry,
+)
+    requires
+        s1.wf(),
+        HardwareView::iommu_map_step(s1, s2, vm, gpa, entry),
+    ensures
+        s2.wf(),
+{
+    lemma_tlb_safe_unchanged(s1, s2);
+    lemma_iommu_map_preserves_iommu_tlb_safe(s1, s2, vm, gpa, entry);
 }
 
 pub proof fn lemma_context_switch_preserves_wf(
@@ -166,6 +280,7 @@ pub proof fn lemma_context_switch_preserves_wf(
         s2.wf(),
 {
     lemma_tlb_safe_unchanged(s1, s2);
+    lemma_iommu_tlb_safe_unchanged(s1, s2);
 }
 
 pub proof fn lemma_dsb_preserves_wf(s1: HardwareView, s2: HardwareView)
@@ -209,6 +324,7 @@ pub proof fn lemma_mem_write_preserves_wf(
 {
     // `tlb` and `s2map` are unchanged.
     lemma_tlb_safe_unchanged(s1, s2);
+    lemma_iommu_tlb_safe_unchanged(s1, s2);
 }
 
 } // verus!

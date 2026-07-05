@@ -30,6 +30,8 @@ impl HardwareView {
         &&& s1.active_vm.contains_key(cpu) && s1.active_vm[cpu] == vm
         &&& s1.s2map.contains_key(skey)
         &&& s2.s2map == s1.s2map
+        &&& s2.iommu_s2map == s1.iommu_s2map
+        &&& s2.iommu_tlb == s1.iommu_tlb
         &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory
         &&& s2.tlb == s1.tlb.insert(
@@ -60,6 +62,8 @@ impl HardwareView {
         let targets = Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa);
         &&& s2.s2map == s1.s2map.remove(skey)
         &&& s2.tlb == s1.tlb.remove_keys(targets)
+        &&& s2.iommu_s2map == s1.iommu_s2map
+        &&& s2.iommu_tlb == s1.iommu_tlb
         &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory
     }
@@ -81,6 +85,46 @@ impl HardwareView {
         &&& !s1.s2map.contains_key(skey)
         &&& s2.s2map == s1.s2map.insert(skey, entry)
         &&& s2.tlb == s1.tlb
+        &&& s2.iommu_s2map == s1.iommu_s2map
+        &&& s2.iommu_tlb == s1.iommu_tlb
+        &&& s2.active_vm == s1.active_vm
+        &&& s2.memory == s1.memory
+    }
+
+    /// IOMMU counterpart of [`unmap_invalidate_step`](Self::unmap_invalidate_step):
+    /// drop `(vm, gpa)` from the SMMU-reachable map and flush the SMMU TLB entries for
+    /// that page atomically.
+    pub open spec fn iommu_unmap_invalidate_step(
+        s1: HardwareView,
+        s2: HardwareView,
+        vm: VmId,
+        gpa: GuestPage,
+    ) -> bool {
+        let skey = VmPageKey::new(vm, gpa);
+        let targets = Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa);
+        &&& s2.iommu_s2map == s1.iommu_s2map.remove(skey)
+        &&& s2.iommu_tlb == s1.iommu_tlb.remove_keys(targets)
+        &&& s2.s2map == s1.s2map
+        &&& s2.tlb == s1.tlb
+        &&& s2.active_vm == s1.active_vm
+        &&& s2.memory == s1.memory
+    }
+
+    /// IOMMU counterpart of [`map_step`](Self::map_step): make a fresh SMMU PTE
+    /// walker-reachable.  The SMMU TLB is unchanged because the page was absent.
+    pub open spec fn iommu_map_step(
+        s1: HardwareView,
+        s2: HardwareView,
+        vm: VmId,
+        gpa: GuestPage,
+        entry: S2Entry,
+    ) -> bool {
+        let skey = VmPageKey::new(vm, gpa);
+        &&& !s1.iommu_s2map.contains_key(skey)
+        &&& s2.iommu_s2map == s1.iommu_s2map.insert(skey, entry)
+        &&& s2.iommu_tlb == s1.iommu_tlb
+        &&& s2.s2map == s1.s2map
+        &&& s2.tlb == s1.tlb
         &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory
     }
@@ -97,6 +141,8 @@ impl HardwareView {
         &&& s2.active_vm == s1.active_vm.insert(cpu, vm)
         &&& s2.tlb == s1.tlb
         &&& s2.s2map == s1.s2map
+        &&& s2.iommu_tlb == s1.iommu_tlb
+        &&& s2.iommu_s2map == s1.iommu_s2map
         &&& s2.memory == s1.memory
     }
 
@@ -128,6 +174,8 @@ impl HardwareView {
     ) -> bool {
         &&& s2.tlb == s1.tlb
         &&& s2.s2map == s1.s2map
+        &&& s2.iommu_tlb == s1.iommu_tlb
+        &&& s2.iommu_s2map == s1.iommu_s2map
         &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory.insert(pa, value)
     }

@@ -106,6 +106,14 @@ pub enum HypervisorOp {
     ContextSwitch(CpuId, VmId),
     AddVm(VmId),
     RemoveVm(VmId),
+    /// SMMU/IOMMU stage-2 map maintenance (the DMA counterpart of `Map`).
+    IommuMap(VmId, GuestPage, S2Entry),
+    /// SMMU/IOMMU stage-2 unmap maintenance (the DMA counterpart of `Unmap`).
+    IommuUnmap(VmId, GuestPage),
+    /// Grant `vm` private DMA ownership of `page` (the DMA counterpart of `AssignPage`).
+    IommuAssignPage(VmId, PhysPage),
+    /// Reclaim `page` from `vm`'s private DMA ownership (counterpart of `ReclaimPage`).
+    IommuReclaimPage(VmId, PhysPage),
 }
 
 /// A guest VM step and a hypervisor step are the two machine actions.  TLB

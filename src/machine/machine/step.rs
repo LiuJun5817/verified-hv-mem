@@ -160,6 +160,10 @@ impl MachineState {
         )
         // synchronous TLB invalidation of the edited mapping
         &&& s2.tlb == s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))
+        // CPU stage-2 maintenance leaves IOMMU translation state untouched.
+        &&& s2.iommu_s2_map == s1.iommu_s2_map
+        &&& s2.iommu_hw_s2map == s1.iommu_hw_s2map
+        &&& s2.iommu_tlb == s1.iommu_tlb
     }
 
     /// # TLB invalidation is modelled as atomic and global
@@ -194,6 +198,112 @@ impl MachineState {
         &&& s2.s2_map == s1.s2_map.remove(key)
         &&& s2.hw_s2map == s1.hw_s2map.remove(key)
         &&& s2.tlb == s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))
+        // CPU stage-2 maintenance leaves IOMMU translation state untouched.
+        &&& s2.iommu_s2_map == s1.iommu_s2_map
+        &&& s2.iommu_hw_s2map == s1.iommu_hw_s2map
+        &&& s2.iommu_tlb == s1.iommu_tlb
+    }
+
+    /// IOMMU/SMMU map-side maintenance: software IOMMU map and SMMU-reachable map grow
+    /// together; the SMMU TLB flush is vacuous because the page was fresh.
+    pub open spec fn hv_iommu_map_step(
+        s1: Self,
+        s2: Self,
+        vm: VmId,
+        gpa: GuestPage,
+        entry: S2Entry,
+    ) -> bool {
+        let key = VmPageKey::new(vm, gpa);
+        &&& s1.wf()
+        &&& s1.all_vms().contains(vm)
+        &&& s1.iommu_owned.contains_key(vm)
+        &&& (s1.iommu_owned[vm].contains(entry.page) || s1.iommu_shared.contains(entry.page))
+        &&& s2.wf()
+        &&& s2.same_identity_as(&s1)
+        &&& s2.same_ownership_as(&s1)
+        &&& s2.same_memory_as(&s1)
+        &&& s2.active_vm == s1.active_vm
+        &&& s2.s2_map == s1.s2_map
+        &&& s2.hw_s2map == s1.hw_s2map
+        &&& s2.tlb == s1.tlb
+        &&& s2.iommu_s2_map == s1.iommu_s2_map.insert(key, entry)
+        &&& s2.iommu_hw_s2map == s1.iommu_hw_s2map.insert(key, entry)
+        &&& s2.iommu_tlb == s1.iommu_tlb.remove_keys(s1.iommu_invalidation_targets(vm, gpa))
+    }
+
+    /// IOMMU/SMMU unmap maintenance: software IOMMU map and SMMU-reachable map lose the
+    /// key together, and the SMMU TLB entries for that key are flushed atomically.
+    pub open spec fn hv_iommu_unmap_step(s1: Self, s2: Self, vm: VmId, gpa: GuestPage) -> bool {
+        let key = VmPageKey::new(vm, gpa);
+        &&& s1.wf()
+        &&& s1.iommu_s2_map.contains_key(key)
+        &&& s2.wf()
+        &&& s2.same_identity_as(&s1)
+        &&& s2.same_ownership_as(&s1)
+        &&& s2.same_memory_as(&s1)
+        &&& s2.active_vm == s1.active_vm
+        &&& s2.s2_map == s1.s2_map
+        &&& s2.hw_s2map == s1.hw_s2map
+        &&& s2.tlb == s1.tlb
+        &&& s2.iommu_s2_map == s1.iommu_s2_map.remove(key)
+        &&& s2.iommu_hw_s2map == s1.iommu_hw_s2map.remove(key)
+        &&& s2.iommu_tlb == s1.iommu_tlb.remove_keys(s1.iommu_invalidation_targets(vm, gpa))
+    }
+
+    /// Grant `vm` **private DMA ownership** of `page` — the IOMMU counterpart of
+    /// [`hv_assign_page_step`](Self::hv_assign_page_step).  Unlike the CPU assign it does
+    /// *not* move the page out of the hypervisor pool (a DMA-only page legitimately
+    /// projects into the pool): it only grows `iommu_owned[vm]`, leaving all CPU state and
+    /// the SMMU translation state untouched.  The guards mirror `iommu_ownership_wf`: the
+    /// page is not the shared GIC, not another VM's private DMA page, and not another VM's
+    /// CPU-owned page — so DMA ownership stays cross-VM disjoint.
+    pub open spec fn hv_iommu_assign_page_step(
+        s1: Self,
+        s2: Self,
+        vm: VmId,
+        page: PhysPage,
+    ) -> bool {
+        &&& s1.wf()
+        &&& s1.all_vms().contains(vm)
+        &&& !s1.iommu_shared.contains(page)
+        &&& (forall|v2: VmId| #[trigger]
+            s1.all_vms().contains(v2) && v2 != vm ==> !s1.iommu_owned[v2].contains(page))
+        &&& (forall|v2: VmId| #[trigger]
+            s1.all_vms().contains(v2) && v2 != vm ==> !s1.vm_owned[v2].contains(page))
+        &&& s2.wf()
+        &&& s2.same_identity_as(&s1)
+        &&& s2.same_translation_as(&s1)
+        &&& s2.same_memory_as(&s1)
+        &&& s2.hypervisor_owned == s1.hypervisor_owned
+        &&& s2.vm_owned == s1.vm_owned
+        &&& s2.shared_pages == s1.shared_pages
+        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_owned == s1.iommu_owned.insert(vm, s1.iommu_owned[vm].insert(page))
+    }
+
+    /// Reclaim `page` from `vm`'s private DMA ownership — the IOMMU counterpart of
+    /// [`hv_reclaim_page_step`](Self::hv_reclaim_page_step).  `iommu_page_is_quiescent`
+    /// gates it: the page must be unmapped from the SMMU (no IOMMU stage-2 or SMMU-TLB
+    /// entry targets it), so dropping ownership strands no DMA translation.
+    pub open spec fn hv_iommu_reclaim_page_step(
+        s1: Self,
+        s2: Self,
+        vm: VmId,
+        page: PhysPage,
+    ) -> bool {
+        &&& s1.wf()
+        &&& s1.all_vms().contains(vm)
+        &&& s1.iommu_owned[vm].contains(page)
+        &&& s1.iommu_page_is_quiescent(page)
+        &&& s2.wf()
+        &&& s2.same_identity_as(&s1)
+        &&& s2.same_translation_as(&s1)
+        &&& s2.same_memory_as(&s1)
+        &&& s2.hypervisor_owned == s1.hypervisor_owned
+        &&& s2.vm_owned == s1.vm_owned
+        &&& s2.shared_pages == s1.shared_pages
+        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_owned == s1.iommu_owned.insert(vm, s1.iommu_owned[vm].remove(page))
     }
 
     pub open spec fn hv_assign_page_step(s1: Self, s2: Self, vm: VmId, page: PhysPage) -> bool {
@@ -206,6 +316,8 @@ impl MachineState {
         &&& s2.same_memory_as(&s1)
         &&& s2.hypervisor_owned == s1.hypervisor_owned.remove(page)
         &&& s2.shared_pages == s1.shared_pages
+        &&& s2.iommu_owned == s1.iommu_owned
+        &&& s2.iommu_shared == s1.iommu_shared
         &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].insert(page))
     }
 
@@ -219,6 +331,8 @@ impl MachineState {
         &&& s2.same_translation_as(&s1)
         &&& s2.same_memory_as(&s1)
         &&& s2.shared_pages == s1.shared_pages
+        &&& s2.iommu_owned == s1.iommu_owned
+        &&& s2.iommu_shared == s1.iommu_shared
         &&& s2.hypervisor_owned == s1.hypervisor_owned.insert(page)
         &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].remove(page))
     }
@@ -241,6 +355,8 @@ impl MachineState {
         &&& s2.same_identity_as(&s1)
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
+        &&& s2.iommu_owned == s1.iommu_owned
+        &&& s2.iommu_shared == s1.iommu_shared
         &&& s2.same_translation_as(&s1)
         &&& s2.same_memory_as(&s1)
         &&& s2.shared_pages == s1.shared_pages.insert(edge).insert(rev)
@@ -269,6 +385,8 @@ impl MachineState {
         &&& s2.same_identity_as(&s1)
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
+        &&& s2.iommu_owned == s1.iommu_owned
+        &&& s2.iommu_shared == s1.iommu_shared
         &&& s2.same_translation_as(&s1)
         &&& s2.same_memory_as(&s1)
         &&& s2.shared_pages == s1.shared_pages.remove(edge).remove(rev)
@@ -284,6 +402,9 @@ impl MachineState {
         &&& s2.s2_map == s1.s2_map
         &&& s2.hw_s2map == s1.hw_s2map
         &&& s2.tlb == s1.tlb
+        &&& s2.iommu_s2_map == s1.iommu_s2_map
+        &&& s2.iommu_hw_s2map == s1.iommu_hw_s2map
+        &&& s2.iommu_tlb == s1.iommu_tlb
         &&& s2.active_vm == s1.active_vm.insert(cpu, vm)
     }
 
@@ -295,6 +416,8 @@ impl MachineState {
         &&& s2.all_vms == s1.all_vms.insert(vm)
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned.insert(vm, Set::empty())
+        &&& s2.iommu_owned == s1.iommu_owned.insert(vm, Set::empty())
+        &&& s2.iommu_shared == s1.iommu_shared
         &&& s2.shared_pages == s1.shared_pages
         &&& s2.same_translation_as(&s1)
         &&& s2.same_memory_as(&s1)
@@ -306,8 +429,11 @@ impl MachineState {
         &&& s1.wf()
         &&& s1.all_vms().contains(vm)
         &&& s1.vm_owned[vm] == Set::<PhysPage>::empty()
+        &&& s1.iommu_owned[vm] == Set::<PhysPage>::empty()
         &&& (forall|k: VmPageKey| #[trigger] s1.s2_map.contains_key(k) ==> k.vm != vm)
+        &&& (forall|k: VmPageKey| #[trigger] s1.iommu_s2_map.contains_key(k) ==> k.vm != vm)
         &&& (forall|k: TlbKey| #[trigger] s1.tlb.contains_key(k) ==> k.vm != vm)
+        &&& (forall|k: TlbKey| #[trigger] s1.iommu_tlb.contains_key(k) ==> k.vm != vm)
         &&& (forall|e: SharedPage| #[trigger]
             s1.shared_pages.contains(e) ==> e.left != vm && e.right != vm)
         &&& (forall|cpu: CpuId| #[trigger]
@@ -316,6 +442,8 @@ impl MachineState {
         &&& s2.all_vms == s1.all_vms.remove(vm)
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned.remove(vm)
+        &&& s2.iommu_owned == s1.iommu_owned.remove(vm)
+        &&& s2.iommu_shared == s1.iommu_shared
         &&& s2.shared_pages == s1.shared_pages
         &&& s2.same_translation_as(&s1)
         &&& s2.same_memory_as(&s1)
@@ -336,6 +464,16 @@ impl MachineState {
             HypervisorOp::ContextSwitch(cpu, vm) => Self::hv_context_switch_step(s1, s2, cpu, vm),
             HypervisorOp::AddVm(vm) => Self::hv_add_vm_step(s1, s2, vm),
             HypervisorOp::RemoveVm(vm) => Self::hv_remove_vm_step(s1, s2, vm),
+            HypervisorOp::IommuMap(vm, gpa, entry) => {
+                Self::hv_iommu_map_step(s1, s2, vm, gpa, entry)
+            },
+            HypervisorOp::IommuUnmap(vm, gpa) => Self::hv_iommu_unmap_step(s1, s2, vm, gpa),
+            HypervisorOp::IommuAssignPage(vm, page) => {
+                Self::hv_iommu_assign_page_step(s1, s2, vm, page)
+            },
+            HypervisorOp::IommuReclaimPage(vm, page) => {
+                Self::hv_iommu_reclaim_page_step(s1, s2, vm, page)
+            },
         }
     }
 
@@ -360,6 +498,11 @@ impl MachineState {
         &&& s.s2_map == Map::<VmPageKey, S2Entry>::empty()
         &&& s.hw_s2map == Map::<VmPageKey, S2Entry>::empty()
         &&& s.tlb == Map::<TlbKey, TlbEntry>::empty()
+        &&& s.iommu_s2_map == Map::<VmPageKey, S2Entry>::empty()
+        &&& s.iommu_owned == Map::<VmId, Set<PhysPage>>::empty()
+        &&& s.iommu_shared == Set::<PhysPage>::empty()
+        &&& s.iommu_hw_s2map == Map::<VmPageKey, S2Entry>::empty()
+        &&& s.iommu_tlb == Map::<TlbKey, TlbEntry>::empty()
         &&& s.active_vm == Map::<CpuId, VmId>::empty()
     }
 
