@@ -61,6 +61,66 @@ pub proof fn lemma_unmap_step_preserves_wf(
     assert(s2.wf());
 }
 
+// ─────────────────── IOMMU per-page iommu_wf-preservation ────────────────────
+// The per-page DMA-remap steps touch only `iommu_s2_map`; all of `iommu_owned`,
+// `vm_owned`, `all_vms`, `iommu_shared` are framed unchanged, so `iommu_ownership_wf`
+// carries over verbatim and only `iommu_translation_wf` needs the new/surviving key
+// checked.  No cross-VM guard is needed (unlike the CPU page/region ops, which can
+// move ownership): these never change who owns what for DMA.
+pub proof fn lemma_iommu_map_step_preserves_iommu_wf(
+    s1: SoftwareView,
+    s2: SoftwareView,
+    vm: VmId,
+    gpa: GuestPage,
+    entry: S2Entry,
+)
+    requires
+        s1.iommu_wf(),
+        SoftwareView::iommu_map_step(s1, s2, vm, gpa, entry),
+    ensures
+        s2.iommu_wf(),
+{
+    let key = VmPageKey::new(vm, gpa);
+    // ownership_wf: iommu_owned / vm_owned / all_vms / iommu_shared all unchanged.
+    assert(s2.iommu_ownership_wf());
+    // translation_wf: surviving keys keep their (private-or-shared) target; the new key
+    // targets a page `vm` may DMA — private (`iommu_owned`) or shared (`iommu_shared`) —
+    // by the step's enabling guard.
+    assert forall|k: VmPageKey| #[trigger] s2.iommu_s2_map.contains_key(k) implies (
+    s2.all_vms.contains(k.vm) && s2.iommu_owned.contains_key(k.vm)
+        && (s2.iommu_owned[k.vm].contains(s2.iommu_s2_map[k].page)
+            || s2.iommu_shared.contains(s2.iommu_s2_map[k].page))) by {
+        if k != key {
+            assert(s1.iommu_s2_map.contains_key(k));
+        }
+    }
+    assert(s2.iommu_translation_wf());
+}
+
+pub proof fn lemma_iommu_unmap_step_preserves_iommu_wf(
+    s1: SoftwareView,
+    s2: SoftwareView,
+    vm: VmId,
+    gpa: GuestPage,
+)
+    requires
+        s1.iommu_wf(),
+        SoftwareView::iommu_unmap_step(s1, s2, vm, gpa),
+    ensures
+        s2.iommu_wf(),
+{
+    // `iommu_s2_map` only shrinks; ownership is untouched, so every surviving entry
+    // keeps its valid private-or-shared DMA target.
+    assert(s2.iommu_ownership_wf());
+    assert forall|k: VmPageKey| #[trigger] s2.iommu_s2_map.contains_key(k) implies (
+    s2.all_vms.contains(k.vm) && s2.iommu_owned.contains_key(k.vm)
+        && (s2.iommu_owned[k.vm].contains(s2.iommu_s2_map[k].page)
+            || s2.iommu_shared.contains(s2.iommu_s2_map[k].page))) by {
+        assert(s1.iommu_s2_map.contains_key(k));
+    }
+    assert(s2.iommu_translation_wf());
+}
+
 pub proof fn lemma_assign_page_step_preserves_wf(
     s1: SoftwareView,
     s2: SoftwareView,

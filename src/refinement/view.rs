@@ -361,12 +361,15 @@ pub open spec fn state_s2_map(s: BudgetSpec::State) -> Map<VmPageKey, S2Entry> {
 }
 
 // ───────────────────────────── IOMMU projections ────────────────────────────
-/// Physical pages a zone owns for IOMMU/DMA: all pages mapped by its `iommu_mem_set`
-/// (private zone-budget regions *and* the shared GIC region).
-pub open spec fn zone_iommu_owned_pages(gz: GhostZone) -> Set<PhysPage> {
+/// Physical pages a zone owns **privately** for IOMMU/DMA: pages mapped by its
+/// `iommu_mem_set` that are *not* part of the shared GIC region.  The shared GIC pages
+/// are tracked separately (`gic_shared_pages_set` / `iommu_shared`), so a VM's private
+/// DMA set is exactly its zone-disjoint DMA memory — genuinely private, with no GIC
+/// overlap.
+pub open spec fn zone_iommu_private_pages(gz: GhostZone) -> Set<PhysPage> {
     Set::new(
         |p: PhysPage|
-            exists|v: SpecVAddr| #[trigger]
+            !is_gic_page(p) && exists|v: SpecVAddr| #[trigger]
                 gz.iommu_mem_set.mappings.contains_key(v) && frame_phys_page(
                     gz.iommu_mem_set.mappings[v],
                 ) == p,
@@ -425,7 +428,7 @@ impl View for BudgetSpec::State {
             iommu_s2_map: state_iommu_s2_map(*self),
             iommu_owned: Map::new(
                 |vm: VmId| self.zone_ids.contains(vm.0),
-                |vm: VmId| zone_iommu_owned_pages(self.zones[vm.0]),
+                |vm: VmId| zone_iommu_private_pages(self.zones[vm.0]),
             ),
             iommu_shared: gic_shared_pages_set(),
         }
@@ -504,36 +507,40 @@ pub proof fn lemma_zone_owned_pages_region_witness(gz: GhostZone, p: PhysPage)
 }
 
 /// IOMMU analog of `lemma_zone_s2_target_owned`: every IOMMU stage-2 entry a zone
-/// installs targets a page that zone owns for DMA.
+/// installs targets a page the zone may DMA — a **private** DMA page
+/// (`zone_iommu_private_pages`) or a **shared** GIC page (`is_gic_page`).
 pub proof fn lemma_zone_iommu_s2_target_owned(zid: nat, gz: GhostZone)
     ensures
         forall|k: VmPageKey| #[trigger]
-            zone_iommu_s2_entries(zid, gz).contains_key(k) ==> zone_iommu_owned_pages(gz).contains(
-                zone_iommu_s2_entries(zid, gz)[k].page,
-            ),
+            zone_iommu_s2_entries(zid, gz).contains_key(k)
+                ==> zone_iommu_private_pages(gz).contains(zone_iommu_s2_entries(zid, gz)[k].page)
+                    || is_gic_page(zone_iommu_s2_entries(zid, gz)[k].page),
 {
     assert forall|k: VmPageKey| #[trigger]
-        zone_iommu_s2_entries(zid, gz).contains_key(k) implies zone_iommu_owned_pages(gz).contains(
-        zone_iommu_s2_entries(zid, gz)[k].page,
-    ) by {
+        zone_iommu_s2_entries(zid, gz).contains_key(k) implies (
+        zone_iommu_private_pages(gz).contains(zone_iommu_s2_entries(zid, gz)[k].page)
+            || is_gic_page(zone_iommu_s2_entries(zid, gz)[k].page)) by {
         let v = vaddr_of_gpa(k.gpa);
         assert(gz.iommu_mem_set.mappings.contains_key(v));
-        assert(zone_iommu_s2_entries(zid, gz)[k].page == frame_phys_page(
-            gz.iommu_mem_set.mappings[v],
-        ));
-        assert(zone_iommu_owned_pages(gz).contains(frame_phys_page(gz.iommu_mem_set.mappings[v])));
+        let p = frame_phys_page(gz.iommu_mem_set.mappings[v]);
+        assert(zone_iommu_s2_entries(zid, gz)[k].page == p);
+        // A mapped page is either a GIC page (shared) or a private DMA page (witness v).
+        if !is_gic_page(p) {
+            assert(zone_iommu_private_pages(gz).contains(p));
+        }
     }
 }
 
-/// IOMMU analog of `lemma_zone_owned_pages_region_witness`: a page a zone owns for
-/// DMA is backed by some region of its `iommu_mem_set`.
-pub proof fn lemma_zone_iommu_owned_pages_region_witness(gz: GhostZone, p: PhysPage)
+/// IOMMU analog of `lemma_zone_owned_pages_region_witness`: a **private** DMA page of a
+/// zone is backed by some *non-GIC* region of its `iommu_mem_set` (the GIC is excluded
+/// from private pages, so a region backing a private page cannot be the GIC region).
+pub proof fn lemma_zone_iommu_private_pages_region_witness(gz: GhostZone, p: PhysPage)
     requires
         gz.wf(),
-        zone_iommu_owned_pages(gz).contains(p),
+        zone_iommu_private_pages(gz).contains(p),
     ensures
         exists|r: MemoryRegion| #[trigger]
-            gz.iommu_mem_set.regions.contains(r) && region_owns_page(r, p),
+            gz.iommu_mem_set.regions.contains(r) && region_owns_page(r, p) && r != gic_region(),
 {
     let v = choose|v: SpecVAddr| #[trigger]
         gz.iommu_mem_set.mappings.contains_key(v) && frame_phys_page(gz.iommu_mem_set.mappings[v])
@@ -547,6 +554,15 @@ pub proof fn lemma_zone_iommu_owned_pages_region_witness(gz: GhostZone, p: PhysP
         == r.spec_frame(i));
     assert(region_phys_page(r, i) == p);
     assert(region_owns_page(r, p));  // witness i
+    // `p` is private ⇒ not a GIC page, so its backing region is not the GIC region
+    // (the GIC region owns only GIC pages).
+    assert(!is_gic_page(p));
+    assert(r != gic_region()) by {
+        if r == gic_region() {
+            assert(region_owns_page(gic_region(), p));  // == is_gic_page(p)
+            assert(false);
+        }
+    }
 }
 
 /// An empty page table owns no pages.
@@ -633,50 +649,48 @@ pub proof fn lemma_state_owned_pages_disjoint(s: BudgetSpec::State)
     }
 }
 
-/// **IOMMU separation (private pages).** If two *distinct* zones both own a page
-/// for DMA, that page must be a (shared) GIC page — private zone-budget regions are
-/// pairwise pmem-disjoint, so only the shared GIC region can be co-owned.
-pub proof fn lemma_state_iommu_cross_gic(s: BudgetSpec::State)
+/// **IOMMU private separation.** Two *distinct* zones never share a private DMA page:
+/// a private DMA page is backed by a non-GIC region, and those (being private
+/// zone-budget regions) are pairwise pmem-disjoint across zones.
+pub proof fn lemma_state_iommu_private_disjoint(s: BudgetSpec::State)
     requires
         s.invariant(),
     ensures
         forall|zid1: nat, zid2: nat, p: PhysPage|
-            #![trigger zone_iommu_owned_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
+            #![trigger zone_iommu_private_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
             s.zones.contains_key(zid1) && s.zones.contains_key(zid2) && zid1 != zid2
-                && zone_iommu_owned_pages(s.zones[zid1]).contains(p)
-                && zone_iommu_owned_pages(s.zones[zid2]).contains(p) ==> is_gic_page(p),
+                && zone_iommu_private_pages(s.zones[zid1]).contains(p)
+                ==> !zone_iommu_private_pages(s.zones[zid2]).contains(p),
 {
     assert forall|zid1: nat, zid2: nat, p: PhysPage|
-        #![trigger zone_iommu_owned_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
+        #![trigger zone_iommu_private_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
         s.zones.contains_key(zid1) && s.zones.contains_key(zid2) && zid1 != zid2
-            && zone_iommu_owned_pages(s.zones[zid1]).contains(p)
-            && zone_iommu_owned_pages(s.zones[zid2]).contains(p) implies is_gic_page(p) by {
-        let gz1 = s.zones[zid1];
-        let gz2 = s.zones[zid2];
-        assert(gz1.wf());
-        assert(gz2.wf());
-        lemma_zone_iommu_owned_pages_region_witness(gz1, p);
-        lemma_zone_iommu_owned_pages_region_witness(gz2, p);
-        let r1 = choose|r: MemoryRegion|
-            #![trigger gz1.iommu_mem_set.regions.contains(r)]
-            gz1.iommu_mem_set.regions.contains(r) && region_owns_page(r, p);
-        let r2 = choose|r: MemoryRegion|
-            #![trigger gz2.iommu_mem_set.regions.contains(r)]
-            gz2.iommu_mem_set.regions.contains(r) && region_owns_page(r, p);
-        assert(gz1.iommu_mem_set.regions.contains(r1) && region_owns_page(r1, p));
-        assert(gz2.iommu_mem_set.regions.contains(r2) && region_owns_page(r2, p));
-        // inv_iommu_in_zone_regions: each iommu region is a private region or the GIC.
-        assert(zone_regions(zid1).contains(r1) || r1 == gic_region());
-        assert(zone_regions(zid2).contains(r2) || r2 == gic_region());
-        if r1 == gic_region() {
-            assert(region_owns_page(gic_region(), p));
-        } else if r2 == gic_region() {
-            assert(region_owns_page(gic_region(), p));
-        } else {
-            // Both private: same page in two pairwise-disjoint regions — impossible.
+            && zone_iommu_private_pages(s.zones[zid1]).contains(p) implies
+            !zone_iommu_private_pages(s.zones[zid2]).contains(p) by {
+        if zone_iommu_private_pages(s.zones[zid2]).contains(p) {
+            let gz1 = s.zones[zid1];
+            let gz2 = s.zones[zid2];
+            assert(gz1.wf());
+            assert(gz2.wf());
+            lemma_zone_iommu_private_pages_region_witness(gz1, p);
+            lemma_zone_iommu_private_pages_region_witness(gz2, p);
+            let r1 = choose|r: MemoryRegion|
+                #![trigger gz1.iommu_mem_set.regions.contains(r)]
+                gz1.iommu_mem_set.regions.contains(r) && region_owns_page(r, p) && r != gic_region();
+            let r2 = choose|r: MemoryRegion|
+                #![trigger gz2.iommu_mem_set.regions.contains(r)]
+                gz2.iommu_mem_set.regions.contains(r) && region_owns_page(r, p) && r != gic_region();
+            assert(gz1.iommu_mem_set.regions.contains(r1) && region_owns_page(r1, p) && r1
+                != gic_region());
+            assert(gz2.iommu_mem_set.regions.contains(r2) && region_owns_page(r2, p) && r2
+                != gic_region());
+            // inv_iommu_in_zone_regions + non-GIC ⇒ both are private zone regions.
+            assert(zone_regions(zid1).contains(r1) || r1 == gic_region());
+            assert(zone_regions(zid2).contains(r2) || r2 == gic_region());
+            assert(zone_regions(zid1).contains(r1));
+            assert(zone_regions(zid2).contains(r2));
             let i1 = choose|i: nat| 0 <= i < r1.pages && region_phys_page(r1, i) == p;
             let i2 = choose|i: nat| 0 <= i < r2.pages && region_phys_page(r2, i) == p;
-            assert(zone_regions(zid1).contains(r1) && zone_regions(zid2).contains(r2));
             assert(r1.spec_valid() && r2.spec_valid());
             zone_regions_pairwise_disjoint();
             assert(!r1.spec_overlaps_pmem(r2));
@@ -686,24 +700,25 @@ pub proof fn lemma_state_iommu_cross_gic(s: BudgetSpec::State)
     }
 }
 
-/// **IOMMU vs CPU separation.** A page a zone owns for DMA is never CPU-owned by a
-/// *different* zone: private regions are zone-disjoint, and the GIC is pmem-disjoint
-/// from every zone's private (CPU) regions.
+/// **IOMMU vs CPU separation.** A **private** DMA page of one zone is never CPU-owned
+/// by a *different* zone: private DMA regions and CPU regions are both zone-private and
+/// pairwise pmem-disjoint across zones.  (A private DMA page is non-GIC, so its backing
+/// region is a zone region, not the GIC — no GIC case arises here.)
 pub proof fn lemma_state_iommu_cpu_disjoint(s: BudgetSpec::State)
     requires
         s.invariant(),
     ensures
         forall|zid1: nat, zid2: nat, p: PhysPage|
-            #![trigger zone_iommu_owned_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
+            #![trigger zone_iommu_private_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
             s.zones.contains_key(zid1) && s.zones.contains_key(zid2) && zid1 != zid2
-                && zone_iommu_owned_pages(s.zones[zid1]).contains(p) ==> !zone_owned_pages(
+                && zone_iommu_private_pages(s.zones[zid1]).contains(p) ==> !zone_owned_pages(
                 s.zones[zid2],
             ).contains(p),
 {
     assert forall|zid1: nat, zid2: nat, p: PhysPage|
-        #![trigger zone_iommu_owned_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
+        #![trigger zone_iommu_private_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
         s.zones.contains_key(zid1) && s.zones.contains_key(zid2) && zid1 != zid2
-            && zone_iommu_owned_pages(s.zones[zid1]).contains(p) implies !zone_owned_pages(
+            && zone_iommu_private_pages(s.zones[zid1]).contains(p) implies !zone_owned_pages(
         s.zones[zid2],
     ).contains(p) by {
         if zone_owned_pages(s.zones[zid2]).contains(p) {
@@ -711,37 +726,29 @@ pub proof fn lemma_state_iommu_cpu_disjoint(s: BudgetSpec::State)
             let gz2 = s.zones[zid2];
             assert(gz1.wf());
             assert(gz2.wf());
-            lemma_zone_iommu_owned_pages_region_witness(gz1, p);
+            lemma_zone_iommu_private_pages_region_witness(gz1, p);
             lemma_zone_owned_pages_region_witness(gz2, p);
             let r1 = choose|r: MemoryRegion|
                 #![trigger gz1.iommu_mem_set.regions.contains(r)]
-                gz1.iommu_mem_set.regions.contains(r) && region_owns_page(r, p);
+                gz1.iommu_mem_set.regions.contains(r) && region_owns_page(r, p) && r != gic_region();
             let r2 = choose|r: MemoryRegion|
                 #![trigger gz2.cpu_mem_set.regions.contains(r)]
                 gz2.cpu_mem_set.regions.contains(r) && region_owns_page(r, p);
-            assert(gz1.iommu_mem_set.regions.contains(r1) && region_owns_page(r1, p));
+            assert(gz1.iommu_mem_set.regions.contains(r1) && region_owns_page(r1, p) && r1
+                != gic_region());
             assert(gz2.cpu_mem_set.regions.contains(r2) && region_owns_page(r2, p));
-            // r1 is a private region or the GIC; r2 is private (CPU regions are private).
+            // r1 is a private (non-GIC) region ⇒ in zone_regions(zid1); r2 is a CPU region
+            // ⇒ in zone_regions(zid2).  Both private, hence pairwise pmem-disjoint.
             assert(zone_regions(zid1).contains(r1) || r1 == gic_region());
+            assert(zone_regions(zid1).contains(r1));
             assert(zone_regions(zid2).contains(r2));
             let i1 = choose|i: nat| 0 <= i < r1.pages && region_phys_page(r1, i) == p;
             let i2 = choose|i: nat| 0 <= i < r2.pages && region_phys_page(r2, i) == p;
-            assert(r2.spec_valid());
-            if r1 == gic_region() {
-                // GIC is pmem-disjoint from every zone's private regions.
-                assert(gic_region().spec_valid()) by { crate::hv_mem::spec::budget::all_regions_valid(); }
-                gic_region_disjoint_from_zones();
-                assert(!gic_region().spec_overlaps_pmem(r2));
-                lemma_same_phys_page_implies_pmem_overlap(gic_region(), i1, r2, i2);
-                assert(false);
-            } else {
-                assert(zone_regions(zid1).contains(r1));
-                assert(r1.spec_valid());
-                zone_regions_pairwise_disjoint();
-                assert(!r1.spec_overlaps_pmem(r2));
-                lemma_same_phys_page_implies_pmem_overlap(r1, i1, r2, i2);
-                assert(false);
-            }
+            assert(r1.spec_valid() && r2.spec_valid());
+            zone_regions_pairwise_disjoint();
+            assert(!r1.spec_overlaps_pmem(r2));
+            lemma_same_phys_page_implies_pmem_overlap(r1, i1, r2, i2);
+            assert(false);
         }
     }
 }
@@ -799,35 +806,56 @@ pub proof fn lemma_reachable_iommu_separation(s: BudgetSpec::State)
         s.view().iommu_wf(),
 {
     let sw = s.view();
-    // iommu_translation_wf: every IOMMU entry targets a page the VM owns for DMA.
     assert(sw.iommu_owned.dom() =~= sw.all_vms);
+    assert(sw.iommu_shared == gic_shared_pages_set());
+    // Bridge: for an active VM, its projected `iommu_owned` set is exactly its private
+    // DMA pages, and `iommu_shared` membership is exactly GIC-membership.
+    assert forall|vm: VmId| sw.all_vms.contains(vm) implies #[trigger] sw.iommu_owned[vm]
+        == zone_iommu_private_pages(s.zones[vm.0]) by {
+        assert(s.zones.contains_key(vm.0));
+    }
+
+    // iommu_translation_wf: every IOMMU entry targets a private DMA page or a shared GIC page.
     assert forall|key: VmPageKey| #[trigger] sw.iommu_s2_map.contains_key(key) implies (
     sw.all_vms.contains(key.vm) && sw.iommu_owned.contains_key(key.vm)
-        && sw.iommu_owned[key.vm].contains(sw.iommu_s2_map[key].page)) by {
+        && (sw.iommu_owned[key.vm].contains(sw.iommu_s2_map[key].page)
+            || sw.iommu_shared.contains(sw.iommu_s2_map[key].page))) by {
         lemma_zone_iommu_s2_target_owned(key.vm.0, s.zones[key.vm.0]);
+        let p = sw.iommu_s2_map[key].page;
+        // The entry's target is private (⇒ `iommu_owned[key.vm]`) or a GIC page (⇒ `iommu_shared`).
+        if is_gic_page(p) {
+            assert(gic_shared_pages_set().contains(p));
+        } else {
+            assert(zone_iommu_private_pages(s.zones[key.vm.0]).contains(p));
+        }
     }
     assert(sw.iommu_translation_wf());
 
-    // iommu_ownership_wf: cross-VM IOMMU overlap only on the shared GIC; IOMMU pages
-    // never coincide with another VM's CPU pages.
-    lemma_state_iommu_cross_gic(s);
+    // iommu_ownership_wf: (1) private DMA pages cross-VM disjoint; (2) never another VM's
+    // CPU pages; (3) private DMA pages are disjoint from the shared GIC.
+    lemma_state_iommu_private_disjoint(s);
     lemma_state_iommu_cpu_disjoint(s);
-    assert forall|vm1: VmId, vm2: VmId, page: PhysPage|
-        sw.all_vms.contains(vm1) && sw.all_vms.contains(vm2) && vm1 != vm2
-        && #[trigger] sw.iommu_owned[vm1].contains(page)
-        && #[trigger] sw.iommu_owned[vm2].contains(page) implies sw.iommu_shared.contains(page) by {
-        // Co-owned across distinct VMs ⇒ the page is a GIC page, which is exactly the
-        // `iommu_shared` set.
+    // (1)
+    assert forall|vm1: VmId, vm2: VmId| #[trigger] sw.all_vms.contains(vm1) && #[trigger]
+        sw.all_vms.contains(vm2) && vm1 != vm2 implies (forall|page: PhysPage| #[trigger]
+        sw.iommu_owned[vm1].contains(page) ==> !sw.iommu_owned[vm2].contains(page)) by {
         assert(s.zones.contains_key(vm1.0) && s.zones.contains_key(vm2.0));
         assert(vm1.0 != vm2.0);
-        assert(is_gic_page(page));
     }
-    assert forall|vm1: VmId, vm2: VmId|
-        sw.all_vms.contains(vm1) && sw.all_vms.contains(vm2) && vm1 != vm2 implies forall|
-            page: PhysPage,
-        | #[trigger] sw.iommu_owned[vm1].contains(page) ==> !sw.vm_owned[vm2].contains(page) by {
+    // (2)
+    assert forall|vm1: VmId, vm2: VmId| #[trigger] sw.all_vms.contains(vm1) && #[trigger]
+        sw.all_vms.contains(vm2) && vm1 != vm2 implies (forall|page: PhysPage| #[trigger]
+        sw.iommu_owned[vm1].contains(page) ==> !sw.vm_owned[vm2].contains(page)) by {
         assert(s.zones.contains_key(vm1.0) && s.zones.contains_key(vm2.0));
         assert(vm1.0 != vm2.0);
+    }
+    // (3) private pages are non-GIC by construction, so disjoint from `iommu_shared`.
+    assert forall|vm: VmId| #[trigger] sw.all_vms.contains(vm) implies (forall|page: PhysPage|
+        #[trigger] sw.iommu_owned[vm].contains(page) ==> !sw.iommu_shared.contains(page)) by {
+        assert forall|page: PhysPage| #[trigger] sw.iommu_owned[vm].contains(page) implies
+            !sw.iommu_shared.contains(page) by {
+            assert(zone_iommu_private_pages(s.zones[vm.0]).contains(page));  // ⇒ !is_gic_page(page)
+        }
     }
     assert(sw.iommu_ownership_wf());
 }

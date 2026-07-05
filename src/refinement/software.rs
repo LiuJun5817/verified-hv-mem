@@ -52,6 +52,18 @@ pub trait SoftwareRefinement: View<V = SoftwareView> + Sized {
             self@.wf(),
     ;
 
+    /// Invariants imply the IOMMU model is well-formed (cross-VM DMA separation +
+    /// translation confinement).  Kept separate from [`inv_implies_wf`](Self::inv_implies_wf)
+    /// because `iommu_wf` is not yet folded into `SoftwareView::wf` (that fold lands
+    /// with the `MachineState` IOMMU rework); this exposes it as a first-class
+    /// reachable-state fact at the refinement boundary, ready for the DMA-isolation proof.
+    broadcast proof fn inv_implies_iommu_wf(&self)
+        requires
+            #[trigger] self.invariants(),
+        ensures
+            self@.iommu_wf(),
+    ;
+
     /// Register a fresh, empty VM.
     proof fn add_vm(self, vm: VmId) -> (post: Self)
         requires
@@ -130,6 +142,13 @@ impl SoftwareRefinement for BudgetSpec::State {
         assert(sw.translation_wf());
 
         assert(sw.wf());
+    }
+
+    broadcast proof fn inv_implies_iommu_wf(&self)
+        ensures
+            #[trigger] self@.iommu_wf(),
+    {
+        lemma_reachable_iommu_separation(*self);
     }
 
     proof fn add_vm(self, vm: VmId) -> (post: Self) {

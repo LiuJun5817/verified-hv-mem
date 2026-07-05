@@ -26,13 +26,18 @@ pub ghost struct SoftwareView {
     /// device DMA.  A VM's IOMMU may map its private pages (`iommu_owned`) or pages
     /// shared with it (e.g. the GIC), exactly mirroring the CPU `s2_map` discipline.
     pub iommu_s2_map: Map<VmPageKey, S2Entry>,
-    /// Per-VM physical pages a VM owns for IOMMU/DMA.  Kept *separate* from
-    /// `vm_owned` (the CPU side): both are drawn from the VM's private region budget
-    /// and are cross-VM disjoint, but a VM may IOMMU-map a page it has not CPU-mapped.
+    /// Per-VM **private** physical pages a VM owns for IOMMU/DMA — its zone-budget DMA
+    /// memory *excluding* the shared GIC (which is tracked separately in
+    /// `iommu_shared`).  Kept *separate* from `vm_owned` (the CPU side): both are drawn
+    /// from the VM's private region budget and are cross-VM disjoint, but a VM may
+    /// IOMMU-map a page it has not CPU-mapped (and vice-versa).  Because the GIC is
+    /// excluded, this set is genuinely private — pairwise disjoint across VMs with no
+    /// exception.
     pub iommu_owned: Map<VmId, Set<PhysPage>>,
     /// Pages that may be IOMMU-shared across *all* VMs (the GIC region).  A
-    /// VM-independent set, distinct from the per-edge `shared_pages` CPU sharing
-    /// graph: it is the *only* memory a page may be co-owned through across VMs.
+    /// VM-independent set, distinct from the per-edge `shared_pages` CPU sharing graph
+    /// and from every VM's private `iommu_owned`: it is the *only* memory a VM's DMA may
+    /// reach that is not its own private DMA page.
     pub iommu_shared: Set<PhysPage>,
 }
 
@@ -103,47 +108,67 @@ impl SoftwareView {
             }
     }
 
-    /// IOMMU ownership separation: `iommu_owned` covers exactly `all_vms`, and a VM's
-    /// IOMMU pages may coincide with *another* VM's IOMMU pages **only on an
-    /// explicitly shared page** (the GIC) — private (zone-budget) pages are
-    /// zone-disjoint — and never coincide with another VM's CPU-owned pages.
+    /// IOMMU ownership separation.  `iommu_owned` holds each VM's **private** DMA pages
+    /// (the shared GIC lives in `iommu_shared`), so its clauses are the crisp form of
+    /// the design's rules: (1) private DMA pages are cross-VM disjoint — no GIC
+    /// exception, since the GIC is not private; (2) a VM's private DMA pages are never
+    /// another VM's CPU-owned pages; (3) private DMA pages are disjoint from the shared
+    /// region.  A VM may still DMA-map *its own* CPU pages — there is deliberately no
+    /// same-VM `iommu_owned ∩ vm_owned = ∅` clause.
     pub open spec fn iommu_ownership_wf(&self) -> bool {
         &&& self.iommu_owned.dom() == self.all_vms
-        // Cross-VM IOMMU overlap is permitted only on `iommu_shared` pages (the GIC).
-        &&& forall|vm1: VmId, vm2: VmId, page: PhysPage|
-            self.all_vms.contains(vm1) && self.all_vms.contains(vm2) && vm1 != vm2
-            && #[trigger] self.iommu_owned[vm1].contains(page)
-            && #[trigger] self.iommu_owned[vm2].contains(page)
-                ==> self.iommu_shared.contains(page)
-        // A VM's IOMMU pages never coincide with another VM's CPU-owned pages.
+        // (1) Private DMA pages are pairwise cross-VM disjoint.
+        &&& forall|vm1: VmId, vm2: VmId| #[trigger]
+            self.all_vms.contains(vm1) && #[trigger] self.all_vms.contains(vm2) && vm1 != vm2
+                ==> forall|page: PhysPage| #[trigger]
+                self.iommu_owned[vm1].contains(page) ==> !self.iommu_owned[vm2].contains(page)
+        // (2) A VM's private DMA pages are never another VM's CPU-owned pages.
         &&& forall|vm1: VmId, vm2: VmId| #[trigger]
             self.all_vms.contains(vm1) && #[trigger] self.all_vms.contains(vm2) && vm1 != vm2
                 ==> forall|page: PhysPage| #[trigger]
                 self.iommu_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(page)
+        // (3) Private DMA pages are disjoint from the shared region (truly private).
+        &&& forall|vm: VmId| #[trigger]
+            self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
+                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
     }
 
-    /// Every IOMMU stage-2 mapping targets a page the mapped VM owns for DMA
-    /// (`iommu_owned`).  Combined with `iommu_ownership_wf`, this confines a VM's DMA
-    /// to its private (zone-disjoint) pages plus explicitly shared pages (the GIC).
+    /// Every IOMMU stage-2 mapping targets a page the mapped VM is allowed to DMA: one
+    /// of its **private** DMA pages (`iommu_owned`) or a **shared** page (`iommu_shared`,
+    /// the GIC).  Combined with `iommu_ownership_wf`, this confines a VM's DMA to its
+    /// private (zone-disjoint) pages plus the shared GIC.
     pub open spec fn iommu_translation_wf(&self) -> bool {
         forall|key: VmPageKey| #[trigger]
             self.iommu_s2_map.contains_key(key) ==> {
                 &&& self.all_vms.contains(key.vm)
                 &&& self.iommu_owned.contains_key(key.vm)
-                &&& self.iommu_owned[key.vm].contains(self.iommu_s2_map[key].page)
+                &&& (self.iommu_owned[key.vm].contains(self.iommu_s2_map[key].page)
+                    || self.iommu_shared.contains(self.iommu_s2_map[key].page))
             }
     }
 
-    /// Combined IOMMU well-formedness: the design's *memory separation* (private
-    /// zone-budget pages are cross-VM disjoint; cross-VM IOMMU overlap only on shared
-    /// GIC pages; IOMMU pages never alias another VM's CPU pages) **and** *sharing*
-    /// (GIC pages are reachable via the sharing graph).  Proven to hold for every
-    /// reachable implementation state by
-    /// [`crate::refinement::view::lemma_reachable_iommu_separation`].
+    /// Combined IOMMU well-formedness: the design's **cross-VM** *memory separation*
+    /// (private DMA pages are cross-VM disjoint and never alias another VM's CPU pages;
+    /// the shared GIC is the only page a VM's DMA may reach that it does not privately
+    /// own) and *translation confinement* (each IOMMU entry targets one of its VM's
+    /// private DMA pages or the shared GIC).  Only cross-VM isolation is required: a VM
+    /// may legitimately CPU-map *and* DMA-map the same page (both are drawn from its
+    /// trusted `zone_regions`), so there is deliberately **no** same-VM
+    /// `iommu_owned ∩ vm_owned = ∅` clause.  Proven for every reachable implementation
+    /// state by [`crate::refinement::view::lemma_reachable_iommu_separation`].
     ///
-    /// Kept *separate* from [`wf`](Self::wf): folding the IOMMU invariant into the
-    /// generic abstract transition system additionally requires IOMMU-aware guards on
-    /// the generic page ops (`assign`/`share`/`unshare`) — tracked as follow-up work.
+    /// Note there is **no** `iommu_owned ∩ hypervisor_owned = ∅` ("pool-disjoint")
+    /// clause: a private IOMMU-only page (DMA-mapped but not CPU-mapped) projects *into*
+    /// the hypervisor pool, so such a clause would be false at the projection.
+    ///
+    /// Kept *separate* from [`wf`](Self::wf) for now: folding the IOMMU invariant into
+    /// the generic abstract transition system requires IOMMU-aware cross-VM guards on
+    /// the CPU page/region ops (`assign`/`insert_region` could move a page that another
+    /// VM still DMA-maps), which couples to the machine-refinement layer
+    /// (`refinement::machine` derives `SoftwareView::wf` through a CPU-only bridge and
+    /// the region-trace partials mutate `vm_owned`).  That fold lands with the
+    /// `MachineState` IOMMU rework.  The per-page DMA steps below preserve `iommu_wf`
+    /// outright (no cross-VM coupling); see `super::proof`.
     pub open spec fn iommu_wf(&self) -> bool {
         &&& self.iommu_ownership_wf()
         &&& self.iommu_translation_wf()

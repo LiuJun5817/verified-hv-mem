@@ -47,6 +47,54 @@ impl SoftwareView {
         &&& s2.s2_map == s1.s2_map.remove(key)
     }
 
+    /// Install (or replace) the **IOMMU** stage-2 mapping for `(vm, gpa)` — the DMA
+    /// counterpart of [`map_step`](Self::map_step).  Requires the target page to be one
+    /// `vm` may DMA: a **private** DMA page (`iommu_owned`) or a **shared** page
+    /// (`iommu_shared`, the GIC), confining a device's translation; the CPU state and
+    /// the other VMs' IOMMU ownership are untouched, so it preserves `iommu_wf` outright
+    /// (no cross-VM coupling — see `super::proof`).
+    pub open spec fn iommu_map_step(
+        s1: SoftwareView,
+        s2: SoftwareView,
+        vm: VmId,
+        gpa: GuestPage,
+        entry: S2Entry,
+    ) -> bool {
+        let key = VmPageKey::new(vm, gpa);
+        &&& s1.all_vms.contains(vm)
+        &&& s1.iommu_owned.contains_key(vm)
+        &&& (s1.iommu_owned[vm].contains(entry.page) || s1.iommu_shared.contains(entry.page))
+        &&& s2.all_vms == s1.all_vms
+        &&& s2.hypervisor_owned == s1.hypervisor_owned
+        &&& s2.vm_owned == s1.vm_owned
+        &&& s2.shared_pages == s1.shared_pages
+        &&& s2.s2_map == s1.s2_map
+        &&& s2.iommu_owned == s1.iommu_owned
+        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_s2_map == s1.iommu_s2_map.insert(key, entry)
+    }
+
+    /// Remove the **IOMMU** stage-2 mapping for `(vm, gpa)` — the DMA counterpart of
+    /// [`unmap_step`](Self::unmap_step).  Leaves `iommu_owned` (the page stays
+    /// DMA-owned until reclaimed) and all CPU state untouched.
+    pub open spec fn iommu_unmap_step(
+        s1: SoftwareView,
+        s2: SoftwareView,
+        vm: VmId,
+        gpa: GuestPage,
+    ) -> bool {
+        let key = VmPageKey::new(vm, gpa);
+        &&& s1.iommu_s2_map.contains_key(key)
+        &&& s2.all_vms == s1.all_vms
+        &&& s2.hypervisor_owned == s1.hypervisor_owned
+        &&& s2.vm_owned == s1.vm_owned
+        &&& s2.shared_pages == s1.shared_pages
+        &&& s2.s2_map == s1.s2_map
+        &&& s2.iommu_owned == s1.iommu_owned
+        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_s2_map == s1.iommu_s2_map.remove(key)
+    }
+
     /// Transfer `page` from the hypervisor pool to `vm`.
     pub open spec fn assign_page_step(
         s1: SoftwareView,
