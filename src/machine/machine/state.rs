@@ -312,6 +312,11 @@ impl MachineState {
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
                 self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
+        // (4) The shared region is disjoint from every VM's CPU ownership: a device DMA to
+        // a shared page can never land on another VM's CPU-private page.
+        &&& forall|vm: VmId| #[trigger]
+            self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
+                self.vm_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
     }
 
     pub open spec fn iommu_translation_wf(&self) -> bool {

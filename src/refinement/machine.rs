@@ -1,9 +1,18 @@
+use vstd::invariant::InvariantPredicate;
 use vstd::prelude::*;
 
 use super::hardware::{HardwareRefinement, HardwareSpec};
-use super::software::{state_iommu_s2_map, state_s2_map, SoftwareRefinement};
+use super::software::{
+    state_iommu_s2_map, state_s2_map, zone_iommu_s2_entries, zone_s2_entries, SoftwareRefinement,
+};
+use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
+use crate::hardware::HardwareInstr;
+use crate::hv_mem::protocol::{BudgetProtocol, ZoneStateOps};
 use crate::hv_mem::spec::budget::BudgetSpec;
-use crate::machine::convert::flatten_s2map;
+use crate::hv_mem::zone::{ZoneKey, ZonePred, ZoneRwContent};
+use crate::machine::convert::{flatten_s2map, frame_to_s2, pt_s2map_inner, vaddr_of_gpa};
+use crate::memory_set::MemorySet;
+use crate::page_table::PageTable;
 use crate::machine::hardware::proof::{
     lemma_context_switch_preserves_wf, lemma_iommu_map_preserves_wf,
     lemma_iommu_unmap_invalidate_preserves_wf, lemma_map_preserves_wf,
@@ -1074,6 +1083,20 @@ pub proof fn lemma_insert_partial_wf(s1: SoftwareView, region: Region, a: nat, m
             }
         }
     }
+    // clause (4): the grown CPU ownership stays disjoint from `iommu_shared` — prefix pages
+    // are region pages, which the enabled guard keeps out of `iommu_shared`.
+    assert forall|v: VmId| #[trigger]
+        sp.all_vms.contains(v) implies (forall|p: PhysPage| #[trigger] sp.vm_owned[v].contains(p)
+        ==> !sp.iommu_shared.contains(p)) by {
+        assert forall|p: PhysPage| #[trigger]
+            sp.vm_owned[v].contains(p) implies !sp.iommu_shared.contains(p) by {
+            if v == vm && pp.contains(p) {
+                assert(region.pages().contains(p));  // enabled guard ⇒ p ∉ iommu_shared
+            } else {
+                assert(s1.vm_owned[v].contains(p));  // s1 clause (4)
+            }
+        }
+    }
     assert(sp.iommu_ownership_wf());
     assert(sp.iommu_translation_wf());
     assert(sp.wf());
@@ -2046,6 +2069,260 @@ pub proof fn lemma_specs_synced_implies_wf_machine(hw: HardwareSpec, budget: Bud
     // The MMU view schedules no vm, so the scheduler clause is vacuous.
     assert(hw.view().active_vm == Map::<CpuId, VmId>::empty());
     lemma_synced_views_wf(budget.view(), hw.view());
+}
+
+// ---------------------------------------------------------------------------
+// Implementation sync: from per-zone lock invariants to `specs_synced`.
+//
+// The bridge above takes the *global* `specs_synced` as a hypothesis; the
+// implementation, however, certifies sync **per zone**: each `Zone`'s `RwLock`
+// carries [`ZonePred::inv`], which pins the zone's lock-resident `s2map` /
+// `iommu_s2map` slice tokens to the projection of its exec memory sets.  This
+// section closes that gap.  The certification chain, hypothesis by hypothesis:
+//
+// 1. `ZonePred::inv(k, v)` holds of every zone lock's resident content
+//    (the `RwLock` re-establishes it on every release).
+// 2. *Shard identities*: a map-sharded token's `(key, value)` pair **is** the
+//    matching entry of the aggregate instance state — for `v.s2map_tok` /
+//    `v.iommu_s2map_tok` (the two `MmuSpec` instances) and
+//    `v.zone_state.zone_tok` (`BudgetSpec::zones`).  This is the soundness
+//    guarantee of the tokenized-state-machine encoding.
+// 3. [`lemma_zone_pred_synced`] chains 1 + 2 into [`zone_synced`] — one zone's
+//    contribution to the global sync.
+// 4. `HvMemPred::inv` supplies the aggregation frame: the ghost `zone_ids` is
+//    exactly the set of exec zones, pairwise distinct, and **all** zones are
+//    bound to the same `BudgetSpec` / MMU / SMMU instances (`ZoneKey`'s
+//    `mem_inst_id` / `mmu_inst_id` / `iommu_mmu_inst_id` clauses) — so step 3
+//    applies at every live `zid` of the *same* three instances, giving the
+//    first clause of [`impl_synced`].
+// 5. The *dead-slice* clauses of [`impl_synced`] (a vm absent from `zone_ids`
+//    has an empty `s2map` slice): `MmuSpec::add_vm` mints every slice empty and
+//    is fired only by `HvMem::add_zone`, in lockstep with `BudgetSpec::add_zone`.
+//    CAVEAT: `HvMem::remove_zone` currently destroys a zone *without* requiring
+//    its memory sets to be empty — `MmuSpec` has no `remove_vm`, so a zone
+//    removed while mappings remain leaves a non-empty orphan slice and **exits
+//    the synced regime** (this predicate goes false, and the security bridge
+//    below no longer applies).  Guarding `remove_zone` on empty memory sets
+//    (or region-removing first) keeps the system inside `impl_synced`.
+// 6. `budget.invariant()` / `hw.invariants()`: every state of a tokenized
+//    state machine instance satisfies its invariants.
+//
+// [`lemma_impl_synced_implies_wf_machine`] then delivers the payoff: the
+// running system's projected machine state is `wf`, hence (e.g.)
+// [`lemma_impl_synced_dma_isolation`] — DMA isolation for the implementation.
+// ---------------------------------------------------------------------------
+/// One zone's contribution to the global sync, as certified by its lock:
+/// both hardware instances' slices for `VmId(zid)` exist and equal the
+/// projections of the zone's ghost memory sets.
+pub open spec fn zone_synced(hw: HardwareSpec, budget: BudgetSpec::State, zid: nat) -> bool {
+    &&& hw.mmu.s2map.contains_key(VmId(zid))
+    &&& hw.mmu.s2map[VmId(zid)] == pt_s2map_inner(budget.zones[zid].cpu_mem_set.mappings)
+    &&& hw.smmu.s2map.contains_key(VmId(zid))
+    &&& hw.smmu.s2map[VmId(zid)] == pt_s2map_inner(budget.zones[zid].iommu_mem_set.mappings)
+}
+
+/// The system-level sync the implementation maintains: every live zone is
+/// [`zone_synced`], and vms without a live zone contribute nothing to either
+/// hardware map (their slices, if any, are empty).
+pub open spec fn impl_synced(hw: HardwareSpec, budget: BudgetSpec::State) -> bool {
+    &&& forall|zid: nat| #[trigger]
+        budget.zone_ids.contains(zid) ==> zone_synced(hw, budget, zid)
+    &&& forall|vm: VmId|
+        #[trigger] hw.mmu.s2map.contains_key(vm) && !budget.zone_ids.contains(vm.0)
+            ==> hw.mmu.s2map[vm] == Map::<GuestPage, S2Entry>::empty()
+    &&& forall|vm: VmId|
+        #[trigger] hw.smmu.s2map.contains_key(vm) && !budget.zone_ids.contains(vm.0)
+            ==> hw.smmu.s2map[vm] == Map::<GuestPage, S2Entry>::empty()
+}
+
+/// **Per-zone extraction.** A zone lock's invariant, together with the shard
+/// identities of its three resident tokens (chain steps 1 + 2 above), yields
+/// that zone's [`zone_synced`] clause.  Purely mechanical equality chasing:
+/// `ZonePred::inv` pins each slice token's value to `pt_s2map_inner` of the
+/// exec memory set, and pins the ghost zone to the same memory set's view.
+pub proof fn lemma_zone_pred_synced<PT, M, A, I>(
+    k: ZoneKey,
+    v: ZoneRwContent<M, BudgetProtocol>,
+    hw: HardwareSpec,
+    budget: BudgetSpec::State,
+) where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A, I>,
+    A: BitmapAllocator,
+    I: HardwareInstr,
+
+    requires
+        ZonePred::<PT, M, A, BudgetProtocol, I>::inv(k, v),
+        // Shard identities (tokenized-SM guarantee): each lock-resident token's
+        // value is the matching entry of its instance's aggregate state.
+        hw.mmu.s2map.contains_key(VmId(k.zone_id as nat)),
+        hw.mmu.s2map[VmId(k.zone_id as nat)] == v.s2map_tok.value(),
+        hw.smmu.s2map.contains_key(VmId(k.zone_id as nat)),
+        hw.smmu.s2map[VmId(k.zone_id as nat)] == v.iommu_s2map_tok.value(),
+        budget.zones[k.zone_id as nat] == v.zone_state.ghost_zone(),
+    ensures
+        zone_synced(hw, budget, k.zone_id as nat),
+{
+    let zid = k.zone_id as nat;
+    // CPU chain: slice token = pt_s2map_inner(exec cpu mappings) = pt_s2map_inner(ghost cpu mappings).
+    assert(v.zone_state.ghost_zone().cpu_mem_set == v.cpu_mem_set_perm@.mem_contents->Init_0@);
+    assert(hw.mmu.s2map[VmId(zid)] == pt_s2map_inner(
+        budget.zones[zid].cpu_mem_set.mappings,
+    ));
+    // IOMMU chain, identically.
+    assert(v.zone_state.ghost_zone().iommu_mem_set == v.iommu_mem_set_perm@.mem_contents->Init_0@);
+    assert(hw.smmu.s2map[VmId(zid)] == pt_s2map_inner(
+        budget.zones[zid].iommu_mem_set.mappings,
+    ));
+}
+
+/// **The aggregation.** Per-zone sync plus empty dead slices pin both flattened
+/// hardware maps to the budget projections — the global [`specs_synced`].
+/// Pointwise: a flat key `(vm, gpa)` is in `flatten_s2map` iff `vm`'s slice
+/// maps `gpa`; for a live zone the slice *is* `pt_s2map_inner` of that zone's
+/// mappings, which is exactly `state_s2_map`'s entry; for a dead vm both sides
+/// are empty.
+pub proof fn lemma_impl_synced_specs_synced(hw: HardwareSpec, budget: BudgetSpec::State)
+    requires
+        impl_synced(hw, budget),
+    ensures
+        specs_synced(hw, budget),
+{
+    // CPU side.
+    assert(flatten_s2map(hw.mmu.s2map) =~= state_s2_map(budget)) by {
+        assert forall|k: VmPageKey|
+            #![auto]
+            {
+                &&& flatten_s2map(hw.mmu.s2map).contains_key(k) == state_s2_map(
+                    budget,
+                ).contains_key(k)
+                &&& flatten_s2map(hw.mmu.s2map).contains_key(k) ==> flatten_s2map(hw.mmu.s2map)[k]
+                    == state_s2_map(budget)[k]
+            } by {
+            let zid = k.vm.0;
+            assert(VmId(zid) == k.vm);
+            if budget.zone_ids.contains(zid) {
+                assert(zone_synced(hw, budget, zid));
+                let mp = budget.zones[zid].cpu_mem_set.mappings;
+                assert(hw.mmu.s2map[k.vm] == pt_s2map_inner(mp));
+                assert(pt_s2map_inner(mp).contains_key(k.gpa) == mp.contains_key(
+                    vaddr_of_gpa(k.gpa),
+                ));
+                assert(zone_s2_entries(zid, budget.zones[zid]).contains_key(k) == mp.contains_key(
+                    vaddr_of_gpa(k.gpa),
+                ));
+                if mp.contains_key(vaddr_of_gpa(k.gpa)) {
+                    assert(flatten_s2map(hw.mmu.s2map)[k] == frame_to_s2(
+                        mp[vaddr_of_gpa(k.gpa)],
+                    ));
+                    assert(state_s2_map(budget)[k] == frame_to_s2(mp[vaddr_of_gpa(k.gpa)]));
+                }
+            } else {
+                assert(!state_s2_map(budget).contains_key(k));
+                if hw.mmu.s2map.contains_key(k.vm) {
+                    assert(hw.mmu.s2map[k.vm] == Map::<GuestPage, S2Entry>::empty());
+                    assert(!hw.mmu.s2map[k.vm].contains_key(k.gpa));
+                }
+                assert(!flatten_s2map(hw.mmu.s2map).contains_key(k));
+            }
+        }
+    };
+    // IOMMU side, mirrored.
+    assert(flatten_s2map(hw.smmu.s2map) =~= state_iommu_s2_map(budget)) by {
+        assert forall|k: VmPageKey|
+            #![auto]
+            {
+                &&& flatten_s2map(hw.smmu.s2map).contains_key(k) == state_iommu_s2_map(
+                    budget,
+                ).contains_key(k)
+                &&& flatten_s2map(hw.smmu.s2map).contains_key(k) ==> flatten_s2map(
+                    hw.smmu.s2map,
+                )[k] == state_iommu_s2_map(budget)[k]
+            } by {
+            let zid = k.vm.0;
+            assert(VmId(zid) == k.vm);
+            if budget.zone_ids.contains(zid) {
+                assert(zone_synced(hw, budget, zid));
+                let mp = budget.zones[zid].iommu_mem_set.mappings;
+                assert(hw.smmu.s2map[k.vm] == pt_s2map_inner(mp));
+                assert(pt_s2map_inner(mp).contains_key(k.gpa) == mp.contains_key(
+                    vaddr_of_gpa(k.gpa),
+                ));
+                assert(zone_iommu_s2_entries(zid, budget.zones[zid]).contains_key(k)
+                    == mp.contains_key(vaddr_of_gpa(k.gpa)));
+                if mp.contains_key(vaddr_of_gpa(k.gpa)) {
+                    assert(flatten_s2map(hw.smmu.s2map)[k] == frame_to_s2(
+                        mp[vaddr_of_gpa(k.gpa)],
+                    ));
+                    assert(state_iommu_s2_map(budget)[k] == frame_to_s2(
+                        mp[vaddr_of_gpa(k.gpa)],
+                    ));
+                }
+            } else {
+                assert(!state_iommu_s2_map(budget).contains_key(k));
+                if hw.smmu.s2map.contains_key(k.vm) {
+                    assert(hw.smmu.s2map[k.vm] == Map::<GuestPage, S2Entry>::empty());
+                    assert(!hw.smmu.s2map[k.vm].contains_key(k.gpa));
+                }
+                assert(!flatten_s2map(hw.smmu.s2map).contains_key(k));
+            }
+        }
+    };
+}
+
+/// **Implementation states refine a `wf` machine.** The endpoint of the chain:
+/// the per-zone lock invariants (aggregated as [`impl_synced`]) imply the global
+/// `specs_synced`, hence the projected machine state is well-formed — every
+/// state the running hypervisor exposes at its sync points is `wf`.
+pub proof fn lemma_impl_synced_implies_wf_machine(hw: HardwareSpec, budget: BudgetSpec::State)
+    requires
+        hw.invariants(),
+        budget.invariant(),
+        impl_synced(hw, budget),
+    ensures
+        specs_synced(hw, budget),
+        MachineState::assemble(budget.view(), hw.view()).wf(),
+{
+    lemma_impl_synced_specs_synced(hw, budget);
+    lemma_specs_synced_implies_wf_machine(hw, budget);
+}
+
+/// **DMA isolation for the implementation — the gap-E payoff.** In any
+/// implementation state whose zones are lock-synced ([`impl_synced`]), a device
+/// operating for `vm` cannot resolve an SMMU translation onto a page privately
+/// owned (CPU- or DMA-) by a *different* VM `subject` — with the shared GIC
+/// present.  Instantiates the machine-model DMA isolation at the projected
+/// state, so the guarantee now reads on the running system rather than on an
+/// abstractly synced spec pair.
+pub proof fn lemma_impl_synced_dma_isolation(
+    hw: HardwareSpec,
+    budget: BudgetSpec::State,
+    subject: VmId,
+    page: PhysPage,
+    vm: VmId,
+    stream: CpuId,
+    gpa: GuestPage,
+)
+    requires
+        hw.invariants(),
+        budget.invariant(),
+        impl_synced(hw, budget),
+        MachineState::assemble(budget.view(), hw.view()).all_vms().contains(subject),
+        vm != subject,
+        MachineState::assemble(budget.view(), hw.view()).vm_owned[subject].contains(page)
+            || MachineState::assemble(budget.view(), hw.view()).iommu_owned[subject].contains(page),
+        MachineState::assemble(budget.view(), hw.view()).iommu_effective_entry(stream, vm, gpa)
+            is Some,
+    ensures
+        MachineState::assemble(budget.view(), hw.view()).iommu_effective_entry(
+            stream,
+            vm,
+            gpa,
+        )->Some_0.page != page,
+{
+    let s = MachineState::assemble(budget.view(), hw.view());
+    lemma_impl_synced_implies_wf_machine(hw, budget);
+    MachineState::lemma_state_dma_isolation(s, subject, page, vm, stream, gpa);
 }
 
 } // verus!

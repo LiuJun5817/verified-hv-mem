@@ -113,9 +113,11 @@ impl SoftwareView {
         &&& s1.all_vms.contains(vm)
         &&& s1.hypervisor_owned.contains(page)
         // IOMMU-aware guard: the page handed to `vm`'s CPU ownership must not be another
-        // VM's private DMA page (else `iommu_ownership_wf` clause (2) would break).
+        // VM's private DMA page (else `iommu_ownership_wf` clause (2) would break) nor a
+        // shared (GIC) page (else clause (4) would break).
         &&& forall|v1: VmId| #[trigger]
             s1.all_vms.contains(v1) && v1 != vm ==> !s1.iommu_owned[v1].contains(page)
+        &&& !s1.iommu_shared.contains(page)
         &&& s2.all_vms == s1.all_vms
         &&& s2.hypervisor_owned == s1.hypervisor_owned.remove(page)
         &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].insert(page))
@@ -298,10 +300,13 @@ impl SoftwareView {
         &&& (forall|k: VmPageKey| #[trigger]
             region.entries().contains_key(k) ==> !s1.s2_map.contains_key(k))
         // IOMMU-aware guard: none of the region's pages is another VM's private DMA page
-        // (else assigning them to `region.vm`'s CPU ownership breaks `iommu_ownership_wf`
-        // clause (2)).  Discharged in the refinement from zone-region disjointness.
+        // (clause (2)) nor a shared (GIC) page (clause (4)); assigning them to
+        // `region.vm`'s CPU ownership would otherwise break `iommu_ownership_wf`.
+        // Discharged in the refinement from zone-region / GIC disjointness.
         &&& (forall|p: PhysPage, v1: VmId| #[trigger] region.pages().contains(p) && #[trigger]
             s1.all_vms.contains(v1) && v1 != region.vm ==> !s1.iommu_owned[v1].contains(p))
+        &&& (forall|p: PhysPage| #[trigger]
+            region.pages().contains(p) ==> !s1.iommu_shared.contains(p))
     }
 
     /// `region` is an assignable unit for its VM, is currently installed, *no
@@ -326,6 +331,90 @@ impl SoftwareView {
         // (the analogue of the no-dangling clause above, for sharing edges).
         &&& (forall|e: SharedPage| #[trigger]
             s1.shared_pages.contains(e) ==> !region.pages().contains(e.page))
+    }
+
+    // -----------------------------------------------------------------------
+    // IOMMU region operations (the DMA counterparts of insert/remove_region)
+    //
+    // A `region` here is a *private* DMA region: its pages become `region.vm`'s
+    // private DMA ownership (`iommu_owned`) and its entries populate the IOMMU
+    // stage-2 map (`iommu_s2_map`).  The CPU state (ownership, sharing, s2_map) and
+    // the VM-independent shared set (`iommu_shared`) are untouched.  The shared GIC
+    // is not a dynamic op here — it is a static, VM-independent region.
+    // -----------------------------------------------------------------------
+    /// Bulk grant + map a whole private DMA `region` (counterpart of
+    /// `HvMem::insert_iommu_region`).
+    pub open spec fn iommu_insert_region_step(
+        s1: SoftwareView,
+        s2: SoftwareView,
+        region: Region,
+    ) -> bool {
+        &&& s2.all_vms == s1.all_vms
+        &&& s2.hypervisor_owned == s1.hypervisor_owned
+        &&& s2.vm_owned == s1.vm_owned
+        &&& s2.shared_pages == s1.shared_pages
+        &&& s2.s2_map == s1.s2_map
+        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_owned == s1.iommu_owned.insert(
+            region.vm,
+            s1.iommu_owned[region.vm].union(region.pages()),
+        )
+        &&& s2.iommu_s2_map == s1.iommu_s2_map.union_prefer_right(region.entries())
+    }
+
+    /// Bulk unmap + reclaim a whole private DMA `region` (counterpart of
+    /// `HvMem::remove_iommu_region`).
+    pub open spec fn iommu_remove_region_step(
+        s1: SoftwareView,
+        s2: SoftwareView,
+        region: Region,
+    ) -> bool {
+        &&& s2.all_vms == s1.all_vms
+        &&& s2.hypervisor_owned == s1.hypervisor_owned
+        &&& s2.vm_owned == s1.vm_owned
+        &&& s2.shared_pages == s1.shared_pages
+        &&& s2.s2_map == s1.s2_map
+        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_owned == s1.iommu_owned.insert(
+            region.vm,
+            s1.iommu_owned[region.vm].difference(region.pages()),
+        )
+        &&& s2.iommu_s2_map == s1.iommu_s2_map.remove_keys(region.entries().dom())
+    }
+
+    /// `region` is an assignable private DMA unit for its VM, its guest pages are not
+    /// yet IOMMU-mapped, and (for `iommu_ownership_wf`) its pages are neither another
+    /// VM's private DMA page (clause 1) nor another VM's CPU-owned page (clause 2) nor a
+    /// shared page (clause 3).  The last three are discharged in the refinement from
+    /// zone-region disjointness and GIC-vs-zone disjointness.
+    pub open spec fn iommu_insert_region_enabled(s1: SoftwareView, region: Region) -> bool {
+        &&& region.wf()
+        &&& s1.all_vms.contains(region.vm)
+        &&& s1.is_region_assignable(region)
+        &&& (forall|k: VmPageKey| #[trigger]
+            region.entries().contains_key(k) ==> !s1.iommu_s2_map.contains_key(k))
+        &&& (forall|p: PhysPage, v2: VmId| #[trigger] region.pages().contains(p) && #[trigger]
+            s1.all_vms.contains(v2) && v2 != region.vm ==> !s1.iommu_owned[v2].contains(p)
+                && !s1.vm_owned[v2].contains(p))
+        &&& (forall|p: PhysPage| #[trigger]
+            region.pages().contains(p) ==> !s1.iommu_shared.contains(p))
+    }
+
+    /// `region` is an assignable private DMA unit for its VM, is currently IOMMU-mapped,
+    /// and *no other* IOMMU mapping targets its pages (so reclaiming its DMA ownership
+    /// strands no SMMU translation).
+    pub open spec fn iommu_remove_region_enabled(s1: SoftwareView, region: Region) -> bool {
+        &&& region.wf()
+        &&& s1.all_vms.contains(region.vm)
+        &&& s1.is_region_assignable(region)
+        &&& (forall|p: PhysPage| #[trigger]
+            region.pages().contains(p) ==> s1.iommu_owned[region.vm].contains(p))
+        &&& (forall|k: VmPageKey| #[trigger]
+            region.entries().contains_key(k) ==> s1.iommu_s2_map.contains_key(k)
+                && s1.iommu_s2_map[k] == region.entries()[k])
+        &&& (forall|k: VmPageKey| #[trigger]
+            s1.iommu_s2_map.contains_key(k) && !region.entries().contains_key(k)
+                ==> !region.pages().contains(s1.iommu_s2_map[k].page))
     }
 }
 

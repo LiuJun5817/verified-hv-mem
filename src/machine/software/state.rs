@@ -113,8 +113,10 @@ impl SoftwareView {
     /// the design's rules: (1) private DMA pages are cross-VM disjoint — no GIC
     /// exception, since the GIC is not private; (2) a VM's private DMA pages are never
     /// another VM's CPU-owned pages; (3) private DMA pages are disjoint from the shared
-    /// region.  A VM may still DMA-map *its own* CPU pages — there is deliberately no
-    /// same-VM `iommu_owned ∩ vm_owned = ∅` clause.
+    /// region; (4) the shared region is disjoint from every VM's CPU ownership — the
+    /// shared GIC is a device region, never a VM's private RAM.  A VM may still DMA-map
+    /// *its own* CPU pages — there is deliberately no same-VM `iommu_owned ∩ vm_owned = ∅`
+    /// clause.
     pub open spec fn iommu_ownership_wf(&self) -> bool {
         &&& self.iommu_owned.dom() == self.all_vms
         // (1) Private DMA pages are pairwise cross-VM disjoint.
@@ -131,6 +133,12 @@ impl SoftwareView {
         &&& forall|vm: VmId| #[trigger]
             self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
                 self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
+        // (4) The shared region is disjoint from every VM's CPU ownership (the shared GIC
+        // is a device region, never a VM's private RAM) — so a device DMA to a shared page
+        // can never land on another VM's CPU-private page.
+        &&& forall|vm: VmId| #[trigger]
+            self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
+                self.vm_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
     }
 
     /// Every IOMMU stage-2 mapping targets a page the mapped VM is allowed to DMA: one

@@ -695,6 +695,168 @@ impl MachineState {
         Self::lemma_reachable_wf(s1);
         Self::lemma_write_isolation(s1, s2, subject, cpu, gva);
     }
+
+    // ───────────────────────── §7 DMA (IOMMU) isolation ───────────────────────
+    /// **DMA translation confinement (general).** In any `wf` state, a resolved SMMU
+    /// translation for `vm` lands on a page `vm` is entitled to DMA: one of its private
+    /// DMA pages (`iommu_owned[vm]`) or a shared page (`iommu_shared`).  The SMMU analog
+    /// of [`lemma_translation_targets_owned`](Self::lemma_translation_targets_owned):
+    /// `iommu_tlb_safe` + `iommu_sync` route the effective entry to `iommu_s2_map`, and
+    /// `iommu_translation_wf` confines its target.  Holds with a non-empty `iommu_shared`
+    /// too, so it applies to the implementation projection.
+    pub proof fn lemma_dma_translation_confined(
+        s: MachineState,
+        stream: CpuId,
+        vm: VmId,
+        gpa: GuestPage,
+    )
+        requires
+            s.wf(),
+            s.iommu_effective_entry(stream, vm, gpa) is Some,
+        ensures
+            s.all_vms().contains(vm),
+            s.iommu_owned.contains_key(vm),
+            s.iommu_owned[vm].contains(s.iommu_effective_entry(stream, vm, gpa)->Some_0.page)
+                || s.iommu_shared.contains(s.iommu_effective_entry(stream, vm, gpa)->Some_0.page),
+    {
+        let key = TlbKey::new(stream, vm, gpa);
+        let sk = VmPageKey::new(vm, gpa);
+        // The effective DMA entry's page is the IOMMU stage-2 map's page for `(vm, gpa)`:
+        // a cached SMMU-TLB entry agrees with the reachable map (`iommu_tlb_safe`), which
+        // equals the software map (`iommu_sync`); otherwise the entry *is* the map entry.
+        assert(s.iommu_s2_map.contains_key(sk)
+            && s.iommu_effective_entry(stream, vm, gpa)->Some_0.page == s.iommu_s2_map[sk].page) by {
+            assert(s.iommu_sync());
+            if s.iommu_tlb.contains_key(key) {
+                assert(s.iommu_tlb_safe());
+            }
+        }
+        // `iommu_translation_wf` at `sk` (note `sk.vm == vm`) gives ownership/sharing.
+        assert(s.iommu_translation_wf());
+    }
+
+    /// **State-local DMA isolation.** In any `wf` state, a device operating for `vm`
+    /// never resolves an SMMU translation onto a page that a *different* VM privately
+    /// owns — CPU-owned (`vm_owned[subject]`) or DMA-owned (`iommu_owned[subject]`) —
+    /// **even when the shared GIC region is present** (`iommu_shared` non-empty).
+    ///
+    /// Confinement (`lemma_dma_translation_confined`) lands the target in
+    /// `iommu_owned[vm] ∪ iommu_shared`, and all four `iommu_ownership_wf` clauses keep
+    /// both parts off `subject`'s private pages: a private-DMA target by clauses (1)/(2)
+    /// (cross-VM DMA disjoint; DMA never another VM's CPU page), and a shared (GIC)
+    /// target by clauses (3)/(4) (the shared region is disjoint from every VM's DMA and
+    /// CPU ownership — the GIC is a device region, never a VM's private RAM).
+    pub proof fn lemma_state_dma_isolation(
+        s: MachineState,
+        subject: VmId,
+        page: PhysPage,
+        vm: VmId,
+        stream: CpuId,
+        gpa: GuestPage,
+    )
+        requires
+            s.wf(),
+            s.all_vms().contains(subject),
+            vm != subject,
+            s.vm_owned[subject].contains(page) || s.iommu_owned[subject].contains(page),
+            s.iommu_effective_entry(stream, vm, gpa) is Some,
+        ensures
+            s.iommu_effective_entry(stream, vm, gpa)->Some_0.page != page,
+    {
+        let target = s.iommu_effective_entry(stream, vm, gpa)->Some_0.page;
+        Self::lemma_dma_translation_confined(s, stream, vm, gpa);
+        assert(s.all_vms().contains(vm));
+        assert(s.iommu_ownership_wf());
+        // The DMA target is in `iommu_owned[vm] ∪ iommu_shared`; in either case ownership
+        // separation keeps it off everything `subject` privately owns.
+        assert(!s.iommu_owned[subject].contains(target) && !s.vm_owned[subject].contains(target))
+            by {
+            if s.iommu_owned[vm].contains(target) {
+                // clauses (1) & (2) at `(vm, subject)`.
+                assert(!s.iommu_owned[subject].contains(target));
+                assert(!s.vm_owned[subject].contains(target));
+            } else {
+                assert(s.iommu_shared.contains(target));
+                // clauses (3) & (4) at `subject` (contrapositive): a shared page is
+                // neither `subject`'s DMA nor CPU page.
+                if s.iommu_owned[subject].contains(target) {
+                    assert(false);
+                }
+                if s.vm_owned[subject].contains(target) {
+                    assert(false);
+                }
+            }
+        }
+    }
+
+    /// Every state along an execution from an `iommu_shared`-empty start has an empty
+    /// `iommu_shared`: every step frames it unchanged (the DMA-sharing set is static).
+    pub proof fn lemma_execution_iommu_shared_empty(
+        trace: Seq<MachineState>,
+        acts: Seq<MachineAction>,
+        k: int,
+    )
+        requires
+            MachineState::is_execution(trace, acts),
+            trace[0].iommu_shared == Set::<PhysPage>::empty(),
+            0 <= k < trace.len(),
+        ensures
+            trace[k].iommu_shared == Set::<PhysPage>::empty(),
+        decreases k,
+    {
+        if k > 0 {
+            Self::lemma_execution_iommu_shared_empty(trace, acts, k - 1);
+            let i = k - 1;
+            assert(0 <= i < acts.len());
+            assert(MachineState::step(trace[i], trace[i + 1], acts[i]));
+            assert(trace[i + 1].iommu_shared == trace[i].iommu_shared);
+            assert(trace[i + 1] == trace[k]);
+        }
+    }
+
+    /// **Reachable ⇒ no IOMMU-shared pages.** `init` starts with an empty `iommu_shared`
+    /// and every step frames it, so it is empty at every reachable state.
+    pub proof fn lemma_reachable_iommu_shared_empty(s: MachineState)
+        requires
+            MachineState::reachable(s),
+        ensures
+            s.iommu_shared == Set::<PhysPage>::empty(),
+    {
+        let (trace, acts) = choose|trace: Seq<MachineState>, acts: Seq<MachineAction>|
+            {
+                &&& MachineState::is_execution(trace, acts)
+                &&& MachineState::init(trace[0])
+                &&& trace[trace.len() - 1] == s
+            };
+        assert(trace.len() == acts.len() + 1);
+        assert(MachineState::init(trace[0]));
+        Self::lemma_execution_iommu_shared_empty(trace, acts, trace.len() - 1);
+    }
+
+    /// **Reachable-state DMA isolation — the payoff.** From any state reachable from
+    /// `init`, a device operating for `vm` cannot DMA into a page that a *different* VM
+    /// `subject` privately owns (CPU- or DMA-owned) — with the shared GIC present or not.
+    /// `reachable ⇒ wf` plus the state-local DMA isolation.
+    pub proof fn lemma_reachable_dma_isolation(
+        s: MachineState,
+        subject: VmId,
+        page: PhysPage,
+        vm: VmId,
+        stream: CpuId,
+        gpa: GuestPage,
+    )
+        requires
+            MachineState::reachable(s),
+            s.all_vms().contains(subject),
+            vm != subject,
+            s.vm_owned[subject].contains(page) || s.iommu_owned[subject].contains(page),
+            s.iommu_effective_entry(stream, vm, gpa) is Some,
+        ensures
+            s.iommu_effective_entry(stream, vm, gpa)->Some_0.page != page,
+    {
+        Self::lemma_reachable_wf(s);
+        Self::lemma_state_dma_isolation(s, subject, page, vm, stream, gpa);
+    }
 }
 
 } // verus!
