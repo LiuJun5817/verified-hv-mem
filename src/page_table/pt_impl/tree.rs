@@ -1090,47 +1090,62 @@ impl PTTreeNode {
         let (idx, remain) = path.step();
         let entry = self.entries[idx as int];
         assert(self.entries.contains(entry));
-        if path.len() <= 1 {
-            match entry {
-                NodeEntry::Frame(_) => {
-                    assert(self.path_mappings().contains_key(path));
-                },
-                NodeEntry::Node(node) => {
-                    node.lemma_all_nonempty_implies_path_mappings_nonempty();
-                    let remain2 = choose|path: PTTreePath| node.path_mappings().contains_key(path);
-                    let path2 = PTTreePath(Seq::new(1, |_i| idx).add(remain2.0));
-                    assert(path2.0.skip(1) == remain2.0);
-                    assert(self.path_mappings().contains_key(path2));
-                    assert(path2.has_prefix(path));
-                },
-                _ => assert(false),
+        assert(exists|path2: PTTreePath| #[trigger]
+            self.path_mappings().contains_key(path2) && (path2.has_prefix(path) || path.has_prefix(
+                path2,
+            ))) by {
+            if path.len() <= 1 {
+                match entry {
+                    NodeEntry::Frame(_) => {
+                        assert(self.path_mappings().contains_key(path));
+                        assert(path.has_prefix(path));
+                    },
+                    NodeEntry::Node(node) => {
+                        node.lemma_all_nonempty_implies_path_mappings_nonempty();
+                        let remain2 = choose|path: PTTreePath|
+                            node.path_mappings().contains_key(path);
+                        let path2 = PTTreePath(Seq::new(1, |_i| idx).add(remain2.0));
+                        assert(path2.0.skip(1) == remain2.0);
+                        assert(self.path_mappings().contains_key(path2));
+                        assert(path2.has_prefix(path));
+                    },
+                    _ => {
+                        assert(self.insert(path, frame).1 is Ok);
+                        assert(false);
+                    },
+                }
+            } else {
+                match entry {
+                    NodeEntry::Frame(_) => {
+                        let path2 = PTTreePath(Seq::new(1, |_i| idx));
+                        assert(self.path_mappings().contains_key(path2));
+                        assert(path.has_prefix(path2));
+                    },
+                    NodeEntry::Node(node) => {
+                        node.lemma_insert_fails_implies_prefix(remain, frame);
+                        let remain2 = choose|subpath2: PTTreePath| #[trigger]
+                            node.path_mappings().contains_key(subpath2) && (subpath2.has_prefix(
+                                remain,
+                            ) || remain.has_prefix(subpath2));
+                        let path2 = PTTreePath(Seq::new(1, |_i| idx).add(remain2.0));
+                        assert(path2.0.skip(1) == remain2.0);
+                        assert(self.path_mappings().contains_key(path2));
+                        if remain2.has_prefix(remain) {
+                            path2.lemma_prefix_step(path);
+                            assert(path2.has_prefix(path));
+                        } else {
+                            path.lemma_prefix_step(path2);
+                            assert(path.has_prefix(path2));
+                        }
+                    },
+                    NodeEntry::Empty => {
+                        self.lemma_empty_entry_implies_insert_ok(path, frame);
+                        assert(self.insert(path, frame).1 is Ok);
+                        assert(false);
+                    },
+                }
             }
-        } else {
-            match entry {
-                NodeEntry::Frame(_) => {
-                    let path2 = PTTreePath(Seq::new(1, |_i| idx));
-                    assert(self.path_mappings().contains_key(path2));
-                    assert(path.has_prefix(path2));
-                },
-                NodeEntry::Node(node) => {
-                    node.lemma_insert_fails_implies_prefix(remain, frame);
-                    let remain2 = choose|subpath2: PTTreePath| #[trigger]
-                        node.path_mappings().contains_key(subpath2) && (subpath2.has_prefix(remain)
-                            || remain.has_prefix(subpath2));
-                    let path2 = PTTreePath(Seq::new(1, |_i| idx).add(remain2.0));
-                    assert(path2.0.skip(1) == remain2.0);
-                    assert(self.path_mappings().contains_key(path2));
-                    if remain2.has_prefix(remain) {
-                        path2.lemma_prefix_step(path);
-                    } else {
-                        path.lemma_prefix_step(path2);
-                    }
-                },
-                NodeEntry::Empty => self.lemma_empty_entry_implies_insert_ok(path, frame),
-            }
-        }
-        // TODO Resource limit (rlimit) exceeded
-        assume(false);
+        };
     }
 
     /// Lemma. If an empty entry is reached during `insert`, the result must be `Ok`.
