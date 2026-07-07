@@ -1,16 +1,10 @@
 //! A memory set is a collection of memory areas that can be mapped into the virtual address
 //! space of a zone (process). It manages the page table for the zone, and provides methods to
 //! insert, remove, and find memory areas.
-use crate::model::convert::pt_s2map_inner;
-use crate::hardware::{HardwareInstr, MmuHardware};
 use crate::hardware::spec::MmuS2MapToken;
+use crate::hardware::{HardwareInstr, MmuHardware};
 use crate::model::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 use crate::{
-    address::{
-        addr::{SpecPAddr, SpecVAddr, VAddr},
-        frame::{self, Frame, FrameSize, SpecFrame},
-        region::{MemoryRegion, PAGE_SIZE, SPEC_PAGE_SIZE},
-    },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
     page_table::{PTConstants, PageTable},
@@ -22,6 +16,15 @@ use vstd::tokens::InstanceId;
 mod vec;
 
 verus! {
+
+use crate::{
+    model::convert::pt_s2map_inner,
+    address::{
+        addr::{SpecPAddr, SpecVAddr, VAddr},
+        frame::{self, Frame, FrameSize, SpecFrame},
+        region::{MemoryRegion, PAGE_SIZE, SPEC_PAGE_SIZE},
+    },
+};
 
 /// Abstract state of a memory set: the regions **and** the page-table mappings
 /// they induce.

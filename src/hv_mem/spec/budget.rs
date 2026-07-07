@@ -16,7 +16,6 @@
 //! - regions currently assigned to a zone stay inside that zone's `zone_regions`;
 //! - different zones' configured regions are physically disjoint;
 //! - `gic_region` is physically disjoint from every zone's configured regions.
-use super::closure::all_regions;
 use super::GhostZone;
 use crate::address::region::MemoryRegion;
 use crate::memory_set::SpecMemorySet;
@@ -24,6 +23,8 @@ use verus_state_machines_macros::tokenized_state_machine;
 use vstd::{prelude::*, tokens::InstanceId};
 
 verus! {
+
+use super::closure::all_regions;
 
 /// Static configured regions owned by one zone.
 pub uninterp spec fn zone_regions(zid: nat) -> Set<MemoryRegion>;

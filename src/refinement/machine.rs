@@ -25,25 +25,31 @@ use vstd::invariant::InvariantPredicate;
 use vstd::prelude::*;
 
 use super::hardware::{HardwareRefinement, HardwareSpec};
-use super::software::{
-    state_iommu_s2_map, state_s2_map, zone_iommu_s2_entries, zone_s2_entries, SoftwareRefinement,
-    SoftwareSpec,
-};
+use super::software::{SoftwareRefinement, SoftwareSpec};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 use crate::hardware::HardwareInstr;
 use crate::hv_mem::protocol::{BudgetProtocol, ZoneStateOps};
 use crate::hv_mem::spec::budget::BudgetSpec;
 use crate::hv_mem::zone::{ZoneKey, ZonePred, ZoneRwContent};
-use crate::model::convert::{flatten_s2map, frame_to_s2, pt_s2map_inner, vaddr_of_gpa};
 use crate::memory_set::MemorySet;
+use crate::model::hardware::HardwareView;
+use crate::model::machine::MachineState;
+use crate::model::software::Region;
+use crate::model::software::SoftwareView;
+use crate::model::types::*;
 use crate::page_table::PageTable;
+
+verus! {
+
+use super::software::{
+    state_iommu_s2_map, state_s2_map, zone_iommu_s2_entries, zone_s2_entries,
+};
+use crate::model::convert::{flatten_s2map, frame_to_s2, pt_s2map_inner, vaddr_of_gpa};
 use crate::model::hardware::proof::{
     lemma_context_switch_preserves_wf, lemma_iommu_map_preserves_wf,
     lemma_iommu_unmap_invalidate_preserves_wf, lemma_map_preserves_wf,
     lemma_unmap_invalidate_preserves_wf,
 };
-use crate::model::hardware::HardwareView;
-use crate::model::machine::MachineState;
 use crate::model::software::proof::{
     lemma_add_vm_step_preserves_wf, lemma_assign_page_step_preserves_wf,
     lemma_iommu_map_step_preserves_iommu_wf, lemma_iommu_unmap_step_preserves_iommu_wf,
@@ -51,11 +57,6 @@ use crate::model::software::proof::{
     lemma_remove_vm_step_preserves_wf, lemma_share_page_step_preserves_wf,
     lemma_unmap_step_preserves_wf, lemma_unshare_page_step_preserves_wf,
 };
-use crate::model::software::Region;
-use crate::model::software::SoftwareView;
-use crate::model::types::*;
-
-verus! {
 
 // ---------------------------------------------------------------------------
 // §1  `wf` bridges: view-level ⟺ machine-level well-formedness

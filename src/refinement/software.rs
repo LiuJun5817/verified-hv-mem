@@ -33,22 +33,26 @@
 //! | §8 | the [`SoftwareRefinement`] contract + `impl for SoftwareSpec`       |
 use crate::address::addr::SpecVAddr;
 use crate::address::frame::SpecFrame;
-use crate::address::region::{MemoryRegion, SPEC_PAGE_SIZE};
+use crate::hv_mem::spec::budget::BudgetSpec;
+use crate::hv_mem::spec::GhostZone;
+use crate::memory_set::SpecMemorySet;
+use crate::model::software::{Region, SoftwareView};
+use crate::model::types::*;
+use vstd::prelude::*;
+
+verus! {
+
 use crate::hv_mem::spec::budget::{
     gic_region, gic_region_disjoint_from_zones, zone_regions, zone_regions_in_all_regions,
-    zone_regions_pairwise_disjoint, BudgetSpec,
+    zone_regions_pairwise_disjoint,
 };
-use crate::hv_mem::spec::{all_regions, all_regions_disjoint, all_regions_valid, GhostZone};
+use crate::hv_mem::spec::{all_regions, all_regions_disjoint, all_regions_valid};
 use crate::model::convert::{
     attr_to_perms, frame_phys_page, frame_to_s2, gpa_of_vaddr, lemma_vaddr_of_gpa_injective,
     phys_page_of_paddr, vaddr_of_gpa,
 };
-use crate::model::software::{Region, SoftwareView};
-use crate::model::types::*;
-use crate::memory_set::SpecMemorySet;
-use vstd::prelude::*;
+use crate::address::region::{MemoryRegion, SPEC_PAGE_SIZE};
 
-verus! {
 
 // ---------------------------------------------------------------------------
 // §1  Per-region geometry

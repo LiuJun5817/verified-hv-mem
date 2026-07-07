@@ -9,12 +9,13 @@ use crate::{address::region::MemoryRegion, memory_set::SpecMemorySet};
 use vstd::prelude::*;
 
 pub use budget::{BudgetSpec, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken};
+
+verus! {
+
 pub use closure::{
     all_regions, all_regions_disjoint, all_regions_valid, ClosureRegionToken, ClosureSpec,
     ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
 };
-
-verus! {
 
 /// Ghost state for one zone tracked inside `ClosureSpec` or `BudgetSpec`.
 ///

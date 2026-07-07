@@ -8,16 +8,14 @@
 //! The CPU memory set is kept in sync with the tokenized MMU (`s2map` slice token).
 //! The IOMMU memory set is a separate, MMU-free page-table-backed region set.
 use super::protocol::{BudgetGlobalState, BudgetProtocol, ZoneGhostProtocol, ZoneStateOps};
-use super::spec::budget::{gic_region, zone_regions};
 use crate::{
     address::region::MemoryRegion,
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
     hardware::spec::MmuS2MapToken,
     hardware::{HardwareInstr, MmuHardware},
-    model::convert::pt_s2map_inner,
-    model::types::VmId,
     memory_set::MemorySet,
+    model::types::VmId,
     page_table::PageTable,
     sync::rwlock::{RwLock, RwReadGuard, RwWriteGuard},
 };
@@ -30,6 +28,9 @@ use vstd::{
 };
 
 verus! {
+
+use super::spec::budget::{gic_region, zone_regions};
+use crate::model::convert::pt_s2map_inner;
 
 /// Ghost key for a `Zone`'s `RwLock`.
 ///
