@@ -28,7 +28,7 @@ use crate::{
     hardware::{HardwareInstr, MmuHardware},
     machine::convert::pt_s2map_inner,
     machine::types::{GuestPage, S2Entry, VmId},
-    memory_set::MemorySet,
+    memory_set::{MemorySet, SpecMemorySet},
     page_table::{PTConstants, PageTable},
     sync::rwlock::{RwLock, RwReadGuard, RwReaderToken, RwWriteGuard, RwWriterToken},
 };
@@ -343,6 +343,17 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         proof {
             assert(pt_s2map_inner(cpu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
             assert(pt_s2map_inner(iommu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
+            // Both fresh mem_sets equal the literal empty SpecMemorySet that
+            // `P::add_zone` put in the ghost zone token — this discharges
+            // `Zone::new`'s ghost/exec mirror preconditions.
+            assert(cpu_mem_set@ == SpecMemorySet {
+                regions: Set::empty(),
+                mappings: Map::empty(),
+            });
+            assert(iommu_mem_set@ == SpecMemorySet {
+                regions: Set::empty(),
+                mappings: Map::empty(),
+            });
         }
         let new_zone = Zone::<PT, M, A, P, I>::new(
             cpu_mem_set,

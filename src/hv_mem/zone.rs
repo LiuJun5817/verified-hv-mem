@@ -212,8 +212,17 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     ) -> (res: Self)
         requires
             zone_state.wf(mem_inst_id),
+            // The exec memory sets satisfy their own invariants and belong to the
+            // shared allocator instance.
+            cpu_mem_set.invariants(),
+            iommu_mem_set.invariants(),
             cpu_mem_set.inst_id() == alloc_inst_id,
             iommu_mem_set.inst_id() == alloc_inst_id,
+            // The ghost zone token is keyed by this zone and mirrors both exec
+            // memory sets — the ghost/exec sync point `ZonePred::inv` pins.
+            zone_state.zone_id() == zone_id as nat,
+            zone_state.ghost_zone().cpu_mem_set == cpu_mem_set@,
+            zone_state.ghost_zone().iommu_mem_set == iommu_mem_set@,
             // The freshly minted CPU slice token (from `MmuHardware::add_vm`) is keyed by
             // this zone's vm, belongs to the MMU instance, and projects the CPU mem_set.
             s2map_tok.instance_id() == mmu_inst_id,
@@ -257,11 +266,11 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             },
         );
 
-        // Admit ZonePred::inv; dischargeable from PCell::new postconditions,
-        // zone_state.wf(mem_inst_id) from the precondition, and the caller's
-        // responsibility to supply mem_sets satisfying M::invariants().
+        // ZonePred::inv holds at birth: the PointsTo clauses come from `PCell::new`,
+        // and every remaining clause (mem-set invariants, ghost-zone mirror, synced
+        // slice tokens) is a `Zone::new` precondition.
         proof {
-            assume(ZonePred::<PT, M, A, P, I>::inv(zone_key@, zone_rw_content));
+            assert(ZonePred::<PT, M, A, P, I>::inv(zone_key@, zone_rw_content));
         }
 
         let zone_lock = RwLock::new(zone_key, Tracked(zone_rw_content));
