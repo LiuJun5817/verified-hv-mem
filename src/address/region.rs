@@ -1,10 +1,15 @@
+use vstd::prelude::*;
+
+verus! {
+use core::prelude::rust_2021::derive;
+use core::fmt::Debug;
+use core::marker::Copy;
+use core::clone::Clone;
+
 use super::{
     addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
     frame::{FrameSize, MemAttr, SpecFrame},
 };
-use vstd::prelude::*;
-
-verus! {
 
 /// Page size in bytes (4KB).
 pub const PAGE_SIZE: usize = 0x1000;

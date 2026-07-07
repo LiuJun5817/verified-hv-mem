@@ -1,7 +1,11 @@
-use super::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 use vstd::prelude::*;
 
 verus! {
+use core::prelude::rust_2021::derive;
+use core::cmp::{Eq, PartialEq};
+use core::marker::Copy;
+use core::clone::Clone;
+use super::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 
 /// Represents a physical memory frame (Page or Block).
 pub struct SpecFrame {

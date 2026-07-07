@@ -6,12 +6,6 @@
 //! is exactly the set of frames that client currently owns.  The Instance
 //! invariants (`inv_free_clients_disjoint` and `inv_clients_disjoint`) then
 //! guarantee, at the type level, that no two clients ever hold the same frame.
-use crate::address::{
-    addr::{PAddr, SpecPAddr},
-    frame::Frame,
-};
-use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
-use crate::sync::mutex::{Mutex, MutexGuard};
 use core::marker::PhantomData;
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::cell::{CellId, PCell};
@@ -20,6 +14,15 @@ use vstd::prelude::*;
 use vstd::tokens::InstanceId;
 
 verus! {
+
+use crate::address::{
+    addr::{PAddr, SpecPAddr},
+    frame::Frame,
+};
+use crate::bitmap_allocator::{bitmap_trait::BitmapAllocator, bitmap_impl::BitAlloc1M};
+use crate::sync::mutex::{Mutex, MutexGuard};
+use core::unreachable;
+use core::unimplemented;
 
 /// Frame ID
 pub type FrameID = nat;
@@ -140,6 +143,15 @@ tokenized_state_machine! {
         }
 
         // ── Transitions ──────────────────────────────────────────────────────
+  
+        transition! {
+            init_free_set(size: FrameID) {
+                require(size <= pre.cap);
+                require(pre.free_set =~= Set::empty());
+                require(pre.registered =~= Set::empty());
+                update free_set = Set::new(|fid: FrameID| fid < size);
+            }
+        }
 
         /// Register a new client.
         /// `require(!pre.registered.contains(cid))` gives the ISC proof for the
@@ -176,6 +188,19 @@ tokenized_state_machine! {
             }
         }
 
+        /// Remove a contiguous allocated range `[start, start + count)` from client `cid`
+        /// and return it to the free pool.
+        transition! {
+            dealloc_contiguous(cid: ClientID, start: FrameID, count: FrameID) {
+                let removed = Set::new(|fid: FrameID| start <= fid < start + count);
+                require(0 < count);
+                remove client_sets -= [cid => let owned];
+                require(forall |fid: FrameID| #[trigger] removed.contains(fid) ==> owned.contains(fid));
+                update free_set = pre.free_set.union(removed);
+                add    client_sets += [cid => owned.difference(removed)];
+            }
+        }
+
         /// Return `fid` from `cid` back to the free pool.
         transition! {
             dealloc(cid: ClientID, fid: FrameID) {
@@ -193,6 +218,14 @@ tokenized_state_machine! {
 
         #[inductive(initialize)]
         fn initialize_inductive(post: Self, cap: FrameID) {}
+
+        #[inductive(init_free_set)]
+        fn init_free_set_inductive(pre: Self, post: Self, size: FrameID) {
+            assert(post.client_sets =~= pre.client_sets);
+            assert(post.registered =~= pre.registered);
+            assert(pre.client_sets =~= Map::empty());
+            assert(post.client_sets =~= Map::empty());
+        }
 
         #[inductive(register_client)]
         fn register_client_inductive(pre: Self, post: Self, cid: ClientID) {
@@ -430,6 +463,66 @@ tokenized_state_machine! {
                 }
             }
         }
+
+        #[inductive(dealloc_contiguous)]
+        fn dealloc_contiguous_inductive(pre: Self, post: Self, cid: ClientID, start: FrameID, count: FrameID) {
+            let removed = Set::new(|fid: FrameID| start <= fid < start + count);
+            let owned = pre.client_sets[cid];
+            assert(post.client_sets =~= pre.client_sets.insert(cid, owned.difference(removed)));
+            assert(post.free_set =~= pre.free_set.union(removed));
+
+            assert(removed.disjoint(pre.free_set)) by {
+                assert(pre.inv_free_clients_disjoint());
+                assert(owned.disjoint(pre.free_set));
+                assert forall |fid: FrameID| #[trigger] removed.contains(fid) implies owned.contains(fid) by {
+                    assert(owned.contains(fid));
+                }
+            }
+
+            assert forall |c: ClientID| #![auto]
+                #[trigger] post.registered.contains(c) <==> post.client_sets.contains_key(c)
+            by { assert(pre.inv_registered()); }
+
+            assert forall |c: ClientID| #[trigger] post.client_sets.contains_key(c)
+                implies post.client_sets[c].disjoint(post.free_set)
+            by {
+                assert(pre.inv_free_clients_disjoint());
+                if c == cid {
+                    assert(post.client_sets[c] =~= owned.difference(removed));
+                    assert(post.client_sets[c].disjoint(removed));
+                    assert(owned.difference(removed).disjoint(pre.free_set));
+                } else {
+                    assert(pre.inv_clients_disjoint());
+                    assert(pre.client_sets[c].disjoint(owned));
+                    assert(pre.client_sets[c].disjoint(pre.free_set));
+                    assert(pre.client_sets[c] =~= post.client_sets[c]);
+                    assert(pre.client_sets[c].disjoint(removed)) by {
+                        assert forall |fid: FrameID| #[trigger] removed.contains(fid) implies owned.contains(fid) by {
+                            assert(owned.contains(fid));
+                        }
+                    }
+                }
+            }
+
+            assert forall |c1: ClientID, c2: ClientID| #![auto]
+                c1 != c2
+                && post.client_sets.contains_key(c1)
+                && post.client_sets.contains_key(c2)
+                implies post.client_sets[c1].disjoint(post.client_sets[c2])
+            by {
+                assert(pre.inv_clients_disjoint());
+                if c1 == cid {
+                    assert(post.client_sets[c1].subset_of(pre.client_sets[c1]));
+                    assert(pre.client_sets[c2] =~= post.client_sets[c2]);
+                } else if c2 == cid {
+                    assert(post.client_sets[c2].subset_of(pre.client_sets[c2]));
+                    assert(pre.client_sets[c1] =~= post.client_sets[c1]);
+                } else {
+                    assert(pre.client_sets[c1] =~= post.client_sets[c1]);
+                    assert(pre.client_sets[c2] =~= post.client_sets[c2]);
+                }
+            }
+        }
     }
 }
 // ── Type aliases ──────────────────────────────────────────────────────────────
@@ -442,6 +535,8 @@ pub type FreeSetToken = AllocSpec::free_set;
 pub type RegisteredToken = AllocSpec::registered;
 
 pub type ClientToken = AllocSpec::client_sets;
+
+pub type GbAlloc = GlobalAllocator<BitAlloc1M>;
 
 /// Frame Size: 4 KiB (4096 bytes).
 pub const FRAME_SIZE: usize = 4096;
@@ -482,6 +577,37 @@ impl AllocatorState {
             self.free_perms.contains_key(fid) ==> self.free_perms[fid].is_init() && inst_base(
                 self.inst.id(),
             ).0 + fid * SPEC_FRAME_SIZE == self.free_perms[fid].addr()
+    }
+
+    /// Bootstrap the initial free set `[0, size)`.
+    pub proof fn init_free_set(
+        tracked &mut self,
+        size: FrameID,
+        tracked free_perms: Map<FrameID, Frame4KPerm>,
+    )
+        requires
+            old(self).wf(),
+            old(self).free_tok.value() =~= Set::empty(),
+            old(self).reg_tok.value() =~= Set::empty(),
+            old(self).free_perms.dom() =~= Set::empty(),
+            size <= old(self).inst.cap(),
+            free_perms.dom() =~= Set::new(|fid: FrameID| fid < size),
+            forall|fid: FrameID| #[trigger]
+                free_perms.contains_key(fid) ==> frame_is_empty(&free_perms[fid]),
+            forall|fid: FrameID| #[trigger]
+                free_perms.contains_key(fid) ==> free_perms[fid].is_init() && inst_base(
+                    old(self).inst.id(),
+                ).0 + fid * SPEC_FRAME_SIZE == free_perms[fid].addr(),
+        ensures
+            self.wf(),
+            self.inst.id() == old(self).inst.id(),
+            self.inst.cap() == old(self).inst.cap(),
+            self.reg_tok.value() =~= Set::empty(),
+            self.free_tok.value() =~= Set::new(|fid: FrameID| fid < size),
+            self.free_perms =~= free_perms,
+    {
+        self.inst.init_free_set(size, &mut self.free_tok, &mut self.reg_tok);
+        self.free_perms = free_perms;
     }
 
     /// Register a new client and return its initial (empty) token.
@@ -634,6 +760,81 @@ impl AllocatorState {
         self.free_perms.tracked_insert(fid, perm);
 
         let tracked new_ct = self.inst.dealloc(cid, fid, &mut self.free_tok, client_tok);
+        ClientState { client_tok: new_ct, frame_perms: perms }
+    }
+
+    /// Remove a contiguous owned range `[start, start + count)` from `client`
+    /// and return it to the free pool.
+    pub proof fn dealloc_contiguous(
+        tracked &mut self,
+        tracked client: ClientState,
+        start: FrameID,
+        count: FrameID,
+    ) -> (tracked new_client: ClientState)
+        requires
+            old(self).wf(),
+            client.wf(old(self).inst.id()),
+            0 < count,
+            forall|fid: FrameID| start <= fid < start + count ==> client.owns(fid),
+            forall|fid: FrameID| start <= fid < start + count ==> frame_is_empty(&client.frame_perms[fid]),
+        ensures
+            self.wf(),
+            self.inst.id() == old(self).inst.id(),
+            self.inst.cap() == old(self).inst.cap(),
+            self.free_tok.value() =~= old(self).free_tok.value().union(
+                Set::new(|fid: FrameID| start <= fid < start + count),
+            ),
+            new_client.wf(old(self).inst.id()),
+            new_client.client_tok.key() == client.client_tok.key(),
+            new_client.owned_frames() =~= client.owned_frames().difference(
+                Set::new(|fid: FrameID| start <= fid < start + count),
+            ),
+            forall|fid: FrameID| start <= fid < start + count ==> !new_client.owns(fid),
+            forall|fid: FrameID| #[trigger]
+                new_client.frame_perms.contains_key(fid) ==> new_client.frame_perms[fid]
+                    == client.frame_perms[fid],
+    {
+        let removed = Set::new(|fid: FrameID| start <= fid < start + count);
+        let ghost old_free_dom = self.free_perms.dom();
+        let ghost old_client_dom = client.frame_perms.dom();
+        let ghost old_owned = client.owned_frames();
+
+        assert(old_owned =~= old_client_dom) by {
+            assert(client.wf(old(self).inst.id()));
+        }
+        assert forall|fid: FrameID| #[trigger] removed.contains(fid) implies old_owned.contains(fid) by {
+            assert(start <= fid < start + count);
+            assert(client.owns(fid));
+        }
+
+        let tracked ClientState { client_tok, frame_perms: mut perms } = client;
+        let cid = client_tok.key();
+        assert(client_tok.value() =~= old_owned);
+        assert(perms.dom() =~= old_client_dom);
+        assert(removed.subset_of(client_tok.value())) by {
+            assert forall|fid: FrameID| #[trigger] removed.contains(fid) implies client_tok.value().contains(fid) by {
+                assert(old_owned.contains(fid));
+            }
+        }
+        assert(removed.subset_of(perms.dom())) by {
+            assert forall|fid: FrameID| #[trigger] removed.contains(fid) implies perms.dom().contains(fid) by {
+                assert(old_owned.contains(fid));
+                assert(old_client_dom.contains(fid));
+            }
+        }
+
+        let tracked new_ct = self.inst.dealloc_contiguous(
+            cid,
+            start,
+            count,
+            &mut self.free_tok,
+            client_tok,
+        );
+        let tracked removed_perms = perms.tracked_remove_keys(removed);
+        assert(perms.dom() =~= old_client_dom.difference(removed));
+        assert(removed_perms.dom() =~= removed);
+        self.free_perms.tracked_union_prefer_right(removed_perms);
+        assert(self.free_perms.dom() =~= old_free_dom.union(removed));
         ClientState { client_tok: new_ct, frame_perms: perms }
     }
 }
@@ -850,6 +1051,90 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         PAddr(self.base.0 + fid * FRAME_SIZE)
     }
 
+    /// Create a default allocator. The bitmap and free pool both start empty.
+    pub fn default(base: PAddr) -> (res: Self)
+        requires
+            A::cascade_not_overflow(),
+            base@.aligned(SPEC_FRAME_SIZE),
+            base.0 + (A::spec_cap() * FRAME_SIZE) <= usize::MAX,
+        ensures
+            res.invariants(),
+    {
+        let bitmap = A::default();
+        let (bitmap_cell, Tracked(bitmap_perm)) = PCell::new(bitmap);
+        let ghost bitmap_cell_id = bitmap_cell.id();
+
+        let tracked (Tracked(inst), Tracked(free_tok), Tracked(reg_tok), _) =
+            AllocSpec::Instance::initialize(A::spec_cap());
+        let ghost inst_id = inst.id();
+
+        let tracked allocator_state = AllocatorState {
+            inst,
+            free_tok,
+            reg_tok,
+            free_perms: Map::tracked_empty(),
+        };
+
+        let tracked content = MutexContent { allocator_state, bitmap_perm };
+        let key = Ghost(AllocKey { inst_id, cell_id: bitmap_cell_id });
+
+        proof {
+            assume(inst_base(inst_id) == base@);
+            assume(AllocMutexPred::<A>::inv(key@, content));
+        }
+
+        let mutex = Mutex::new(key, Tracked(content));
+        let res = GlobalAllocator { base, mutex, bitmap: bitmap_cell };
+        proof {
+            assert(res.bitmap.id() === bitmap_cell_id);
+            assume(res.mutex.k@ == key@);
+            assert(res.mutex.k@.cell_id == bitmap_cell_id);
+            assert(res.bitmap.id() === res.mutex.k@.cell_id);
+            assert(res.invariants());
+        }
+        res
+    }
+
+    /// Initialize the empty allocator by marking `[0, size)` as free.
+    pub fn init(
+        &self,
+        size: usize,
+        Tracked(free_perms): Tracked<Map<FrameID, Frame4KPerm>>,
+    )
+        requires
+            self.invariants(),
+            size <= A::spec_cap(),
+            free_perms.dom() =~= Set::new(|fid: FrameID| fid < size as nat),
+            forall|fid: FrameID| #[trigger]
+                free_perms.contains_key(fid) ==> frame_is_empty(&free_perms[fid]),
+            forall|fid: FrameID| #[trigger]
+                free_perms.contains_key(fid) ==> free_perms[fid].is_init(),
+            forall|fid: FrameID| #[trigger]
+                free_perms.contains_key(fid) ==> self.base@.0 + fid * SPEC_FRAME_SIZE == free_perms[fid].addr(),
+        ensures
+            self.invariants(),
+    {
+        let guard = self.mutex.lock();
+        let MutexGuard { handle, token } = guard;
+        let tracked mut content = token.get();
+
+        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
+        if size > 0 {
+            bitmap.insert(0usize..size);
+        }
+        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
+
+        proof {
+            assume(content.allocator_state.free_tok.value() =~= Set::empty());
+            assume(content.allocator_state.reg_tok.value() =~= Set::empty());
+            assume(content.allocator_state.free_perms.dom() =~= Set::empty());
+            content.allocator_state.init_free_set(size as nat, free_perms);
+            assume(AllocMutexPred::<A>::inv(self.mutex.k@, content));
+        }
+
+        self.mutex.unlock(MutexGuard { handle, token: Tracked(content) });
+    }
+
     /// Register a new client (acquires the lock briefly).
     pub fn register_client(&self) -> (client: Tracked<ClientState>)
         requires
@@ -997,6 +1282,53 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
             assert(AllocMutexPred::<A>::inv(self.mutex.k@, content));
         }
         // ── unlock ────────────────────────────────────────────────────────────
+        self.mutex.unlock(MutexGuard { handle, token: Tracked(content) });
+        Tracked(new_client)
+    }
+
+    /// Remove `count` frames starting at `start` from `client`
+    /// and return them to the free pool.
+    pub fn dealloc_contiguous(&self, Tracked(client): Tracked<ClientState>, start: PAddr, count: usize) -> (new_client:
+        Tracked<ClientState>)
+        requires
+            self.invariants(),
+            client.wf(self.inst_id()),
+            start@.aligned(SPEC_FRAME_SIZE),
+            start.0 >= self.base.0,
+            0 < count <= A::spec_cap(),
+            self.paddr_to_fid_spec(start@) + count <= A::spec_cap(),
+            forall|fid: FrameID|
+                self.paddr_to_fid_spec(start@) <= fid < self.paddr_to_fid_spec(start@) + count
+                    ==> client.owns(fid),
+            forall|fid: FrameID|
+                self.paddr_to_fid_spec(start@) <= fid < self.paddr_to_fid_spec(start@) + count
+                    ==> frame_is_empty(&client.frame_perms[fid]),
+        ensures
+            self.invariants(),
+            new_client.wf(self.inst_id()),
+            new_client.cid() == client.cid(),
+            new_client.owned_frames() =~= client.owned_frames().difference(
+                Set::new(|fid: FrameID|
+                    self.paddr_to_fid_spec(start@) <= fid < self.paddr_to_fid_spec(start@) + count),
+            ),
+    {
+        let start_fid = self.paddr_to_fid(start);
+        let end_fid = start_fid + count;
+
+        let guard = self.mutex.lock();
+        let MutexGuard { handle, token } = guard;
+        let tracked mut content = token.get();
+
+        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
+        bitmap.insert(start_fid..end_fid);
+        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
+
+        let tracked new_client;
+        proof {
+            new_client = content.allocator_state.dealloc_contiguous(client, start_fid as nat, count as nat);
+            assert(AllocMutexPred::<A>::inv(self.mutex.k@, content));
+        }
+
         self.mutex.unlock(MutexGuard { handle, token: Tracked(content) });
         Tracked(new_client)
     }

@@ -4,8 +4,7 @@
 //!   `zone_ids` + `region_closure` tokens).
 //! - [`ClosureProtocol`]: `ZoneGhostProtocol` implementation for assumption 1.
 use super::super::spec::{
-    all_regions, ClosureRegionToken, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
-    GhostZone,
+    ClosureRegionToken, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken, GhostZone,
 };
 use super::{ZoneGhostProtocol, ZoneStateOps};
 use crate::address::region::MemoryRegion;
@@ -13,6 +12,8 @@ use crate::memory_set::SpecMemorySet;
 use vstd::{prelude::*, tokens::InstanceId};
 
 verus! {
+
+use super::super::spec::*;
 
 /// Per-zone tracked ghost state, holding the zone's entry in `ClosureSpec::zones`.
 ///

@@ -4,6 +4,8 @@ use vstd::atomic_ghost::*;
 use vstd::invariant::InvariantPredicate;
 use vstd::multiset::*;
 use vstd::prelude::*;
+use core::unreachable;
+use core::unimplemented;
 
 tokenized_state_machine! {
 

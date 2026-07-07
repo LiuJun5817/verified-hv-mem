@@ -6,12 +6,13 @@
 //! This avoids having two competing `View` impls for `MmuSpec::State` while keeping the
 //! MMU state machine itself shared between CPU and IOMMU.
 use crate::hardware::spec::MmuSpec;
-use crate::model::convert::flatten_s2map;
 use crate::model::hardware::HardwareView;
 use crate::model::types::*;
 use vstd::prelude::*;
 
 verus! {
+
+use crate::model::convert::*;
 
 /// The pair of hardware-side tokenized states: CPU MMU plus SMMU/IOMMU.
 pub ghost struct HardwareSpec {

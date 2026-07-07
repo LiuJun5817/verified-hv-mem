@@ -8,19 +8,17 @@ use crate::{
         frame::FrameSize,
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
-    global_allocator::{
-        frame_is_empty, inst_base, ClientState, Frame4KPerm, FrameID, GlobalAllocator,
-        SPEC_FRAME_SIZE,
-    },
     page_table::{
         pt_arch::{PTArch, SpecPTArch},
         table::*,
     },
 };
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 use vstd::{prelude::*, simple_pptr::PPtr};
 
 verus! {
+
+use crate::global_allocator::*;
 
 /// Abstract model of page table memory, a memory region that stores page tables.
 ///

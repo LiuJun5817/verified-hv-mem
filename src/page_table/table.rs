@@ -1,9 +1,10 @@
 //! Page table memory read/write utilities and permission assumptions.
-use crate::global_allocator::{frame_is_empty, Frame4KPerm};
 use vstd::prelude::*;
 use vstd::simple_pptr::PointsTo;
 
 verus! {
+
+use crate::global_allocator::*;
 
 /// A single page table, which contains a fixed number of `u64` entries. The type parameter `N` is the
 /// number of entries in the table.

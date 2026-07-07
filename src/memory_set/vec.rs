@@ -9,20 +9,22 @@
 //! `self.pt@.mappings`, the two coincide on `mappings`; we deliberately keep both
 //! spellings to mark which layer each statement is reasoning about.
 use super::*;
+
+extern crate alloc;
+
 use crate::address::addr::{PAddr, SpecVAddr};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
-use crate::model::convert::{
-    frame_to_s2, gpa_of_vaddr, lemma_pt_s2map_inner_insert, lemma_pt_s2map_inner_remove,
-    lemma_vaddr_gpa_roundtrip, pt_s2map_inner,
-};
-use crate::hardware::{HardwareInstr, MmuHardware};
 use crate::hardware::spec::MmuS2MapToken;
+use crate::hardware::{HardwareInstr, MmuHardware};
 use crate::model::types::{GuestPage, VmId};
 use crate::model::VmPageKey;
 use crate::page_table::{PTConstants, PageTable};
+use alloc::{vec, vec::Vec};
 use vstd::prelude::*;
 
 verus! {
+
+use crate::model::convert::*;
 
 broadcast use crate::page_table::PageTable::lemma_invariants_implies_wf;
 

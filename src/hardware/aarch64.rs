@@ -38,6 +38,7 @@ impl MmuInstr for Aarch64Hw {
         // `IPAS2E1IS` requires a register operand: Xt holds IPA >> 12 = the 4K
         // guest page number.  One instruction removes every cached `(*, vm, gpa)`
         // entry on every PE (VMID comes from VTTBR_EL2).
+        #[cfg(target_arch = "aarch64")]
         unsafe {
             asm!("tlbi ipas2e1is, {x}", x = in(reg) ipa_page);
         }
@@ -47,6 +48,7 @@ impl MmuInstr for Aarch64Hw {
     fn issue_dsb_ish() {
         // Data Synchronization Barrier, inner-shareable.  Does not retire until the
         // preceding broadcast has completed on every PE.
+        #[cfg(target_arch = "aarch64")]
         unsafe {
             asm!("dsb ish");
         }
@@ -55,6 +57,7 @@ impl MmuInstr for Aarch64Hw {
     #[verifier::external_body]
     fn issue_isb() {
         // Instruction Synchronization Barrier (executing PE's own context).
+        #[cfg(target_arch = "aarch64")]
         unsafe {
             asm!("isb");
         }
@@ -70,6 +73,7 @@ impl SmmuInstr for Aarch64Hw {
         // queue write rather than a `TLBI` instruction; a `DSB ISH` orders the write
         // to the queue, and `issue_smmu_sync` (CMD_SYNC) completes it.  Left as a
         // documented trusted seam (the concrete MMIO base is platform configuration).
+        #[cfg(target_arch = "aarch64")]
         unsafe {
             asm!("dsb ish");
         }
@@ -81,6 +85,7 @@ impl SmmuInstr for Aarch64Hw {
         // consumer index / wait for completion, guaranteeing preceding commands
         // (CMD_TLBI_S2_IPA, configuration invalidations) are observed.  Ordered with
         // a `DSB ISH`; the queue-polling MMIO is platform configuration.
+        #[cfg(target_arch = "aarch64")]
         unsafe {
             asm!("dsb ish");
         }

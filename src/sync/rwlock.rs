@@ -1,4 +1,6 @@
 use core::marker::PhantomData;
+use core::result::Result::{Ok, Err};
+use core::option::Option::{self, Some, None};
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::atomic_ghost::*;
 use vstd::cell::CellId;
@@ -10,8 +12,8 @@ use vstd::multiset::*;
 use vstd::open_atomic_invariant;
 use vstd::prelude::*;
 use vstd::rwlock::RwLock as VerusRwLock;
-
-use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
+use core::unreachable;
+use core::unimplemented;
 
 // The tokenized state machine is unchanged.
 tokenized_state_machine! {
@@ -317,6 +319,8 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
 }
 
 verus! {
+
+use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 
 type RwInstance<K, V, Pred> = RwLockToks::Instance<K, V, Pred>;
 

@@ -1,5 +1,7 @@
-#![verifier::deprecated_postcondition_mut_ref_style(true)]
+// #![verifier::deprecated_postcondition_mut_ref_style(true)]
+#![no_std]
 use vstd::prelude::*;
+use core::panic;
 
 pub mod address;
 pub mod bitmap_allocator;

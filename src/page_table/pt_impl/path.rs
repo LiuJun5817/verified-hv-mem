@@ -1,11 +1,12 @@
 //! Visit path of the page table tree model.
-use vstd::arithmetic::mul::{lemma_mul_is_distributive_add_other_way, lemma_mul_strictly_positive};
 use vstd::prelude::*;
 
 use crate::address::addr::SpecVAddr;
 use crate::page_table::pt_arch::SpecPTArch;
 
 verus! {
+
+use vstd::arithmetic::mul::*;
 
 /// Represents a path from a node to an entry in the page table tree.
 ///
