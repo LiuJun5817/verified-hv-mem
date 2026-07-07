@@ -62,6 +62,7 @@ pub trait BitmapAllocator {
             old(self).wf(),
             0 < size <= Self::spec_cap(),
             align_log2 < 64,  // Prevent displacement overflow
+
         ensures
             self.wf(),
             match res {
@@ -70,7 +71,8 @@ pub trait BitmapAllocator {
                     // Other indices remain unchanged.
                     &&& base % (1usize << align_log2) == 0
                     &&& base + size <= Self::spec_cap()
-                    &&& forall|loc1: int| (base <= loc1 < (base + size)) ==> old(self)@[loc1] == true
+                    &&& forall|loc1: int|
+                        (base <= loc1 < (base + size)) ==> old(self)@[loc1] == true
                     &&& forall|loc1: int| (base <= loc1 < (base + size)) ==> self@[loc1] == false
                     &&& forall|loc2: int|
                         (0 <= loc2 < base || (base + size) <= loc2 < Self::spec_cap())

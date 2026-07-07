@@ -155,10 +155,23 @@ pub enum MemType {
 }
 
 impl MemType {
+    /// Spec-mode convert to MemAttr.
+    pub open spec fn spec_to_attr(&self) -> MemAttr {
+        match self {
+            MemType::Ram => MemAttr::spec_new(true, true, true, true, false),
+            MemType::Io => MemAttr::spec_new(true, true, false, true, true),
+            MemType::VirtIo => MemAttr::spec_new(true, true, false, true, true),
+        }
+    }
+
     /// Convert to MemAttr.
     ///
     /// TODO: need further check.
-    pub fn to_attr(&self) -> MemAttr {
+    #[verifier::when_used_as_spec(spec_to_attr)]
+    pub fn to_attr(&self) -> (res: MemAttr)
+        ensures
+            res == self.spec_to_attr(),
+    {
         match self {
             MemType::Ram => MemAttr::new(true, true, true, true, false),
             MemType::Io => MemAttr::new(true, true, false, true, true),

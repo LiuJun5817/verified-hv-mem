@@ -42,11 +42,6 @@ impl SpecVAddr {
         &&& region_base.0 + region_size >= base.0 + size
     }
 
-    /// Convert to word index.
-    pub open spec fn idx(self) -> VIdx {
-        VIdx(self.0 / 8)
-    }
-
     /// If virtual page base `vbase` maps to physical page base `pbase`, calculate the
     /// physical address that `self` maps to.
     pub open spec fn map(self, vbase: Self, pbase: SpecPAddr) -> SpecPAddr
@@ -79,41 +74,6 @@ impl SpecPAddr {
     /// Offset `self` by `offset` bytes.
     pub open spec fn offset(self, offset: nat) -> SpecPAddr {
         SpecPAddr(self.0 + offset)
-    }
-
-    /// Convert to word index.
-    pub open spec fn idx(self) -> PIdx {
-        PIdx(self.0 / 8)
-    }
-}
-
-/// Index used to access virtual memory by 8-byte word.
-pub struct VIdx(pub nat);
-
-impl VIdx {
-    /// Convert to virtual address.
-    pub open spec fn addr(self) -> SpecVAddr {
-        SpecVAddr(self.0 * 8)
-    }
-
-    /// Convert to int.
-    pub open spec fn as_int(self) -> int {
-        self.0 as int
-    }
-}
-
-/// Index used to access physical memory by 8-byte word.
-pub struct PIdx(pub nat);
-
-impl PIdx {
-    /// Convert to physical address.
-    pub open spec fn addr(self) -> SpecPAddr {
-        SpecPAddr(self.0 * 8)
-    }
-
-    /// Convert to int.
-    pub open spec fn as_int(self) -> int {
-        self.0 as int
     }
 }
 

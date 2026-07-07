@@ -525,8 +525,9 @@ tokenized_state_machine! {
         }
     }
 }
-
 // ── Type aliases ──────────────────────────────────────────────────────────────
+
+
 pub type AllocInstance = AllocSpec::Instance;
 
 pub type FreeSetToken = AllocSpec::free_set;
@@ -677,7 +678,8 @@ impl AllocatorState {
             old(self).wf(),
             client.wf(old(self).inst.id()),
             0 < count,
-            forall|fid: FrameID| start <= fid < start + count ==> old(self).free_tok.value().contains(fid),
+            forall|fid: FrameID|
+                start <= fid < start + count ==> old(self).free_tok.value().contains(fid),
         ensures
             self.wf(),
             self.inst.id() == old(self).inst.id(),
@@ -702,12 +704,20 @@ impl AllocatorState {
         let ghost old_free_dom = self.free_perms.dom();
         let ghost old_client_dom = perms.dom();
         self.inst.free_client_disjoint(cid, client_tok.value(), &self.free_tok, &client_tok);
-        assert(forall|fid: FrameID| #[trigger] allocated.contains(fid) ==> !client_tok.value().contains(fid)) by {
-            assert(forall|fid: FrameID| #[trigger] allocated.contains(fid) ==> self.free_tok.value().contains(fid));
+        assert(forall|fid: FrameID| #[trigger]
+            allocated.contains(fid) ==> !client_tok.value().contains(fid)) by {
+            assert(forall|fid: FrameID| #[trigger]
+                allocated.contains(fid) ==> self.free_tok.value().contains(fid));
             assert(client_tok.value().disjoint(self.free_tok.value()));
         }
 
-        let tracked new_ct = self.inst.alloc_contiguous(cid, start, count, &mut self.free_tok, client_tok);
+        let tracked new_ct = self.inst.alloc_contiguous(
+            cid,
+            start,
+            count,
+            &mut self.free_tok,
+            client_tok,
+        );
         let tracked new_perms = self.free_perms.tracked_remove_keys(allocated);
         assert(self.free_perms.dom() =~= old_free_dom.difference(allocated));
         assert(new_perms.dom() =~= allocated);
@@ -1367,9 +1377,13 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
             assert(forall|fid: FrameID|
                 idx as nat <= fid < idx as nat + count as nat ==> old_bitmap@[fid as int]);
             assert forall|fid: FrameID|
-                idx as nat <= fid < idx as nat + count as nat implies content.allocator_state.free_tok.value().contains(fid) by {
+                idx as nat <= fid < idx as nat
+                    + count as nat implies content.allocator_state.free_tok.value().contains(
+                fid,
+            ) by {
                 assert(old_bitmap@[fid as int]);
-                assert(content.allocator_state.free_tok.value().contains(fid) == old_bitmap@[fid as int]);
+                assert(content.allocator_state.free_tok.value().contains(fid)
+                    == old_bitmap@[fid as int]);
             }
             new_client = content.allocator_state.alloc_contiguous(client, idx as nat, count as nat);
             assert(AllocMutexPred::<A>::inv(self.mutex.k@, content));

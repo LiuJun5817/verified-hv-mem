@@ -6,84 +6,90 @@ pub mod budget;
 pub mod closure;
 
 use crate::{address::region::MemoryRegion, memory_set::SpecMemorySet};
-use vstd::{prelude::*, tokens::InstanceId};
+use vstd::prelude::*;
 
 pub use budget::{BudgetSpec, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken};
 pub use closure::{
-    ClosureRegionToken, ClosureSpec, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
-    all_regions, all_regions_disjoint, all_regions_valid,
+    all_regions, all_regions_disjoint, all_regions_valid, ClosureRegionToken, ClosureSpec,
+    ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
 };
 
 verus! {
 
 /// Ghost state for one zone tracked inside `ClosureSpec` or `BudgetSpec`.
+///
+/// A zone owns two page-table-backed memory sets: the CPU stage-2 set
+/// (`cpu_mem_set`, kept in sync with the tokenized MMU) and the IOMMU/SMMU set
+/// (`iommu_mem_set`).
 pub ghost struct GhostZone {
-    /// Region sequence used by the existing memory-set abstraction.
+    /// CPU stage-2 memory set (regions **and** induced mappings).
     pub cpu_mem_set: SpecMemorySet,
+    /// IOMMU/SMMU memory set (regions **and** induced mappings).
     pub iommu_mem_set: SpecMemorySet,
 }
 
 impl GhostZone {
-    /// Well-formedness: all regions in the zone are valid and non-overlapping.
+    /// Well-formedness: both memory sets are internally well-formed.
     pub open spec fn wf(&self) -> bool {
         &&& self.cpu_mem_set.wf()
         &&& self.iommu_mem_set.wf()
     }
 
-    /// Region set of this zone.
+    /// Region set of this zone: the union of the CPU and IOMMU region sets.
     pub open spec fn regions(&self) -> Set<MemoryRegion> {
         self.cpu_mem_set.regions.union(self.iommu_mem_set.regions)
     }
 
-    /// Whether a region belongs to this zone.
+    /// Whether a region belongs to this zone (either memory set).
     pub open spec fn contains_region(&self, region: MemoryRegion) -> bool {
         self.regions().contains(region)
     }
 
-    /// Insert a region into the CPU page-table memory set of this zone.
+    /// Insert a region into the CPU memory set of this zone (regions and the page
+    /// table grow together, keeping `cpu_mem_set` exact-dense).
     pub open spec fn cpu_insert_region(&self, region: MemoryRegion) -> Self {
         Self {
-            cpu_mem_set: SpecMemorySet { regions: self.cpu_mem_set.regions.insert(region) },
+            cpu_mem_set: self.cpu_mem_set.insert_region(region),
             iommu_mem_set: self.iommu_mem_set,
         }
     }
 
-    /// Remove a region from the CPU page-table memory set of this zone.
+    /// Remove a region from the CPU memory set of this zone.
     pub open spec fn cpu_remove_region(&self, region: MemoryRegion) -> Self
         recommends
             self.cpu_mem_set.regions.contains(region),
     {
         Self {
-            cpu_mem_set: SpecMemorySet { regions: self.cpu_mem_set.regions.remove(region) },
+            cpu_mem_set: self.cpu_mem_set.remove_region_exact(region),
             iommu_mem_set: self.iommu_mem_set,
         }
     }
 
-    /// Insert a region into the IOMMU page-table memory set of this zone.
+    /// Insert a region into the IOMMU memory set of this zone.
     pub open spec fn iommu_insert_region(&self, region: MemoryRegion) -> Self {
         Self {
             cpu_mem_set: self.cpu_mem_set,
-            iommu_mem_set: SpecMemorySet { regions: self.iommu_mem_set.regions.insert(region) },
+            iommu_mem_set: self.iommu_mem_set.insert_region(region),
         }
     }
 
-    /// Remove a region from the IOMMU page-table memory set of this zone.
+    /// Remove a region from the IOMMU memory set of this zone.
     pub open spec fn iommu_remove_region(&self, region: MemoryRegion) -> Self
         recommends
             self.iommu_mem_set.regions.contains(region),
     {
         Self {
             cpu_mem_set: self.cpu_mem_set,
-            iommu_mem_set: SpecMemorySet { regions: self.iommu_mem_set.regions.remove(region) },
+            iommu_mem_set: self.iommu_mem_set.remove_region_exact(region),
         }
     }
 
-    /// Compatibility wrapper used by the ClosureSpec path.
+    /// Compatibility wrapper used by the ClosureSpec path (CPU side).
     pub open spec fn insert_region(&self, region: MemoryRegion) -> Self {
         self.cpu_insert_region(region)
     }
 
-    /// Compatibility wrapper used by the ClosureSpec path.
+    /// Compatibility wrapper used by the ClosureSpec path (CPU side).
     pub open spec fn remove_region(&self, region: MemoryRegion) -> Self
         recommends
             self.cpu_mem_set.regions.contains(region),
