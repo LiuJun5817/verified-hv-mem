@@ -128,6 +128,13 @@ impl SpecPageTableMem {
     }
 
     /// Allocate a new table.
+    ///
+    /// Design note: this is intentionally uninterpreted. The allocator chooses a
+    /// fresh physical base, preserves the existing table map, and initializes the
+    /// new table contents; describing that choice directly as executable spec code
+    /// is awkward and would duplicate allocator reasoning. The admitted facts below
+    /// are the TCB restriction that pins this uninterpreted function to
+    /// `alloc_table_spec`.
     pub uninterp spec fn alloc_table(self, level: nat) -> (Self, SpecPAddr)
         recommends
             self.alloc_table_pre(level),
@@ -203,6 +210,11 @@ impl SpecPageTableMem {
     }
 
     /// Deallocate a table.
+    ///
+    /// Design note: this is also intentionally uninterpreted. The admitted fact
+    /// below restricts it to `dealloc_table_spec`, which captures the required
+    /// effect: remove exactly the non-root table and preserve all other table
+    /// contents.
     pub uninterp spec fn dealloc_table(self, base: SpecPAddr) -> Self
         recommends
             self.dealloc_table_pre(base),
