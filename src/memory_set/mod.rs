@@ -13,7 +13,7 @@ use crate::{
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
-    page_table::{PTConstants, PageTable},
+    page_table::{PTConstants, PageTable, SpecPTConstants},
 };
 use core::marker::PhantomData;
 use vstd::prelude::*;
@@ -274,6 +274,9 @@ pub trait MemorySet<PT, A, I> where
     /// Instance ID of the allocator this memory set is associated with.
     spec fn inst_id(&self) -> InstanceId;
 
+    /// Page-table constants used by this memory set's backing page table.
+    spec fn pt_constants(&self) -> SpecPTConstants;
+
     /// Check if a region overlaps with any existing region in virtual address space.
     fn overlaps_vmem(&self, region: &MemoryRegion) -> (res: bool)
         requires
@@ -304,6 +307,7 @@ pub trait MemorySet<PT, A, I> where
             res@.regions == Set::<MemoryRegion>::empty(),
             res@.mappings == Map::<SpecVAddr, SpecFrame>::empty(),
             res.inst_id() == allocator.inst_id(),
+            res.pt_constants() == pt_constants@,
             res.invariants(),
     ;
 
@@ -325,6 +329,7 @@ pub trait MemorySet<PT, A, I> where
             allocator.invariants(),
             old(self).inst_id() == allocator.inst_id(),
             region.spec_valid(),
+            region.spec_within_vspace(old(self).pt_constants().arch.vspace_size()),
             !old(self)@.overlaps_vmem(region),
             old(mmu).wf(),
             s2_tok@.instance_id() == old(mmu).inst_id(),
@@ -332,6 +337,7 @@ pub trait MemorySet<PT, A, I> where
             s2_tok@.value() == pt_s2map_inner(old(self)@.mappings),
         ensures
             self.inst_id() == old(self).inst_id(),
+            self.pt_constants() == old(self).pt_constants(),
             self@ == old(self)@.insert_region(region),
             self.invariants(),
             mmu.wf(),
@@ -369,6 +375,7 @@ pub trait MemorySet<PT, A, I> where
             s2_tok@.value() == pt_s2map_inner(old(self)@.mappings),
         ensures
             self.inst_id() == old(self).inst_id(),
+            self.pt_constants() == old(self).pt_constants(),
             self@ == old(self)@.remove_region(start@),
             self.invariants(),
             mmu.wf(),

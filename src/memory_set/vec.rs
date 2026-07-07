@@ -114,6 +114,10 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         self.pt.inst_id()
     }
 
+    open spec fn pt_constants(&self) -> SpecPTConstants {
+        self.pt@.constants
+    }
+
     open spec fn invariants(&self) -> bool {
         &&& self.pt@.constants.valid()
         // Frame size is 4K
@@ -125,6 +129,11 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         &&& forall|i: int|
             0 <= i < self.regions.len()
                 ==> #[trigger] self.regions[i].spec_valid()
+        // Region page bases are inside the backing page-table virtual space.
+        &&& forall|i: int|
+            0 <= i < self.regions.len() ==> #[trigger] self.regions[i].spec_within_vspace(
+                self.pt@.constants.arch.vspace_size(),
+            )
         // Regions do not overlap
         &&& forall|i: int, j: int|
             0 <= i < self.regions.len() && 0 <= j < self.regions.len() && i != j
@@ -212,6 +221,7 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         while i < region.pages
             invariant
                 region.spec_valid(),
+                region.spec_within_vspace(self.pt@.constants.arch.vspace_size()),
                 i <= region.pages,
                 i == 0 ==> self.invariants(),
                 self.pt.invariants(),
@@ -316,8 +326,8 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 assert(vbase@ == region.spec_page_vaddr(i as nat));
                 assert(frame@ == region.spec_frame(i as nat));
 
-                // TODO: edit precondition to require the new region is within the address space limit
-                assume(vbase@.0 < self.pt@.constants.arch.vspace_size());
+                assert(region.spec_within_vspace(self.pt@.constants.arch.vspace_size()));
+                assert(vbase@.0 < self.pt@.constants.arch.vspace_size());
             }
 
             let ghost self_before_map = *self;
@@ -621,6 +631,7 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         while i < region.pages
             invariant
                 region.spec_valid(),
+                region.spec_within_vspace(self.pt@.constants.arch.vspace_size()),
                 i <= region.pages,
                 self.pt.invariants(),
                 self.pt.inst_id() == allocator.inst_id(),
@@ -676,7 +687,9 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                     region.spec_page_vaddr(i as nat),
                     region.spec_frame(i as nat),
                 ));
-                assume(vaddr@.0 < self.pt@.constants.arch.vspace_size());
+                assert(region.spec_within_vspace(self.pt@.constants.arch.vspace_size()));
+                assert(vaddr@ == region.spec_page_vaddr(i as nat));
+                assert(vaddr@.0 < self.pt@.constants.arch.vspace_size());
             }
 
             let ipa_page = vaddr.0 / PAGE_SIZE;

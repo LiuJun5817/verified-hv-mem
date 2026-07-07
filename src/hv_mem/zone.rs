@@ -18,7 +18,7 @@ use crate::{
     model::convert::pt_s2map_inner,
     model::types::VmId,
     memory_set::MemorySet,
-    page_table::PageTable,
+    page_table::{PageTable, SpecPTConstants},
     sync::rwlock::{RwLock, RwReadGuard, RwWriteGuard},
 };
 use core::marker::PhantomData;
@@ -52,6 +52,8 @@ pub struct ZoneKey {
     /// IOMMU `MmuSpec` instance id — the IOMMU `s2map` slice token belongs to it
     /// (a separate `MmuHardware` instance from the CPU one).
     pub iommu_mmu_inst_id: InstanceId,
+    /// Shared page-table architecture used by the CPU/IOMMU memory sets.
+    pub pt_constants: SpecPTConstants,
 }
 
 /// Tracked content protected by a `Zone`'s `RwLock`.
@@ -110,10 +112,12 @@ impl<PT, M, A, P, I> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePr
         &&& v.cpu_mem_set_perm@.pcell === k.cpu_cell_id
         &&& v.cpu_mem_set_perm@.mem_contents->Init_0.invariants()
         &&& v.cpu_mem_set_perm@.mem_contents->Init_0.inst_id() == k.alloc_inst_id
+        &&& v.cpu_mem_set_perm@.mem_contents->Init_0.pt_constants() == k.pt_constants
         &&& v.iommu_mem_set_perm.is_init()
         &&& v.iommu_mem_set_perm@.pcell === k.iommu_cell_id
         &&& v.iommu_mem_set_perm@.mem_contents->Init_0.invariants()
         &&& v.iommu_mem_set_perm@.mem_contents->Init_0.inst_id() == k.alloc_inst_id
+        &&& v.iommu_mem_set_perm@.mem_contents->Init_0.pt_constants() == k.pt_constants
         &&& v.zone_state.zone_id() == k.zone_id
         &&& v.zone_state.wf(k.mem_inst_id)
         &&& v.zone_state.ghost_zone().cpu_mem_set == v.cpu_mem_set_perm@.mem_contents->Init_0@
@@ -197,6 +201,16 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         self.lock.k@.iommu_mmu_inst_id
     }
 
+    /// The page-table virtual-space bound of this zone's memory sets.
+    pub open spec fn vspace_size(&self) -> nat {
+        self.lock.k@.pt_constants.arch.vspace_size()
+    }
+
+    /// The page-table constants of this zone's memory sets.
+    pub open spec fn pt_constants(&self) -> SpecPTConstants {
+        self.lock.k@.pt_constants
+    }
+
     /// Assemble a `Zone` from already-built exec CPU/IOMMU `mem_set`s and its ghost token.
     pub fn new(
         cpu_mem_set: M,
@@ -218,6 +232,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             iommu_mem_set.invariants(),
             cpu_mem_set.inst_id() == alloc_inst_id,
             iommu_mem_set.inst_id() == alloc_inst_id,
+            cpu_mem_set.pt_constants() == iommu_mem_set.pt_constants(),
             // The ghost zone token is keyed by this zone and mirrors both exec
             // memory sets — the ghost/exec sync point `ZonePred::inv` pins.
             zone_state.zone_id() == zone_id as nat,
@@ -238,6 +253,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             res.lock.k@.alloc_inst_id == alloc_inst_id,
             res.lock.k@.mmu_inst_id == mmu_inst_id,
             res.lock.k@.iommu_mmu_inst_id == iommu_mmu_inst_id,
+            res.lock.k@.pt_constants == cpu_mem_set.pt_constants(),
             res.zone_id == zone_id,
     {
         // Store the exec CPU/IOMMU mem_sets in fresh PCells.
@@ -263,6 +279,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
                 alloc_inst_id,
                 mmu_inst_id,
                 iommu_mmu_inst_id,
+                pt_constants: cpu_mem_set.pt_constants(),
             },
         );
 
@@ -293,6 +310,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         ensures
             res.0.invariants(),
             res.0.inst_id() == self.lock.k@.alloc_inst_id,
+            res.0.pt_constants() == self.lock.k@.pt_constants,
             res.1.wf(&self.lock),
             res.1.token.cpu_mem_set_perm@.pcell == self.cpu_mem_set.id(),
             !res.1.token.cpu_mem_set_perm.is_init(),
@@ -301,6 +319,8 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             res.1.token.iommu_mem_set_perm@.mem_contents->Init_0.invariants(),
             res.1.token.iommu_mem_set_perm@.mem_contents->Init_0.inst_id()
                 == self.lock.k@.alloc_inst_id,
+            res.1.token.iommu_mem_set_perm@.mem_contents->Init_0.pt_constants()
+                == self.lock.k@.pt_constants,
             res.1.token@.zone_state.zone_id() == self.lock.k@.zone_id,
             res.1.token@.zone_state.wf(self.lock.k@.mem_inst_id),
             res.1.token@.zone_state.ghost_zone().cpu_mem_set == res.0@,
@@ -335,12 +355,15 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         ensures
             res.0.invariants(),
             res.0.inst_id() == self.lock.k@.alloc_inst_id,
+            res.0.pt_constants() == self.lock.k@.pt_constants,
             res.1.wf(&self.lock),
             res.1.token.cpu_mem_set_perm@.pcell == self.cpu_mem_set.id(),
             res.1.token.cpu_mem_set_perm.is_init(),
             res.1.token.cpu_mem_set_perm@.mem_contents->Init_0.invariants(),
             res.1.token.cpu_mem_set_perm@.mem_contents->Init_0.inst_id()
                 == self.lock.k@.alloc_inst_id,
+            res.1.token.cpu_mem_set_perm@.mem_contents->Init_0.pt_constants()
+                == self.lock.k@.pt_constants,
             res.1.token.iommu_mem_set_perm@.pcell == self.iommu_mem_set.id(),
             !res.1.token.iommu_mem_set_perm.is_init(),
             res.1.token@.zone_state.zone_id() == self.lock.k@.zone_id,
@@ -382,9 +405,12 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             guard.token.iommu_mem_set_perm@.mem_contents->Init_0.invariants(),
             guard.token.iommu_mem_set_perm@.mem_contents->Init_0.inst_id()
                 == self.lock.k@.alloc_inst_id,
+            guard.token.iommu_mem_set_perm@.mem_contents->Init_0.pt_constants()
+                == self.lock.k@.pt_constants,
             // Linking invariant: the mem_set being stored back satisfies M's own wf.
             mem_set.invariants(),
             mem_set.inst_id() == self.lock.k@.alloc_inst_id,
+            mem_set.pt_constants() == self.lock.k@.pt_constants,
             // Ghost-token invariant: the zone_state in the guard is consistent with
             // the CPU mem_set being stored back and with this zone's lock key.
             guard.token@.zone_state.zone_id() == self.lock.k@.zone_id,
@@ -414,11 +440,15 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
                 assert(content.cpu_mem_set_perm@.mem_contents->Init_0.invariants());
                 assert(content.cpu_mem_set_perm@.mem_contents->Init_0.inst_id()
                     == self.lock.k@.alloc_inst_id);
+                assert(content.cpu_mem_set_perm@.mem_contents->Init_0.pt_constants()
+                    == self.lock.k@.pt_constants);
                 assert(content.iommu_mem_set_perm.is_init());
                 assert(content.iommu_mem_set_perm@.pcell === self.lock.k@.iommu_cell_id);
                 assert(content.iommu_mem_set_perm@.mem_contents->Init_0.invariants());
                 assert(content.iommu_mem_set_perm@.mem_contents->Init_0.inst_id()
                     == self.lock.k@.alloc_inst_id);
+                assert(content.iommu_mem_set_perm@.mem_contents->Init_0.pt_constants()
+                    == self.lock.k@.pt_constants);
                 assert(content.zone_state.zone_id() == self.lock.k@.zone_id);
                 assert(content.zone_state.wf(self.lock.k@.mem_inst_id));
                 assert(content.zone_state.ghost_zone().cpu_mem_set
@@ -457,10 +487,13 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             guard.token.cpu_mem_set_perm@.mem_contents->Init_0.invariants(),
             guard.token.cpu_mem_set_perm@.mem_contents->Init_0.inst_id()
                 == self.lock.k@.alloc_inst_id,
+            guard.token.cpu_mem_set_perm@.mem_contents->Init_0.pt_constants()
+                == self.lock.k@.pt_constants,
             guard.token.iommu_mem_set_perm@.pcell == self.iommu_mem_set.id(),
             !guard.token.iommu_mem_set_perm.is_init(),
             mem_set.invariants(),
             mem_set.inst_id() == self.lock.k@.alloc_inst_id,
+            mem_set.pt_constants() == self.lock.k@.pt_constants,
             guard.token@.zone_state.zone_id() == self.lock.k@.zone_id,
             guard.token@.zone_state.wf(self.lock.k@.mem_inst_id),
             guard.token@.zone_state.ghost_zone().cpu_mem_set
@@ -488,11 +521,15 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
                 assert(content.cpu_mem_set_perm@.mem_contents->Init_0.invariants());
                 assert(content.cpu_mem_set_perm@.mem_contents->Init_0.inst_id()
                     == self.lock.k@.alloc_inst_id);
+                assert(content.cpu_mem_set_perm@.mem_contents->Init_0.pt_constants()
+                    == self.lock.k@.pt_constants);
                 assert(content.iommu_mem_set_perm.is_init());
                 assert(content.iommu_mem_set_perm@.pcell === self.lock.k@.iommu_cell_id);
                 assert(content.iommu_mem_set_perm@.mem_contents->Init_0.invariants());
                 assert(content.iommu_mem_set_perm@.mem_contents->Init_0.inst_id()
                     == self.lock.k@.alloc_inst_id);
+                assert(content.iommu_mem_set_perm@.mem_contents->Init_0.pt_constants()
+                    == self.lock.k@.pt_constants);
                 assert(content.zone_state.zone_id() == self.lock.k@.zone_id);
                 assert(content.zone_state.wf(self.lock.k@.mem_inst_id));
                 assert(content.zone_state.ghost_zone().cpu_mem_set
@@ -572,6 +609,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
             allocator.invariants(),
             old(mmu).wf(),
             zone_regions(self.zone_id as nat).contains(region),
+            region.spec_within_vspace(self.vspace_size()),
         ensures
             mmu.wf(),
             mmu.inst_id() == old(mmu).inst_id(),
@@ -741,6 +779,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
             allocator.invariants(),
             old(iommu_mmu).wf(),
             zone_regions(self.zone_id as nat).contains(region) || region == gic_region(),
+            region.spec_within_vspace(self.vspace_size()),
         ensures
             iommu_mmu.wf(),
             iommu_mmu.inst_id() == old(iommu_mmu).inst_id(),

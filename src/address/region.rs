@@ -47,6 +47,12 @@ impl MemoryRegion {
         self.vstart@.0 <= vaddr.0 < self.vstart@.0 + (self.pages as nat) * SPEC_PAGE_SIZE
     }
 
+    /// Spec-mode check if every page base of the region is inside a page-table
+    /// virtual address space of size `vspace_size`.
+    pub open spec fn spec_within_vspace(self, vspace_size: nat) -> bool {
+        forall|i: nat| 0 <= i < self.pages ==> #[trigger] self.spec_page_vaddr(i).0 < vspace_size
+    }
+
     /// Spec-mode check if two regions overlap in virtual address space.
     pub open spec fn spec_overlaps_vmem(self, other: MemoryRegion) -> bool {
         SpecVAddr::overlap(

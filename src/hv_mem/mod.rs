@@ -29,7 +29,7 @@ use crate::{
     model::convert::pt_s2map_inner,
     model::types::{GuestPage, S2Entry, VmId},
     memory_set::{MemorySet, SpecMemorySet},
-    page_table::{PTConstants, PageTable},
+    page_table::{PTConstants, PageTable, SpecPTConstants},
     sync::rwlock::{RwLock, RwReadGuard, RwReaderToken, RwWriteGuard, RwWriterToken},
 };
 use core::marker::PhantomData;
@@ -59,6 +59,8 @@ pub struct HvMemKey {
     pub mmu_inst_id: InstanceId,
     /// IOMMU MMU instance ID (separate `MmuHardware` instance for the SMMU stage-2).
     pub iommu_mmu_inst_id: InstanceId,
+    /// Shared page-table architecture for all zones' CPU/IOMMU memory sets.
+    pub pt_constants: SpecPTConstants,
 }
 
 /// Tracked content protected by `HvMem`'s `RwLock`.
@@ -146,6 +148,10 @@ impl<PT, M, A, P, I> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P, I>
                 #![trigger zone_list[i]]
                 0 <= i < zone_list.len() ==> zone_list[i].iommu_mmu_inst_id()
                     == k.iommu_mmu_inst_id
+            // Each exec zone uses the same page-table architecture.
+            &&& forall|i: int|
+                #![trigger zone_list[i]]
+                0 <= i < zone_list.len() ==> zone_list[i].pt_constants() == k.pt_constants
             // Each zone in the list is well-formed.
             &&& forall|i: int| #![auto] 0 <= i < zone_list.len() ==> zone_list[i].wf()
         }
@@ -229,6 +235,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         requires
             self.invariants(),
             pt_constants@.valid(),
+            pt_constants@ == self.lock.k@.pt_constants,
             forall|level: nat|
                 level < pt_constants.arch@.level_count() ==> pt_constants.arch@.entry_count(level)
                     == 512,
@@ -290,6 +297,11 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                     #![trigger zones@[k]]
                     0 <= k < zones@.len() ==> zones@[k].iommu_mmu_inst_id()
                         == self.lock.k@.iommu_mmu_inst_id,
+                // Page-table architecture consistency.
+                forall|k: int|
+                    #![trigger zones@[k]]
+                    0 <= k < zones@.len() ==> zones@[k].pt_constants()
+                        == self.lock.k@.pt_constants,
                 // Pairwise distinct IDs.
                 forall|k: int, l: int|
                     #![auto]
@@ -439,6 +451,17 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                     == self.lock.k@.iommu_mmu_inst_id by {
                     if k < old_len {
                         assert(old_zones[k].iommu_mmu_inst_id() == self.lock.k@.iommu_mmu_inst_id);
+                    } else {
+                        assert(new_zones[k] == new_zone);
+                    }
+                };
+                // 5d. Page-table architecture consistency for all new zones.
+                assert forall|k: int|
+                    #![trigger new_zones[k]]
+                    0 <= k < new_zones.len() implies new_zones[k].pt_constants()
+                    == self.lock.k@.pt_constants by {
+                    if k < old_len {
+                        assert(old_zones[k].pt_constants() == self.lock.k@.pt_constants);
                     } else {
                         assert(new_zones[k] == new_zone);
                     }
@@ -673,6 +696,7 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         requires
             self.invariants(),
             zone_regions(zid as nat).contains(region),
+            region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
             old(mmu).wf(),
             old(mmu).inst_id() == self.lock.k@.mmu_inst_id,
         ensures
@@ -726,6 +750,7 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
             // instance, and the precondition pins `mmu.inst_id()` to it — so the handle
             // passed here is the one whose `add_vm` minted this zone's slice token.
             assert(zones[i as int].lock.k@.mmu_inst_id == mmu.inst_id());
+            assert(zones[i as int].pt_constants() == self.lock.k@.pt_constants);
         }
         let res = zones[i].insert_region(&self.allocator, Tracked(&global_state), region, mmu);
 
@@ -806,6 +831,7 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         requires
             self.invariants(),
             zone_regions(zid as nat).contains(region) || region == gic_region(),
+            region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
             old(iommu_mmu).wf(),
             old(iommu_mmu).inst_id() == self.lock.k@.iommu_mmu_inst_id,
         ensures
@@ -846,6 +872,7 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
             // IOMMU instance-id bridge: `HvMemPred` pins every zone's IOMMU instance,
             // and the precondition pins `iommu_mmu.inst_id()` to it.
             assert(zones[i as int].lock.k@.iommu_mmu_inst_id == iommu_mmu.inst_id());
+            assert(zones[i as int].pt_constants() == self.lock.k@.pt_constants);
         }
         let res = zones[i].insert_iommu_region(
             &self.allocator,
