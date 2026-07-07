@@ -23,7 +23,7 @@
 //! Only the *real instructions* differ between regimes, so the trusted asm seam is
 //! split in two:
 //!
-//! * [`MmuInstr`] — CPU MMU maintenance (`TLBI IPAS2E1IS`, `DSB ISH`, `ISB`);
+//! * [`MmuInstr`] — CPU MMU maintenance (`TLBI IPAS2E1IS`, `DSB ISH`);
 //! * [`SmmuInstr`] — SMMU command-queue maintenance (`CMD_TLBI_S2_IPA`, `CMD_SYNC`).
 //!
 //! [`HardwareInstr`] is just the combined marker (`MmuInstr + SmmuInstr`) a single
@@ -44,9 +44,9 @@
 //! implementation hands: `MmuHardware`'s fields are **private** and never handed
 //! out, so only this module's methods fire transitions.  `MemorySet::remove` holds
 //! an `&mut MmuHardware` and can *call* [`MmuHardware::unmap_dsb_tlbi`], but cannot
-//! fire `unmap`/`invalidate` itself.  And `unmap_dsb_tlbi`'s post — restoring the
-//! [`synced`](MmuHardware::synced) sync point — is unprovable unless its real
-//! `DSB`+`TLBI` actually run, since only they advance the encapsulated tokens.
+//! fire `unmap`/`invalidate` itself.  And `unmap_dsb_tlbi`'s postcondition is
+//! unprovable unless its real `DSB`+`TLBI` actually run, since only they advance
+//! the encapsulated tokens.
 use crate::hardware::spec::{MmuInstance, MmuS2MapToken, MmuTlbToken, MmuVmIdsToken};
 use crate::model::types::*;
 use core::marker::PhantomData;
@@ -93,13 +93,6 @@ pub trait MmuInstr {
     /// on every PE in the domain.
     fn issue_dsb_ish();
 
-    // ------------------------------------------------------------------
-    // Instruction Synchronization Barrier (ISB)
-    // ------------------------------------------------------------------
-    /// Issue an Instruction Synchronization Barrier.
-    ///
-    /// On AArch64: `ISB`.  Synchronizes only the executing PE's own context.
-    fn issue_isb();
 }
 
 /// Trusted **IOMMU (SMMU)** stage-2 maintenance instructions.

@@ -69,15 +69,6 @@ pub struct SharedPage {
     pub page: PhysPage,
 }
 
-/// The four entities in the model.
-#[derive(PartialEq, Eq, Structural, Copy, Clone)]
-pub enum Entity {
-    SubjectVm,
-    EnvironmentVm(VmId),
-    Hypervisor,
-    HardwareMmu,
-}
-
 /// Guest-originated requests that the hypervisor may later service.
 #[derive(PartialEq, Eq, Structural, Copy, Clone)]
 pub enum HyperCallReq {

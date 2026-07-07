@@ -21,8 +21,8 @@
 //! The two tokens and the `Instance` are encapsulated inside the
 //! [`HardwareInstr`](crate::hardware::HardwareInstr)-backed `MmuHardware` handle
 //! (`crate::hardware::mmu`), so only its asm-bearing methods can fire transitions —
-//! that is what makes the forcing airtight, and where the per-vm `synced` sync
-//! point and the `unmap_dsb_tlbi` contract live.
+//! that is what makes the forcing airtight, and where the per-vm sync-point
+//! contracts live.
 //!
 //! # `s2map` lags the page-table bytes; the divergence is the unmap window
 //!
@@ -54,20 +54,6 @@ verus! {
 /// every CPU's cached entry for that page.  Mirrors `tlbi_ipa_broadcast_step`.
 pub open spec fn invalidation_targets(vm: VmId, gpa: GuestPage) -> Set<TlbKey> {
     Set::new(|k: TlbKey| k.vm == vm && k.gpa == gpa)
-}
-
-/// Full TLB coherence — every cached entry's page is still mapped *and* the entry
-/// agrees.  This is the body of `MachineState::tlb_safe`, and the **pre/post
-/// contract of a region unmap** (the *sync-point* predicate).  It is deliberately
-/// stronger than `MmuSpec::State::inv_coherent` and is NOT a machine invariant:
-/// `unmap` breaks it (design step (b)); `invalidate` restores it.
-pub open spec fn synced(s2map: Map<VmPageKey, S2Entry>, tlb: Map<TlbKey, TlbEntry>) -> bool {
-    forall|key: TlbKey| #[trigger]
-        tlb.contains_key(key) ==> {
-            let sk = VmPageKey::new(key.vm, key.gpa);
-            &&& s2map.contains_key(sk)
-            &&& tlb[key].as_s2_entry() == s2map[sk]
-        }
 }
 
 tokenized_state_machine! {

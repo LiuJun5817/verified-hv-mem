@@ -55,14 +55,6 @@ impl MmuInstr for Aarch64Hw {
             asm!("dsb ish");
         }
     }
-
-    #[verifier::external_body]
-    fn issue_isb() {
-        // Instruction Synchronization Barrier (executing PE's own context).
-        unsafe {
-            asm!("isb");
-        }
-    }
 }
 
 impl SmmuInstr for Aarch64Hw {
