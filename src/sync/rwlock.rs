@@ -1,15 +1,15 @@
+use core::marker::PhantomData;
+use verus_state_machines_macros::tokenized_state_machine;
+use vstd::atomic_ghost::*;
 use vstd::cell::CellId;
 use vstd::cell::PCell;
 use vstd::cell::PointsTo;
-use vstd::rwlock::RwLock as VerusRwLock;
 use vstd::invariant;
+use vstd::invariant::{AtomicInvariant, InvariantPredicate};
+use vstd::multiset::*;
 use vstd::open_atomic_invariant;
 use vstd::prelude::*;
-use verus_state_machines_macros::tokenized_state_machine;
-use vstd::atomic_ghost::*;
-use vstd::multiset::*;
-use vstd::invariant::{AtomicInvariant, InvariantPredicate};
-use core::marker::PhantomData;
+use vstd::rwlock::RwLock as VerusRwLock;
 
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 
@@ -583,8 +583,8 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
             if result == false {
                 // Update `real_rc` by exchanging the mock reader token for a real reader token.
                 let tracked mut handle_opt: Option<RwReaderToken<K, V, Pred>> = None;
-                
-                loop 
+
+                loop
                     invariant_except_break
                         self.wf(),
                         mock_reader_token_opt is Some,
@@ -602,7 +602,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                         // Too many readers, wait for the next iteration to see if the count goes down.
                         continue;
                     }
-                    
+
                     let result = atomic_with_ghost!(
                         &self.real_rc => compare_exchange(real_rc_val, real_rc_val + 1);
                         returning res;

@@ -473,7 +473,7 @@ impl<T: BitAllocView + std::marker::Copy> BitAllocView for BitAllocCascade16<T> 
         }
     }
 
-    /// Creates a new `BitAllocCascade16` with all bits set to 0 (all free).
+    /// Creates a new `BitAllocCascade16` with all bits set to 0.
     fn default() -> Self {
         BitAllocCascade16 {
             bitset: BitAlloc16 { bits: 0 },
@@ -2629,6 +2629,51 @@ impl BitAlloc for BitAlloc16 {
             assert((value >> i) & 1u16 == 0u16);
 
             assert((u16_view(value)[i]) == false);
+        }
+    }
+}
+
+impl BitmapAllocator for BitAlloc1M {
+    open spec fn view(&self) -> Seq<bool> {
+        <Self as BitAllocView>::view(self)
+    }
+
+    fn cap() -> (res: usize) {
+        <Self as BitAllocView>::cap()
+    }
+
+    open spec fn spec_cap() -> nat {
+        <Self as BitAllocView>::spec_cap() as nat
+    }
+
+    open spec fn cascade_not_overflow() -> bool {
+        <Self as BitAllocView>::cascade_not_overflow()
+    }
+
+    fn default() -> Self {
+        <Self as BitAllocView>::default()
+    }
+
+    open spec fn wf(&self) -> bool {
+        <Self as BitAllocView>::wf(self)
+    }
+
+    fn alloc(&mut self) -> (res: Option<usize>) {
+        <Self as BitAlloc>::alloc(self)
+    }
+
+    fn alloc_contiguous(&mut self, size: usize, align_log2: usize) -> (res: Option<usize>) {
+        <Self as BitAlloc>::alloc_contiguous(self, size, align_log2)
+    }
+
+    fn dealloc(&mut self, key: usize) {
+        <Self as BitAlloc>::dealloc(self, key)
+    }
+
+    broadcast proof fn lemma_view_len_is_cap(self) {
+        assert(<Self as BitmapAllocator>::view(&self).len()
+            == <Self as BitmapAllocator>::spec_cap()) by {
+            assert(<Self as BitAllocView>::view(&self).len() == <Self as BitAllocView>::spec_cap());
         }
     }
 }

@@ -9,6 +9,7 @@ use super::super::spec::{
 };
 use super::{ZoneGhostProtocol, ZoneStateOps};
 use crate::address::region::MemoryRegion;
+use crate::memory_set::SpecMemorySet;
 use vstd::{prelude::*, tokens::InstanceId};
 
 verus! {
@@ -29,12 +30,12 @@ impl ZoneStateOps for ClosureZoneState {
     open spec fn zone_id(&self) -> nat {
         self.zone_tok.key()
     }
-    
+
     /// The ghost zone state (value in the `zones` map sharding).
     open spec fn ghost_zone(&self) -> GhostZone {
         self.zone_tok.value()
     }
-    
+
     /// Well-formedness: the zone token belongs to the given `ClosureSpec` instance.
     open spec fn wf(&self, mem_inst_id: InstanceId) -> bool {
         self.zone_tok.instance_id() == mem_inst_id
@@ -117,6 +118,11 @@ impl ClosureGlobalState {
             zone_state.wf(self.mem_inst_id()),
             zone_state.zone_id() == zid,
             zone_state.ghost_zone().regions() =~= Set::empty(),
+            // Fully empty ghost zone — the literal the SM transition constructs.
+            zone_state.ghost_zone() == (GhostZone {
+                cpu_mem_set: SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
+                iommu_mem_set: SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
+            }),
     {
         let tracked zone_tok = self.inst.add_zone(zid, &mut self.zone_ids_tok);
         ClosureZoneState { zone_tok }
@@ -163,7 +169,7 @@ impl ClosureGlobalState {
             region.spec_valid(),
             all_regions().contains(region),
             !old(self).region_closure().contains(region),
-            !zone_state.ghost_zone().mem_set.overlaps_vmem(region),
+            !zone_state.ghost_zone().cpu_mem_set.overlaps_vmem(region),
         ensures
             self.wf(),
             self.mem_inst_id() == old(self).mem_inst_id(),
@@ -269,7 +275,7 @@ impl ClosureProtocol {
             region.spec_valid(),
             all_regions().contains(region),
             !old(gs).region_closure().contains(region),
-            !zt.ghost_zone().mem_set.overlaps_vmem(region),
+            !zt.ghost_zone().cpu_mem_set.overlaps_vmem(region),
         ensures
             gs.wf(),
             gs.mem_inst_id() == old(gs).mem_inst_id(),

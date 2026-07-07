@@ -10,6 +10,7 @@ pub mod budget;
 pub mod closure;
 
 use super::spec::GhostZone;
+use crate::memory_set::SpecMemorySet;
 pub use budget::{BudgetGlobalState, BudgetProtocol, BudgetZoneState};
 pub use closure::{ClosureGlobalState, ClosureProtocol, ClosureZoneState};
 
@@ -35,7 +36,7 @@ pub trait ZoneStateOps {
 
 /// Ghost-state trait for **zone lifecycle** operations (add / remove a zone).
 ///
-/// `Zone<PT, M, A, P>` and `HvMem<PT, M, A, P>` are parameterized by `P: ZoneGhostProtocol`.
+/// `Zone<PT, M, A, P, I>` and `HvMem<PT, M, A, P, I>` are parameterized by `P: ZoneGhostProtocol`.
 /// Swapping `P` switches the entire ghost-state bookkeeping strategy without changing
 /// any exec code.
 ///
@@ -87,6 +88,13 @@ pub trait ZoneGhostProtocol: Sized {
             Self::mem_inst_id(gs) == Self::mem_inst_id(old(gs)),
             zt.zone_id() == zid,
             zt.ghost_zone().regions() =~= Set::empty(),
+            // The new zone is *fully* empty (regions and mappings, CPU and IOMMU) —
+            // exactly the literal both spec SMs' `add_zone` transitions construct.
+            // `Zone::new` needs this to establish `ZonePred::inv` at birth.
+            zt.ghost_zone() == (GhostZone {
+                cpu_mem_set: SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
+                iommu_mem_set: SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
+            }),
             zt.wf(Self::mem_inst_id(gs)),
             Self::zone_ids(gs) =~= Self::zone_ids(old(gs)).insert(zid),
     ;

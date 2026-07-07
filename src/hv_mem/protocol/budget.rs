@@ -6,7 +6,7 @@
 //! `insert_region` under `BudgetProtocol` is zone-local: only the `BudgetSpec::zones[zid]`
 //! map-sharded token is updated, so **no global HvMem write lock is required**.
 use super::super::spec::{
-    budget::{zone_budget, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken},
+    budget::{gic_region, zone_regions, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken},
     GhostZone,
 };
 use super::{ZoneGhostProtocol, ZoneStateOps};
@@ -19,8 +19,8 @@ verus! {
 ///
 /// Parallel to `ZoneState` for `ClosureSpec`, but wraps a `BudgetZoneToken`
 /// (map-sharded `BudgetSpec::zones` entry) instead of a `ClosureZoneToken`.
-/// Stored in the zone-level lock alongside no budget token — the budget is
-/// accessed as the pure spec function `zone_budget(zid)` instead.
+/// Stored in the zone-level lock alongside no budget token — configured regions
+/// are accessed as the pure spec function `zone_regions(zid)` instead.
 pub tracked struct BudgetZoneState {
     pub zone_tok: BudgetZoneToken,
 }
@@ -116,23 +116,23 @@ impl BudgetProtocol {
     ///
     /// Zone-local: only the `BudgetSpec::zones[zid]` map-sharded token is updated;
     /// `gs` is not mutated, so callers do not need to hold the HvMem write lock.
-    pub proof fn insert_region(
+    pub proof fn cpu_insert_region(
         tracked gs: &BudgetGlobalState,
         tracked zt: BudgetZoneState,
         region: MemoryRegion,
     ) -> (tracked new_zt: BudgetZoneState)
         requires
             zt.wf(gs.mem_inst_id()),
-            zone_budget(zt.zone_id()).contains(region),
-            !zt.ghost_zone().contains_region(region),
-            !zt.ghost_zone().mem_set.overlaps_vmem(region),
+            zone_regions(zt.zone_id()).contains(region),
+            !zt.ghost_zone().cpu_mem_set.overlaps_vmem(region),
+            !zt.ghost_zone().cpu_mem_set.regions.contains(region),
         ensures
             new_zt.zone_id() == zt.zone_id(),
             new_zt.wf(gs.mem_inst_id()),
-            new_zt.ghost_zone() == zt.ghost_zone().insert_region(region),
+            new_zt.ghost_zone() == zt.ghost_zone().cpu_insert_region(region),
     {
         let zid = zt.zone_id();
-        let tracked new_tok = gs.inst.insert_region(zid, region, zt.zone_tok);
+        let tracked new_tok = gs.inst.cpu_insert_region(zid, region, zt.zone_tok);
         BudgetZoneState { zone_tok: new_tok }
     }
 
@@ -140,21 +140,61 @@ impl BudgetProtocol {
     ///
     /// Zone-local: only the `BudgetSpec::zones[zid]` map-sharded token is updated;
     /// `gs` is not mutated, so callers do not need to hold the HvMem write lock.
-    pub proof fn remove_region(
+    pub proof fn cpu_remove_region(
         tracked gs: &BudgetGlobalState,
         tracked zt: BudgetZoneState,
         region: MemoryRegion,
     ) -> (tracked new_zt: BudgetZoneState)
         requires
             zt.wf(gs.mem_inst_id()),
-            zt.ghost_zone().contains_region(region),
+            zt.ghost_zone().cpu_mem_set.regions.contains(region),
         ensures
             new_zt.zone_id() == zt.zone_id(),
             new_zt.wf(gs.mem_inst_id()),
-            new_zt.ghost_zone() == zt.ghost_zone().remove_region(region),
+            new_zt.ghost_zone() == zt.ghost_zone().cpu_remove_region(region),
     {
         let zid = zt.zone_id();
-        let tracked new_tok = gs.inst.remove_region(zid, region, zt.zone_tok);
+        let tracked new_tok = gs.inst.cpu_remove_region(zid, region, zt.zone_tok);
+        BudgetZoneState { zone_tok: new_tok }
+    }
+
+    /// Insert a region into a zone's IOMMU mappings.
+    pub proof fn iommu_insert_region(
+        tracked gs: &BudgetGlobalState,
+        tracked zt: BudgetZoneState,
+        region: MemoryRegion,
+    ) -> (tracked new_zt: BudgetZoneState)
+        requires
+            zt.wf(gs.mem_inst_id()),
+            zone_regions(zt.zone_id()).contains(region) || region == gic_region(),
+            !zt.ghost_zone().iommu_mem_set.overlaps_vmem(region),
+            !zt.ghost_zone().iommu_mem_set.regions.contains(region),
+        ensures
+            new_zt.zone_id() == zt.zone_id(),
+            new_zt.wf(gs.mem_inst_id()),
+            new_zt.ghost_zone() == zt.ghost_zone().iommu_insert_region(region),
+    {
+        let zid = zt.zone_id();
+        let tracked new_tok = gs.inst.iommu_insert_region(zid, region, zt.zone_tok);
+        BudgetZoneState { zone_tok: new_tok }
+    }
+
+    /// Remove a region from a zone's IOMMU mappings.
+    pub proof fn iommu_remove_region(
+        tracked gs: &BudgetGlobalState,
+        tracked zt: BudgetZoneState,
+        region: MemoryRegion,
+    ) -> (tracked new_zt: BudgetZoneState)
+        requires
+            zt.wf(gs.mem_inst_id()),
+            zt.ghost_zone().iommu_mem_set.regions.contains(region),
+        ensures
+            new_zt.zone_id() == zt.zone_id(),
+            new_zt.wf(gs.mem_inst_id()),
+            new_zt.ghost_zone() == zt.ghost_zone().iommu_remove_region(region),
+    {
+        let zid = zt.zone_id();
+        let tracked new_tok = gs.inst.iommu_remove_region(zid, region, zt.zone_tok);
         BudgetZoneState { zone_tok: new_tok }
     }
 }
