@@ -65,15 +65,15 @@ pub trait MmuInstr {
     // ------------------------------------------------------------------
     // S2 TLB invalidation broadcast
     // ------------------------------------------------------------------
-    /// Broadcast a CPU stage-2 TLB invalidation for the IPA `(vm, gpa)` across every
-    /// PE in the inner-shareable domain.
+    /// Broadcast and complete a CPU stage-2 TLB invalidation for the IPA
+    /// `(vm, gpa)` across every PE in the inner-shareable domain.
     ///
-    /// On AArch64: a single `TLBI IPAS2E1IS, Xt` instruction.  Because it is
-    /// inner-shareable it is a *broadcast* — one instruction removes the cached
-    /// `(*, vm, gpa)` entries on **every** PE — so it takes no per-CPU argument.
-    /// It must be followed by a completion `DSB ISH` ([`issue_dsb_ish`](Self::issue_dsb_ish))
-    /// before the new translation may be relied upon.  Note this flushes only the
-    /// **CPU** TLB — the SMMU TLB is unaffected (use [`SmmuInstr::issue_smmu_tlbi_s2`]).
+    /// On AArch64 this is `TLBI IPAS2E1IS, Xt` followed by the completion
+    /// `DSB ISH`.  `IPAS2E1IS` is inner-shareable, so the invalidation is a
+    /// broadcast over every PE in that domain and takes no per-CPU argument; the
+    /// trailing `DSB ISH` is part of this method because the model-level invalidate
+    /// transition is synchronous.  This flushes only the **CPU** TLB — the SMMU TLB
+    /// is unaffected (use [`SmmuInstr::issue_smmu_tlbi_s2`]).
     ///
     /// `IPAS2E1IS` is a **register-form** maintenance op: the target IPA travels in
     /// `Xt` as `Xt[..] = IPA >> 12`, which for the model's 4K pages is exactly the
@@ -81,15 +81,16 @@ pub trait MmuInstr {
     /// *not* an operand; it is read from the current `VTTBR_EL2`, which the caller
     /// must already have programmed.  ([`MmuHardware::unmap_dsb_tlbi`] derives the
     /// spec page from `ipa_page`, so the asm and the ghost transition agree.)
-    fn issue_tlbi_s2(ipa_page: usize);
+    fn issue_tlbi_s2_sync(ipa_page: usize);
 
     // ------------------------------------------------------------------
     // Data Synchronization Barrier (DSB ISH)
     // ------------------------------------------------------------------
     /// Issue a Data Synchronization Barrier in the inner-shareable domain.
     ///
-    /// On AArch64: `DSB ISH`.  It does not retire until the preceding
-    /// `TLBI IPAS2E1IS` has completed on every PE in the domain.
+    /// On AArch64: `DSB ISH`.  Before a TLBI, this makes prior page-table writes
+    /// visible to walkers; after a TLBI, it waits for the invalidation to complete
+    /// on every PE in the domain.
     fn issue_dsb_ish();
 
     // ------------------------------------------------------------------
@@ -204,11 +205,11 @@ impl<I: HardwareInstr> MmuHardware<I> {
     // instance.  The SMMU counterparts are further below.
 
     /// One per-page break-before-make step: the caller has written the PTE invalid;
-    /// this issues the `DSB ISH` (drops `(vm, gpa)` from the vm's slice) and the
-    /// `TLBI IPAS2E1IS` broadcast (clears the page's cached entries) — together,
-    /// firing the bundled `unmap_invalidate`.  Consumes the vm's slice token and
-    /// returns it with the page removed; `tlb_coherent` is preserved by the `MmuSpec`
-    /// invariant, so it is not part of this contract.
+    /// this issues the pre-TLBI `DSB ISH` (drops `(vm, gpa)` from the vm's slice)
+    /// and the completed `TLBI IPAS2E1IS` broadcast (clears the page's cached
+    /// entries) — together, firing the bundled `unmap_invalidate`.  Consumes the
+    /// vm's slice token and returns it with the page removed; `tlb_coherent` is
+    /// preserved by the `MmuSpec` invariant, so it is not part of this contract.
     ///
     /// `ipa_page` is the real operand (`IPA >> 12`); the spec page is **derived**
     /// from it, so the asm and the ghost transition target the same page.
@@ -233,7 +234,7 @@ impl<I: HardwareInstr> MmuHardware<I> {
         let ghost gpa = GuestPage(ipa_page as nat);
         let tracked s2 = s2_tok.get();
         I::issue_dsb_ish();
-        I::issue_tlbi_s2(ipa_page);
+        I::issue_tlbi_s2_sync(ipa_page);
         let tracked new_tok = self.instance.borrow().unmap_invalidate(
             vm@,
             gpa,
