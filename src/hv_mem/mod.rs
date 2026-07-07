@@ -214,6 +214,36 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         &&& self.lock.k@.alloc_inst_id == self.allocator.inst_id()
     }
 
+    /// Return the index of `zid` in a well-formed zone list, if present.
+    fn find_zone_index(zones: &Vec<Zone<PT, M, A, P, I>>, zid: usize) -> (res: Option<usize>)
+        requires
+            forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
+        ensures
+            res is Some ==> {
+                &&& res->Some_0 < zones@.len()
+                &&& zones@[res->Some_0 as int].zone_id == zid
+                &&& zones@[res->Some_0 as int].wf()
+            },
+            res is None ==> forall|j: int|
+                0 <= j < zones@.len() ==> #[trigger] zones@[j].zone_id != zid,
+    {
+        let mut i: usize = 0;
+        while i < zones.len()
+            invariant
+                i <= zones.len(),
+                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
+                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
+            decreases zones.len() - i,
+        {
+            if zones[i].zone_id == zid {
+                assert(zones@[i as int].wf());
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    }
+
     /// Add a new empty zone to the hypervisor memory manager.
     ///
     /// The zone is created with no regions; use `insert_region` to populate it
@@ -263,66 +293,14 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         let mut zones = self.zone_mem_list.take(Tracked(&mut content.zone_list_perm));
 
         // ── Step 1b: reject duplicate zone IDs ────────────────────────────────
-        let mut i: usize = 0;
-        while i < zones.len()
-            invariant
-                i <= zones.len(),
-                self.invariants(),
-                !content.zone_list_perm.is_init(),
-                content.zone_list_perm@.pcell === self.zone_mem_list.id(),
-                content.zone_list_perm@.pcell === self.lock.k@.cell_id,
-                handle@.instance_id() == self.lock.inst@.id(),
-                P::mem_inst_id(&content.global_state) == self.lock.k@.mem_inst_id,
-                P::global_wf(&content.global_state),
-                // Scan progress: none of the zones before i have zone_id == zid.
-                forall|j: int| 0 <= j < i ==> #[trigger] zones[j].zone_id != zid,
-                // Bijection: ghost zone_ids <-> exec zone IDs.
-                forall|z: nat| #[trigger]
-                    P::zone_ids(&content.global_state).contains(z) == (exists|k: int|
-                        0 <= k < zones@.len() && #[trigger] zones@[k].zone_id as nat == z),
-                // Spec-instance consistency.
-                forall|k: int|
-                    #![trigger zones@[k]]
-                    0 <= k < zones@.len() ==> zones@[k].mem_inst_id() == self.lock.k@.mem_inst_id,
-                forall|k: int|
-                    #![trigger zones@[k]]
-                    0 <= k < zones@.len() ==> zones@[k].alloc_inst_id()
-                        == self.lock.k@.alloc_inst_id,
-                // MMU-instance consistency.
-                forall|k: int|
-                    #![trigger zones@[k]]
-                    0 <= k < zones@.len() ==> zones@[k].mmu_inst_id() == self.lock.k@.mmu_inst_id,
-                // IOMMU-instance consistency.
-                forall|k: int|
-                    #![trigger zones@[k]]
-                    0 <= k < zones@.len() ==> zones@[k].iommu_mmu_inst_id()
-                        == self.lock.k@.iommu_mmu_inst_id,
-                // Page-table architecture consistency.
-                forall|k: int|
-                    #![trigger zones@[k]]
-                    0 <= k < zones@.len() ==> zones@[k].pt_constants()
-                        == self.lock.k@.pt_constants,
-                // Pairwise distinct IDs.
-                forall|k: int, l: int|
-                    #![auto]
-                    0 <= k < zones@.len() && 0 <= l < zones@.len() && k != l ==> zones@[k].zone_id
-                        != zones@[l].zone_id,
-                // All zones well-formed.
-                forall|k: int| #![auto] 0 <= k < zones@.len() ==> zones@[k].wf(),
-                // The MMU handles are untouched by the scan (needed by the early Err exit).
-                mmu.wf(),
-                mmu.inst_id() == self.lock.k@.mmu_inst_id,
-                iommu_mmu.wf(),
-                iommu_mmu.inst_id() == self.lock.k@.iommu_mmu_inst_id,
-            decreases zones.len() - i,
-        {
-            if zones[i].zone_id == zid {
+        match Self::find_zone_index(&zones, zid) {
+            Some(_) => {
                 self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
                 assert(HvMemPred::<PT, M, A, P, I>::inv(self.lock.k@, content));
                 self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
                 return Err(());
-            }
-            i += 1;
+            },
+            None => {},
         }
 
         // ── Step 2: advance protocol ghost state, obtain zone token ───────────
@@ -335,7 +313,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             mem_inst_id = P::mem_inst_id(&content.global_state);
             assert(forall|j: int| 0 <= j < zones.len() ==> #[trigger] zones[j].zone_id != zid);
             // From the bijection invariant: zone_ids.contains(zid as nat) iff
-            // some exec zone has zone_id == zid — but the scan found none.
+            // some exec zone has zone_id == zid — but `find_zone_index` found none.
             assert(!P::zone_ids(&content.global_state).contains(zid as nat));
             zone_state = P::add_zone(&mut content.global_state, zid as nat);
             // Postcondition: zone_ids(new_gs) = pre_add_zone_ids.insert(zid as nat)
@@ -474,10 +452,12 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                     if k < old_len && l < old_len {
                         // From loop invariant.
                     } else if k == old_len {
-                        // new_zone.zone_id == zid; old_zones[l].zone_id != zid (from scan).
+                        // new_zone.zone_id == zid; old_zones[l].zone_id != zid
+                        // (from `find_zone_index`).
                         assert(old_zones[l].zone_id != zid);
                     } else {
-                        // l == old_len; old_zones[k].zone_id != zid (from scan).
+                        // l == old_len; old_zones[k].zone_id != zid
+                        // (from `find_zone_index`).
                         assert(old_zones[k].zone_id != zid);
                     }
                 };
@@ -514,32 +494,16 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         let mut zones = self.zone_mem_list.take(Tracked(&mut content.zone_list_perm));
 
         // ── Step 2: find zone by ID ───────────────────────────────────────────
-        let mut i: usize = 0;
-        while i < zones.len()
-            invariant_except_break
-                i <= zones.len(),
-                self.invariants(),
-                // Every zone in the list is well-formed.
-                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
-                // No zone before index i has zone_id == zid.
-                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
-            ensures
-                i < zones.len() ==> zones[i as int].zone_id == zid && zones[i as int].wf(),
-            decreases zones.len() - i,
-        {
-            if zones[i].zone_id == zid {
-                break ;
-            }
-            i += 1;
-        }
-
-        if i >= zones.len() {
+        let i = match Self::find_zone_index(&zones, zid) {
+            Some(i) => i,
+            None => {
             // Zone not found — restore and return error.
-            self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
-            assert(HvMemPred::<PT, M, A, P, I>::inv(self.lock.k@, content));
-            self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
-            return Err(());
-        }
+                self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
+                assert(HvMemPred::<PT, M, A, P, I>::inv(self.lock.k@, content));
+                self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
+                return Err(());
+            },
+        };
         // ── Step 3: remove zone from list ─────────────────────────────────────
 
         let ghost old_zones = zones@;
@@ -634,33 +598,15 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         let tracked HvMemRwContent::<PT, M, A, P, I> { zone_list_perm, .. } = content;
         let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
 
-        // ── Scan for matching zone ID ─────────────────────────────────────────
-        let mut i: usize = 0;
-        while i < zones.len()
-            invariant_except_break
-                i <= zones.len(),
-                self.invariants(),
-                // Every zone in the list is well-formed.
-                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
-                // No zone before index i has zone_id == zid.
-                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
-            ensures
-                i < zones.len() ==> zones[i as int].zone_id == zid && zones[i as int].wf(),
-            decreases zones.len() - i,
-        {
-            if zones[i].zone_id == zid {
-                break ;
-            }
-            i += 1;
-        }
-
         // ── Invoke callback while the read lock is held ───────────────────────
-        // The borrow of `zones[i]` ends when `f` returns (R does not borrow from
+        // The borrow of the selected zone ends when `f` returns (R does not borrow from
         // the zone), so `unlock_read` can safely consume `guard` afterwards.
-        let result = if i < zones.len() {
-            Some(f(&zones[i]))
-        } else {
-            None
+        let result = match Self::find_zone_index(zones, zid) {
+            Some(i) => {
+                assert(zones@[i as int].wf());
+                Some(f(&zones[i]))
+            },
+            None => None,
         };
 
         self.lock.unlock_read(guard);
@@ -717,28 +663,13 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
 
         // ── Step 3: find zone by ID ────────────────────────────────────────────
-        let mut i: usize = 0;
-        while i < zones.len()
-            invariant_except_break
-                i <= zones.len(),
-                self.invariants(),
-                // Every zone in the list is well-formed.
-                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
-                // No zone before index i has zone_id == zid.
-                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
-            ensures
-                i < zones.len() ==> zones[i as int].zone_id == zid && zones[i as int].wf(),
-            decreases zones.len() - i,
-        {
-            if zones[i].zone_id == zid {
-                break ;
-            }
-            i += 1;
-        }
-        if i >= zones.len() {
-            self.lock.unlock_read(guard);
-            return Err(());
-        }
+        let i = match Self::find_zone_index(zones, zid) {
+            Some(i) => i,
+            None => {
+                self.lock.unlock_read(guard);
+                return Err(());
+            },
+        };
         // ── Step 4: delegate to Zone::insert_region ────────────────
         // Zone::insert_region acquires the zone write lock internally
         // and advances the BudgetSpec ghost state via a shared &BudgetGlobalState,
@@ -789,26 +720,13 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
 
         // ── Step 3: find zone by ID ────────────────────────────────────────────
-        let mut i: usize = 0;
-        while i < zones.len()
-            invariant
-                i <= zones.len(),
-                self.invariants(),
-                // Every zone in the list is well-formed.
-                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
-                // No zone before index i has zone_id == zid.
-                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
-            decreases zones.len() - i,
-        {
-            if zones[i].zone_id == zid {
-                break ;
-            }
-            i += 1;
-        }
-        if i == zones.len() {
-            self.lock.unlock_read(guard);
-            return Err(());
-        }
+        let i = match Self::find_zone_index(zones, zid) {
+            Some(i) => i,
+            None => {
+                self.lock.unlock_read(guard);
+                return Err(());
+            },
+        };
         // ── Step 4: delegate to Zone::remove_region ────────────────
 
         proof {
@@ -848,26 +766,13 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
             content;
         let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
 
-        let mut i: usize = 0;
-        while i < zones.len()
-            invariant_except_break
-                i <= zones.len(),
-                self.invariants(),
-                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
-                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
-            ensures
-                i < zones.len() ==> zones[i as int].zone_id == zid && zones[i as int].wf(),
-            decreases zones.len() - i,
-        {
-            if zones[i].zone_id == zid {
-                break ;
-            }
-            i += 1;
-        }
-        if i >= zones.len() {
-            self.lock.unlock_read(guard);
-            return Err(());
-        }
+        let i = match Self::find_zone_index(zones, zid) {
+            Some(i) => i,
+            None => {
+                self.lock.unlock_read(guard);
+                return Err(());
+            },
+        };
         proof {
             // IOMMU instance-id bridge: `HvMemPred` pins every zone's IOMMU instance,
             // and the precondition pins `iommu_mmu.inst_id()` to it.
@@ -909,24 +814,13 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
             content;
         let zones = self.zone_mem_list.borrow(Tracked(&zone_list_perm));
 
-        let mut i: usize = 0;
-        while i < zones.len()
-            invariant
-                i <= zones.len(),
-                self.invariants(),
-                forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
-                forall|j: int| 0 <= j < i ==> #[trigger] zones@[j].zone_id != zid,
-            decreases zones.len() - i,
-        {
-            if zones[i].zone_id == zid {
-                break ;
-            }
-            i += 1;
-        }
-        if i == zones.len() {
-            self.lock.unlock_read(guard);
-            return Err(());
-        }
+        let i = match Self::find_zone_index(zones, zid) {
+            Some(i) => i,
+            None => {
+                self.lock.unlock_read(guard);
+                return Err(());
+            },
+        };
         proof {
             assert(zones[i as int].lock.k@.iommu_mmu_inst_id == iommu_mmu.inst_id());
         }
