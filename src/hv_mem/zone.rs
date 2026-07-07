@@ -29,8 +29,8 @@ use vstd::{
 
 verus! {
 
-use super::spec::budget::{gic_region, zone_regions};
-use crate::model::convert::pt_s2map_inner;
+use super::spec::budget::*;
+use crate::model::convert::*;
 
 /// Ghost key for a `Zone`'s `RwLock`.
 ///

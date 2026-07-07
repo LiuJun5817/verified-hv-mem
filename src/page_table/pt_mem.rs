@@ -18,12 +18,7 @@ use vstd::{prelude::*, simple_pptr::PPtr};
 
 verus! {
 
-use crate::{
-    global_allocator::{
-        frame_is_empty, inst_base, ClientState, Frame4KPerm, FrameID, GlobalAllocator,
-        SPEC_FRAME_SIZE,
-    },
-}
+use crate::global_allocator::*;
 
 /// Abstract model of page table memory, a memory region that stores page tables.
 ///

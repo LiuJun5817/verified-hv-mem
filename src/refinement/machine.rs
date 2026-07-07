@@ -41,22 +41,10 @@ use crate::page_table::PageTable;
 
 verus! {
 
-use super::software::{
-    state_iommu_s2_map, state_s2_map, zone_iommu_s2_entries, zone_s2_entries,
-};
-use crate::model::convert::{flatten_s2map, frame_to_s2, pt_s2map_inner, vaddr_of_gpa};
-use crate::model::hardware::proof::{
-    lemma_context_switch_preserves_wf, lemma_iommu_map_preserves_wf,
-    lemma_iommu_unmap_invalidate_preserves_wf, lemma_map_preserves_wf,
-    lemma_unmap_invalidate_preserves_wf,
-};
-use crate::model::software::proof::{
-    lemma_add_vm_step_preserves_wf, lemma_assign_page_step_preserves_wf,
-    lemma_iommu_map_step_preserves_iommu_wf, lemma_iommu_unmap_step_preserves_iommu_wf,
-    lemma_map_step_preserves_wf, lemma_reclaim_page_step_preserves_wf,
-    lemma_remove_vm_step_preserves_wf, lemma_share_page_step_preserves_wf,
-    lemma_unmap_step_preserves_wf, lemma_unshare_page_step_preserves_wf,
-};
+use super::software::*;
+use crate::model::convert::*;
+use crate::model::hardware::proof::*;
+use crate::model::software::proof::*;
 
 // ---------------------------------------------------------------------------
 // §1  `wf` bridges: view-level ⟺ machine-level well-formedness

@@ -12,7 +12,7 @@ use vstd::prelude::*;
 
 verus! {
 
-use crate::address::SPEC_PAGE_SIZE;
+use crate::address::region::*;
 
 /// A config type derived from `hvisor::config::HvConfigMemoryRegion`. It is used as the input to zone creation,
 /// and carries both virtual and physical information for the initial memory regions of a zone.

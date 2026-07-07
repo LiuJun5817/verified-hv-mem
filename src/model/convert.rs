@@ -12,8 +12,8 @@ use crate::model::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPag
 use vstd::prelude::*;
 
 verus! {
-    
-use crate::address::region::SPEC_PAGE_SIZE;
+
+use crate::address::region::*;
 
 // ─────────────────────────── page-number extraction ───────────────────────────
 // The two primitives that turn a byte address into its (model) page number — the

@@ -17,14 +17,8 @@ mod vec;
 
 verus! {
 
-use crate::{
-    model::convert::pt_s2map_inner,
-    address::{
-        addr::{SpecPAddr, SpecVAddr, VAddr},
-        frame::{self, Frame, FrameSize, SpecFrame},
-        region::{MemoryRegion, PAGE_SIZE, SPEC_PAGE_SIZE},
-    },
-};
+use crate::address::{addr::*, frame::*, region::*};
+use crate::model::convert::*;
 
 /// Abstract state of a memory set: the regions **and** the page-table mappings
 /// they induce.

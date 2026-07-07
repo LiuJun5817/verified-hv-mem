@@ -42,17 +42,10 @@ use vstd::prelude::*;
 
 verus! {
 
-use crate::hv_mem::spec::budget::{
-    gic_region, gic_region_disjoint_from_zones, zone_regions, zone_regions_in_all_regions,
-    zone_regions_pairwise_disjoint,
-};
-use crate::hv_mem::spec::{all_regions, all_regions_disjoint, all_regions_valid};
-use crate::model::convert::{
-    attr_to_perms, frame_phys_page, frame_to_s2, gpa_of_vaddr, lemma_vaddr_of_gpa_injective,
-    phys_page_of_paddr, vaddr_of_gpa,
-};
-use crate::address::region::{MemoryRegion, SPEC_PAGE_SIZE};
-
+use crate::address::region::*;
+use crate::hv_mem::spec::budget::*;
+use crate::hv_mem::spec::*;
+use crate::model::convert::*;
 
 // ---------------------------------------------------------------------------
 // §1  Per-region geometry

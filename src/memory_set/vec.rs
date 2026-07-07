@@ -24,10 +24,7 @@ use vstd::prelude::*;
 
 verus! {
 
-use crate::model::convert::{
-    frame_to_s2, gpa_of_vaddr, lemma_pt_s2map_inner_insert, lemma_pt_s2map_inner_remove,
-    lemma_vaddr_gpa_roundtrip, pt_s2map_inner,
-};
+use crate::model::convert::*;
 
 broadcast use crate::page_table::PageTable::lemma_invariants_implies_wf;
 

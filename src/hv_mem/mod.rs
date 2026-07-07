@@ -46,8 +46,8 @@ use zone::{Zone, ZoneKey, ZonePred, ZoneRwContent};
 
 verus! {
 
-use crate::model::convert::pt_s2map_inner;
-use spec::budget::{gic_region, zone_regions};
+use crate::model::convert::*;
+use spec::budget::*;
 
 /// Ghost key for `HvMem`'s outer `RwLock`.
 ///

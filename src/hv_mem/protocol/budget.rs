@@ -15,7 +15,7 @@ use vstd::prelude::*;
 
 verus! {
 
-use super::super::spec::budget::{gic_region, zone_regions};
+use super::super::spec::budget::*;
 
 /// Per-zone tracked ghost state for `BudgetSpec` (assumption 2).
 ///

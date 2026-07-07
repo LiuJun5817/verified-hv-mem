@@ -24,7 +24,7 @@ use vstd::{prelude::*, tokens::InstanceId};
 
 verus! {
 
-use super::closure::all_regions;
+use super::closure::*;
 
 /// Static configured regions owned by one zone.
 pub uninterp spec fn zone_regions(zid: nat) -> Set<MemoryRegion>;

@@ -12,10 +12,7 @@ pub use budget::{BudgetSpec, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneT
 
 verus! {
 
-pub use closure::{
-    all_regions, all_regions_disjoint, all_regions_valid, ClosureRegionToken, ClosureSpec,
-    ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
-};
+pub use closure::*;
 
 /// Ghost state for one zone tracked inside `ClosureSpec` or `BudgetSpec`.
 ///

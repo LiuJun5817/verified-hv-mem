@@ -4,7 +4,7 @@ use vstd::simple_pptr::PointsTo;
 
 verus! {
 
-use crate::global_allocator::{frame_is_empty, Frame4KPerm};
+use crate::global_allocator::*;
 
 /// A single page table, which contains a fixed number of `u64` entries. The type parameter `N` is the
 /// number of entries in the table.

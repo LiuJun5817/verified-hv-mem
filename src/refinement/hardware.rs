@@ -12,7 +12,7 @@ use vstd::prelude::*;
 
 verus! {
 
-use crate::model::convert::flatten_s2map;
+use crate::model::convert::*;
 
 /// The pair of hardware-side tokenized states: CPU MMU plus SMMU/IOMMU.
 pub ghost struct HardwareSpec {
