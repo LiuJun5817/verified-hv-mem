@@ -1,19 +1,10 @@
 use core::marker::PhantomData;
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::atomic_ghost::*;
-use vstd::cell::CellId;
-use vstd::cell::PCell;
-use vstd::cell::PointsTo;
-use vstd::invariant;
-use vstd::invariant::{AtomicInvariant, InvariantPredicate};
+use vstd::invariant::InvariantPredicate;
 use vstd::multiset::*;
-use vstd::open_atomic_invariant;
 use vstd::prelude::*;
-use vstd::rwlock::RwLock as VerusRwLock;
 
-use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
-
-// The tokenized state machine is unchanged.
 tokenized_state_machine! {
 
 RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
@@ -76,7 +67,7 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
         broadcast use group_multiset_axioms;
     }
 
-    /// Increment the 'rc' counter, obtain a pending_reader
+    /// Start a read acquisition by incrementing `rc` and minting a pending-reader token.
     transition!{
         acquire_read_start() {
             update flag_rc = pre.flag_rc + 1;
@@ -84,8 +75,7 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
         }
     }
 
-    /// Exchange the pending_reader for a reader by checking
-    /// that the 'exc' bit is 0
+    /// Finish the first read phase when no writer holds or is acquiring `exc`.
     transition!{
         acquire_read_end() {
             require(pre.flag_exc == false);
@@ -106,8 +96,7 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
         }
     }
 
-    /// Decrement the 'rc' counter, abandon the attempt to gain
-    /// the 'read' lock.
+    /// Abandon a read attempt after `rc` was incremented but `exc` was observed true.
     transition!{
         acquire_read_abandon() {
             remove pending_reader -= {()};
@@ -116,8 +105,7 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
         }
     }
 
-    /// Atomically set 'exc' bit from 'false' to 'true'
-    /// Obtain a pending_writer
+    /// Start a write acquisition by setting `exc` and minting a pending-writer token.
     transition!{
         acquire_exc_start() {
             require(pre.flag_exc == false);
@@ -126,9 +114,7 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
         }
     }
 
-    /// Finish obtaining the write lock by checking that 'rc' is 0.
-    /// Exchange the pending_writer for a writer and withdraw the
-    /// stored object.
+    /// Finish write acquisition once `rc` is 0, withdrawing the stored value.
     transition!{
         acquire_exc_end() {
             require(pre.flag_rc == 0);
@@ -146,9 +132,7 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
         }
     }
 
-    /// Release the write-lock. Update the 'exc' bit back to 'false'.
-    /// Return the 'writer' and also deposit an object back into storage.
-    /// The caller must prove that `x` satisfies the lock's predicate.
+    /// Release the write lock by consuming the writer token and depositing `x`.
     transition!{
         release_exc(x: V) {
             require Pred::inv(pre.k, x);
@@ -161,7 +145,7 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
         }
     }
 
-    /// Check that the 'reader' is actually a guard for the given object.
+    /// Borrow the stored value witnessed by a reader token.
     property!{
         read_guard(x: V) {
             have reader >= {x};
@@ -216,7 +200,7 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
         }
     }
 
-    /// Release the reader-lock. Decrement 'rc' and return the 'reader' object.
+    /// Finish read release by consuming a mock-reader token and decrementing `rc`.
     #[transition]
     transition!{
         release_shared() {
@@ -269,7 +253,7 @@ RwLockToks<K, V, Pred: InvariantPredicate<K, V>> {
         imply(self.storage is None, self.writer is Some)
     }
 
-    /// The stored value always satisfies the lock's predicate.
+    /// Stored values always satisfy the lock predicate.
     #[invariant]
     pub fn storage_inv(&self) -> bool {
         self.storage is Some ==> Pred::inv(self.k, self.storage->0)
@@ -337,12 +321,7 @@ type RwPendingWriterToken<K, V, Pred> = RwLockToks::pending_writer<K, V, Pred>;
 type RwPendingReaderToken<K, V, Pred> = RwLockToks::pending_reader<K, V, Pred>;
 
 struct_with_invariants! {
-    /// An RwLock parameterised by a ghost key `K` and a predicate `Pred`.
-    ///
-    /// `Pred::inv(k, v)` must hold whenever `v` is stored inside the lock.
-    /// This mirrors the `Mutex<K,V,Pred>` design: whoever releases the write
-    /// lock must prove the predicate, and whoever acquires the write lock
-    /// receives a value that already satisfies it.
+    /// A reader-writer lock protecting a value of type `V` under `Pred`.
     pub struct RwLock<K, V, Pred: InvariantPredicate<K, V>> {
         pub exc: AtomicBool<_, RwExcToken<K, V, Pred>, _>,
         pub rc: AtomicU64<_, RwRcToken<K, V, Pred>, _>,
@@ -375,11 +354,7 @@ struct_with_invariants! {
 }
 
 impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
-    /// Create a new `RwLock` protecting value `t` under key `k` with predicate `Pred`.
-    ///
-    /// Mirrors `Mutex::new`: the caller must prove `Pred::inv(k, t)` up front;
-    /// thereafter `storage_inv` in the state machine guarantees the predicate
-    /// holds for the stored value at all times.
+    /// Create a new reader-writer lock protecting `t`.
     pub fn new(Ghost(k): Ghost<K>, Tracked(t): Tracked<V>) -> (s: Self)
         requires
             Pred::inv(k, t),
@@ -405,18 +380,19 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
         RwLock { exc, rc, real_rc, inst, k: Ghost(k) }
     }
 
-    /// Returns `true` in the ghost world iff `val` satisfies the lock's predicate.
+    /// Predicate required for values stored in this lock.
     pub open spec fn inv(&self, val: V) -> bool {
         Pred::inv(self.k@, val)
     }
 
+    /// Acquire the write lock, spinning until `exc` is set and `rc` reaches 0.
     #[verifier::exec_allows_no_decreases_clause]
-    pub fn lock_write(&self) -> (res: RwWriteGuard<K, V, Pred>)
+    pub fn lock_write(&self) -> (guard: RwWriteGuard<K, V, Pred>)
         requires
             self.wf(),
         ensures
-            res.wf(self),
-            self.inv(res@),
+            guard.wf(self),
+            self.inv(guard.view()),
     {
         let mut done = false;
         let tracked mut pending_writer_token: Option<RwPendingWriterToken<K, V, Pred>> = None;
@@ -428,161 +404,153 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                 },
                 self.wf(),
         {
-            let result =
+            let cas_result =
                 atomic_with_ghost!(
                 &self.exc => compare_exchange(false, true);
-                returning res;
+                returning cas_res;
                 ghost g => {
-                    if res is Ok {
-                        // `exc` is false, so we can start acquiring the write lock.
-                        // Consume exc token and produce pending_writer token.
+                    if cas_res is Ok {
                         pending_writer_token = Some(self.inst.borrow().acquire_exc_start(&mut g));
                     }
                 }
             );
-            done = result.is_ok();
+            done = cas_result.is_ok();
         }
 
-        let mut write_handle_opt: Option<RwWriteGuard<K, V, Pred>> = None;
+        let mut write_guard_opt: Option<RwWriteGuard<K, V, Pred>> = None;
         loop
             invariant_except_break
                 pending_writer_token is Some,
                 pending_writer_token->0.instance_id() == self.inst@.id(),
                 self.wf(),
             ensures
-                write_handle_opt is Some,
-                write_handle_opt->Some_0.wf(self),
-                self.inv(write_handle_opt->Some_0.view()),
+                write_guard_opt is Some,
+                write_guard_opt->Some_0.wf(self),
+                self.inv(write_guard_opt->Some_0.view()),
         {
-            let tracked mut handle_opt: Option<RwWriterToken<K, V, Pred>> = None;
-            let tracked mut token_opt: Option<V> = None;
-            let result =
+            let tracked mut writer_token_opt: Option<RwWriterToken<K, V, Pred>> = None;
+            let tracked mut value_opt: Option<V> = None;
+            let rc_value =
                 atomic_with_ghost!(
                 &self.rc => load();
-                returning res;
+                returning loaded_rc;
                 ghost g => {
-                    if res == 0 {
-                        // `rc` is 0, so we can finish acquiring the write lock.
+                    if loaded_rc == 0 {
                         let tracked pw_token = match pending_writer_token {
                             Some(t) => t,
                             None => proof_from_false(),
                         };
-                        // Consume pending_writer token and produce writer token.
-                        // acquire_exc_end asserts Pred::inv(k, x) on the withdrawn value,
-                        // so exc_token satisfies the predicate as a transition postcondition.
-                        let tracked res = self.inst.borrow().acquire_exc_end(&g, pw_token);
-                        let tracked exc_handle = res.2.get();
-                        let tracked exc_token = res.1.get();
-                        assert(Pred::inv(self.k@, exc_token));
+                        let tracked acquire_result = self.inst.borrow().acquire_exc_end(&g, pw_token);
+                        let tracked writer_token = acquire_result.2.get();
+                        let tracked value = acquire_result.1.get();
+                        assert(Pred::inv(self.k@, value));
                         pending_writer_token = None;
-                        handle_opt = Some(exc_handle);
-                        token_opt = Some(exc_token);
+                        writer_token_opt = Some(writer_token);
+                        value_opt = Some(value);
                     }
                 }
             );
 
-            if result == 0 {
-                let tracked handle = match handle_opt {
+            if rc_value == 0 {
+                let tracked writer_token = match writer_token_opt {
                     Some(t) => t,
                     None => proof_from_false(),
                 };
-                let tracked token = match token_opt {
+                let tracked value = match value_opt {
                     Some(t) => t,
                     None => proof_from_false(),
                 };
-                assert(self.inv(token));
+                assert(self.inv(value));
 
                 let _ =
                     atomic_with_ghost!(
                     &self.real_rc => no_op();
                     ghost g => {
-                        // Invariants show `real_rc` is 0
-                        self.inst.borrow().write_locked_implies_real_rc_is_zero(&g, &handle);
+                        self.inst.borrow().write_locked_implies_real_rc_is_zero(&g, &writer_token);
                         assert(g.value() == 0);
                     }
                 );
 
-                let write_handle = RwWriteGuard {
-                    handle: Tracked(handle),
-                    token: Tracked(token),
+                let write_guard = RwWriteGuard {
+                    handle: Tracked(writer_token),
+                    token: Tracked(value),
                 };
-                write_handle_opt = Some(write_handle);
+                write_guard_opt = Some(write_guard);
                 break ;
             }
         }
 
-        assert(write_handle_opt is Some);
-        let write_handle = write_handle_opt.unwrap();
-        write_handle
+        assert(write_guard_opt is Some);
+        let guard = write_guard_opt.unwrap();
+        guard
     }
 
+    /// Acquire the read lock, spinning until the reader has joined both counters.
     #[verifier::exec_allows_no_decreases_clause]
-    pub fn lock_read(&self) -> (res: RwReadGuard<K, V, Pred>)
+    pub fn lock_read(&self) -> (guard: RwReadGuard<K, V, Pred>)
         requires
             self.wf(),
         ensures
-            res.wf(self),
+            guard.wf(self),
     {
-        let mut read_handle_opt: Option<RwReadGuard<K, V, Pred>> = None;
+        let mut read_guard_opt: Option<RwReadGuard<K, V, Pred>> = None;
         loop
             invariant_except_break
-                read_handle_opt is None,
+                read_guard_opt is None,
                 self.wf(),
             ensures
-                read_handle_opt is Some,
-                read_handle_opt->Some_0.wf(self),
+                read_guard_opt is Some,
+                read_guard_opt->Some_0.wf(self),
         {
             let rc_val = atomic_with_ghost!(
                 &self.rc => load();
-                returning res;
+                returning loaded_rc;
                 ghost g => { }
             );
             if rc_val >= u64::MAX {
-                // Too many readers, wait for the next iteration to see if the count goes down.
                 continue;
             }
 
             let tracked mut pending_reader_token: Option<RwPendingReaderToken<K, V, Pred>> = None;
-            let result =
+            let rc_cas_result =
                 atomic_with_ghost!(
                 &self.rc => compare_exchange(rc_val, rc_val + 1);
-                returning res;
+                returning cas_res;
                 ghost g => {
-                    if res is Ok {
+                    if cas_res is Ok {
                         pending_reader_token = Option::Some(
                             self.inst.borrow().acquire_read_start(&mut g)
                         );
                     }
                 }
             );
-            if result.is_err() {
-                // Failed to increment `rc`, likely due to a concurrent writer. Retry.
+            if rc_cas_result.is_err() {
                 continue;
             }
 
             let tracked mut mock_reader_token_opt: Option<RwMockReaderToken<K, V, Pred>> = None;
-            let result =
+            let exc_value =
                 atomic_with_ghost!(
                 &self.exc => load();
-                returning res;
+                returning loaded_exc;
                 ghost g => {
-                    if res == false {
-                        // `exc` is false, so we can finish acquiring the read lock.
+                    if loaded_exc == false {
                         let tracked pr_token = match pending_reader_token {
                             Some(t) => t,
                             None => proof_from_false(),
                         };
-                        // Consume pending_reader token and produce mock_reader token.
-                        let tracked mock_handle = self.inst.borrow().acquire_read_end(&mut g, pr_token);
+                        let tracked mock_reader_token = self.inst.borrow().acquire_read_end(
+                            &mut g,
+                            pr_token,
+                        );
                         pending_reader_token = None;
-                        mock_reader_token_opt = Some(mock_handle);
+                        mock_reader_token_opt = Some(mock_reader_token);
                     }
                 }
             );
 
-            if result == false {
-                // Update `real_rc` by exchanging the mock reader token for a real reader token.
-                let tracked mut handle_opt: Option<RwReaderToken<K, V, Pred>> = None;
+            if exc_value == false {
+                let tracked mut reader_token_opt: Option<RwReaderToken<K, V, Pred>> = None;
 
                 loop
                     invariant_except_break
@@ -590,65 +558,66 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                         mock_reader_token_opt is Some,
                         mock_reader_token_opt->Some_0.instance_id() == self.inst@.id(),
                     ensures
-                        read_handle_opt is Some,
-                        read_handle_opt->Some_0.wf(self),
+                        read_guard_opt is Some,
+                        read_guard_opt->Some_0.wf(self),
                 {
                     let real_rc_val = atomic_with_ghost!(
                         &self.real_rc => load();
-                        returning res;
+                        returning loaded_real_rc;
                         ghost g => { }
                     );
                     if real_rc_val >= u64::MAX {
-                        // Too many readers, wait for the next iteration to see if the count goes down.
                         continue;
                     }
 
-                    let result = atomic_with_ghost!(
+                    let real_rc_cas_result = atomic_with_ghost!(
                         &self.real_rc => compare_exchange(real_rc_val, real_rc_val + 1);
-                        returning res;
+                        returning cas_res;
                         ghost g => {
-                            if res is Ok {
-                                // Consume mock_reader token and produce real reader token.
+                            if cas_res is Ok {
                                 let tracked mock_reader_token = mock_reader_token_opt.tracked_take();
-                                let tracked res = self.inst.borrow().inc_real_rc(&mut g, mock_reader_token);
-                                let tracked handle = res.1.get();
-                                handle_opt = Some(handle);
+                                let tracked inc_result = self.inst.borrow().inc_real_rc(
+                                    &mut g,
+                                    mock_reader_token,
+                                );
+                                let tracked reader_token = inc_result.1.get();
+                                reader_token_opt = Some(reader_token);
                             }
                         }
                     );
 
-                    match result {
+                    match real_rc_cas_result {
                         Ok(_) => {
-                            let tracked handle = match handle_opt {
+                            let tracked reader_token = match reader_token_opt {
                                 Some(t) => t,
                                 None => proof_from_false(),
                             };
                             proof {
-                                self.inst.borrow().reader_element_pred(handle.element(), &handle);
+                                self.inst.borrow().reader_element_pred(
+                                    reader_token.element(),
+                                    &reader_token,
+                                );
                             }
-                            let read_handle = RwReadGuard {
-                                handle: Tracked(handle),
+                            let read_guard = RwReadGuard {
+                                handle: Tracked(reader_token),
                             };
-                            read_handle_opt = Some(read_handle);
+                            read_guard_opt = Some(read_guard);
                             break;
                         },
                         Err(_) => {}
                     }
                 }
 
-                // Here we get the read handle, so we can break out of the loop and return it.
                 break;
             } else {
-                // Failed to acquire the read lock
                 let tracked pr_token = match pending_reader_token {
                     Some(t) => t,
                     None => proof_from_false(),
                 };
 
-                // Abandon the attempt by removing the pending reader and decrementing `rc`
                 let _ = atomic_with_ghost!(
                     &self.rc => fetch_sub(1);
-                    returning res;
+                    returning old_rc;
                     ghost g => {
                         self.inst.borrow().acquire_read_abandon(&mut g, pr_token);
                     }
@@ -656,65 +625,66 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
             }
         }
 
-        read_handle_opt.unwrap()
+        read_guard_opt.unwrap()
     }
 
-    /// Release the write lock.  The caller must prove `self.inv(guard.view())`
-    /// (i.e. `Pred::inv(self.k@, value)`) so the state machine's `storage_inv`
-    /// invariant is maintained — exactly as `Mutex::unlock` does.
-    pub fn unlock_write(&self, guard: RwWriteGuard<K, V, Pred>) -> (res: ())
+    /// Release the write lock by consuming the guard and storing its value back.
+    pub fn unlock_write(&self, guard: RwWriteGuard<K, V, Pred>)
         requires
             self.wf(),
             guard.wf(self),
             self.inv(guard.view()),
     {
-        let tracked handle = guard.handle.get();
-        let tracked v = guard.token.get();
+        let tracked writer_token = guard.handle.get();
+        let tracked value = guard.token.get();
         atomic_with_ghost!(
             &self.exc => store(false);
             ghost g => {
-                self.inst.borrow().release_exc(v, &mut g, v, handle);
+                self.inst.borrow().release_exc(value, &mut g, value, writer_token);
             }
         );
     }
 
-    pub fn unlock_read(&self, guard: RwReadGuard<K, V, Pred>) -> (res: ())
+    /// Release the read lock by decrementing `real_rc` and then `rc`.
+    pub fn unlock_read(&self, guard: RwReadGuard<K, V, Pred>)
         requires
             self.wf(),
             guard.wf(self),
     {
-        let tracked handle = guard.handle.get();
-        let tracked mut mock_handle_opt: Option<RwMockReaderToken<K, V, Pred>> = Option::None;
+        let tracked reader_token = guard.handle.get();
+        let tracked mut mock_reader_token_opt: Option<RwMockReaderToken<K, V, Pred>> = Option::None;
 
-        // First update `real_rc` by exchanging the real reader token for a mock reader token.
-        let mock_handle = atomic_with_ghost!(
+        let _ = atomic_with_ghost!(
             &self.real_rc => fetch_sub(1);
-            returning res;
+            returning old_real_rc;
             ghost g => {
-                let tracked mock_handle = self.inst.borrow().dec_real_rc(handle.element(), &mut g, handle);
-                mock_handle_opt = Some(mock_handle);
+                let tracked mock_reader_token = self.inst.borrow().dec_real_rc(
+                    reader_token.element(),
+                    &mut g,
+                    reader_token,
+                );
+                mock_reader_token_opt = Some(mock_reader_token);
             }
         );
 
-        // Then release the read lock by removing the mock reader token and decrementing `rc`.
         atomic_with_ghost!(
             &self.rc => fetch_sub(1);
-            returning res;
+            returning old_rc;
             ghost g => {
-                let tracked mock_handle = match mock_handle_opt {
+                let tracked mock_reader_token = match mock_reader_token_opt {
                     Some(t) => t,
                     None => proof_from_false(),
                 };
-                self.inst.borrow().release_shared(&mut g, mock_handle);
+                self.inst.borrow().release_shared(&mut g, mock_reader_token);
             }
         );
     }
 }
 
-/// Write-lock guard carrying both the writer token and the withdrawn value.
+/// Exclusive guard returned by `RwLock::lock_write`.
 ///
-/// `view()` exposes the stored `V`; the caller must prove `rwlock.inv(guard.view())`
-/// before calling `unlock_write` (exactly mirroring `MutexGuard` + `Mutex::unlock`).
+/// `handle` is the ghost writer token. `token` is the protected value withdrawn
+/// from the state machine while the write lock is held.
 pub struct RwWriteGuard<K, V, Pred: InvariantPredicate<K, V>> {
     pub handle: Tracked<RwWriterToken<K, V, Pred>>,
     pub token: Tracked<V>,
@@ -731,7 +701,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwWriteGuard<K, V, Pred> {
     }
 }
 
-/// Read-lock guard carrying the reader token (a multiset element of type `V`).
+/// Shared guard returned by `RwLock::lock_read`.
 pub struct RwReadGuard<K, V, Pred: InvariantPredicate<K, V>> {
     pub handle: Tracked<RwReaderToken<K, V, Pred>>,
 }
