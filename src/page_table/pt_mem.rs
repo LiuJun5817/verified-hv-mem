@@ -17,7 +17,7 @@ use crate::{
         table::*,
     },
 };
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 use vstd::{prelude::*, simple_pptr::PPtr};
 
 verus! {
