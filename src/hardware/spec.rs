@@ -44,7 +44,7 @@
 //! agrees* (tolerating orphaned stale entries).  Full coherence is re-established
 //! by `invalidate` and holds at **sync points**; the per-page
 //! `MmuHardware::unmap_dsb_tlbi` (sync → sync) is what forces the `DSB`+`TLBI`.
-use crate::machine::types::*;
+use crate::model::types::*;
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::prelude::*;
 

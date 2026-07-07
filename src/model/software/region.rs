@@ -1,6 +1,6 @@
 use vstd::prelude::*;
 
-use crate::machine::types::*;
+use crate::model::types::*;
 
 verus! {
 

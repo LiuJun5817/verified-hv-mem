@@ -34,26 +34,26 @@ use crate::hardware::HardwareInstr;
 use crate::hv_mem::protocol::{BudgetProtocol, ZoneStateOps};
 use crate::hv_mem::spec::budget::BudgetSpec;
 use crate::hv_mem::zone::{ZoneKey, ZonePred, ZoneRwContent};
-use crate::machine::convert::{flatten_s2map, frame_to_s2, pt_s2map_inner, vaddr_of_gpa};
+use crate::model::convert::{flatten_s2map, frame_to_s2, pt_s2map_inner, vaddr_of_gpa};
 use crate::memory_set::MemorySet;
 use crate::page_table::PageTable;
-use crate::machine::hardware::proof::{
+use crate::model::hardware::proof::{
     lemma_context_switch_preserves_wf, lemma_iommu_map_preserves_wf,
     lemma_iommu_unmap_invalidate_preserves_wf, lemma_map_preserves_wf,
     lemma_unmap_invalidate_preserves_wf,
 };
-use crate::machine::hardware::HardwareView;
-use crate::machine::machine::MachineState;
-use crate::machine::software::proof::{
+use crate::model::hardware::HardwareView;
+use crate::model::machine::MachineState;
+use crate::model::software::proof::{
     lemma_add_vm_step_preserves_wf, lemma_assign_page_step_preserves_wf,
     lemma_iommu_map_step_preserves_iommu_wf, lemma_iommu_unmap_step_preserves_iommu_wf,
     lemma_map_step_preserves_wf, lemma_reclaim_page_step_preserves_wf,
     lemma_remove_vm_step_preserves_wf, lemma_share_page_step_preserves_wf,
     lemma_unmap_step_preserves_wf, lemma_unshare_page_step_preserves_wf,
 };
-use crate::machine::software::Region;
-use crate::machine::software::SoftwareView;
-use crate::machine::types::*;
+use crate::model::software::Region;
+use crate::model::software::SoftwareView;
+use crate::model::types::*;
 
 verus! {
 

@@ -1,7 +1,7 @@
 //! Geometry and conversion between **implementation types** (the byte-level
 //! page-table view: [`SpecVAddr`], [`SpecFrame`] from [`crate::address`]) and
 //! **model types** (the abstract stage-2 view: [`GuestPage`], [`S2Entry`],
-//! [`PhysPage`], [`VmPageKey`] from [`crate::machine::types`]).
+//! [`PhysPage`], [`VmPageKey`] from [`crate::model::types`]).
 //!
 //! This is the single place those two worlds meet.  Everything here is a pure
 //! function (plus the arithmetic lemmas characterizing it); no state, no
@@ -9,7 +9,7 @@
 use crate::address::addr::{SpecPAddr, SpecVAddr};
 use crate::address::frame::{MemAttr, SpecFrame};
 use crate::address::region::SPEC_PAGE_SIZE;
-use crate::machine::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
+use crate::model::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 use vstd::prelude::*;
 
 verus! {

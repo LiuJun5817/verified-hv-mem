@@ -8,7 +8,7 @@ pub mod hv_mem;
 pub mod memory_set;
 pub mod page_table;
 pub mod sync;
-pub mod machine;
+pub mod model;
 pub mod refinement;
 pub mod hardware;
 

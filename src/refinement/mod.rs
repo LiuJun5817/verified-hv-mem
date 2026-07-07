@@ -1,6 +1,6 @@
 //! The **refinement layer**: connects each tokenized state machine to its abstract
 //! model, and the two models to the combined machine state.  The models live in
-//! [`crate::machine`]; the state machines and their exec impls in [`crate::hardware`]
+//! [`crate::model`]; the state machines and their exec impls in [`crate::hardware`]
 //! (`MmuSpec`/`MmuHardware`) and [`crate::hv_mem`] (`BudgetSpec`/`HvMem`).
 //!
 //! ```text

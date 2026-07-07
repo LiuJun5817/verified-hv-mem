@@ -1,10 +1,10 @@
 //! A memory set is a collection of memory areas that can be mapped into the virtual address
 //! space of a zone (process). It manages the page table for the zone, and provides methods to
 //! insert, remove, and find memory areas.
-use crate::machine::convert::pt_s2map_inner;
+use crate::model::convert::pt_s2map_inner;
 use crate::hardware::{HardwareInstr, MmuHardware};
 use crate::hardware::spec::MmuS2MapToken;
-use crate::machine::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
+use crate::model::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 use crate::{
     address::{
         addr::{SpecPAddr, SpecVAddr, VAddr},

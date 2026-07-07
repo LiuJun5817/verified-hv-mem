@@ -5,7 +5,7 @@
 //! (SMMU), combined under [`mmu::HardwareInstr`].  The symmetric counterpart of
 //! [`crate::hv_mem`] (which holds `BudgetSpec` + `HvMem`).  The abstract
 //! `HardwareView` model and the `MmuSpec`→`HardwareView` refinement live elsewhere
-//! ([`crate::machine::hardware`], [`crate::refinement`]).
+//! ([`crate::model::hardware`], [`crate::refinement`]).
 pub mod aarch64;
 pub mod mmu;
 pub mod spec;

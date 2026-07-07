@@ -1,8 +1,8 @@
 use vstd::prelude::*;
 
-use crate::machine::hardware::HardwareView;
-use crate::machine::software::SoftwareView;
-use crate::machine::types::*;
+use crate::model::hardware::HardwareView;
+use crate::model::software::SoftwareView;
+use crate::model::types::*;
 
 verus! {
 
@@ -12,7 +12,7 @@ verus! {
 /// canonical state on which machine-level steps and security lemmas are expressed.
 /// The VM population is a single dynamic set (`all_vms`); the subject-vs-environment
 /// split used only to *state* isolation lives in
-/// [`crate::machine::machine::security`], not here.
+/// [`crate::model::machine::security`], not here.
 pub ghost struct MachineState {
     pub all_vms: Set<VmId>,
     pub hypervisor_owned: Set<PhysPage>,

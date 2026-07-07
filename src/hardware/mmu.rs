@@ -48,7 +48,7 @@
 //! [`synced`](MmuHardware::synced) sync point — is unprovable unless its real
 //! `DSB`+`TLBI` actually run, since only they advance the encapsulated tokens.
 use crate::hardware::spec::{MmuInstance, MmuS2MapToken, MmuTlbToken, MmuVmIdsToken};
-use crate::machine::types::*;
+use crate::model::types::*;
 use core::marker::PhantomData;
 use vstd::prelude::*;
 use vstd::tokens::InstanceId;

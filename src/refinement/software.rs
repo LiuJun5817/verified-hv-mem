@@ -39,12 +39,12 @@ use crate::hv_mem::spec::budget::{
     zone_regions_pairwise_disjoint, BudgetSpec,
 };
 use crate::hv_mem::spec::{all_regions, all_regions_disjoint, all_regions_valid, GhostZone};
-use crate::machine::convert::{
+use crate::model::convert::{
     attr_to_perms, frame_phys_page, frame_to_s2, gpa_of_vaddr, lemma_vaddr_of_gpa_injective,
     phys_page_of_paddr, vaddr_of_gpa,
 };
-use crate::machine::software::{Region, SoftwareView};
-use crate::machine::types::*;
+use crate::model::software::{Region, SoftwareView};
+use crate::model::types::*;
 use crate::memory_set::SpecMemorySet;
 use vstd::prelude::*;
 
@@ -56,7 +56,7 @@ verus! {
 // The *concrete* per-region geometry: what physical page / guest page / stage-2
 // entry each page of a `MemoryRegion` maps to.  Built on the canonical region
 // geometry (`MemoryRegion::spec_page_vaddr` / `spec_frame`) and the page-number
-// primitives from [`crate::machine::convert`].
+// primitives from [`crate::model::convert`].
 // ---------------------------------------------------------------------------
 /// Machine physical page backing page `i` of region `r`.
 pub open spec fn region_phys_page(r: MemoryRegion, i: nat) -> PhysPage {

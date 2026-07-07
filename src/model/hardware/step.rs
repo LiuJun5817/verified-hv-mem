@@ -1,7 +1,7 @@
 use vstd::prelude::*;
 
 use super::HardwareView;
-use crate::machine::types::*;
+use crate::model::types::*;
 
 verus! {
 
@@ -149,7 +149,7 @@ impl HardwareView {
     /// Data Synchronization Barrier — no observable state change.
     ///
     /// The ordering guarantee is captured by the barrier consistency predicate
-    /// in `machine::machine`; at the state-machine level DSB is a no-op.
+    /// in `model::machine`; at the state-machine level DSB is a no-op.
     pub open spec fn dsb_step(s1: HardwareView, s2: HardwareView) -> bool {
         s2 == s1
     }

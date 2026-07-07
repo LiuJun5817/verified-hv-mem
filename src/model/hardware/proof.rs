@@ -8,7 +8,7 @@
 use vstd::prelude::*;
 
 use super::HardwareView;
-use crate::machine::types::*;
+use crate::model::types::*;
 
 verus! {
 

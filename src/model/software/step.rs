@@ -1,7 +1,7 @@
 use vstd::prelude::*;
 
 use super::{Region, SoftwareView};
-use crate::machine::types::*;
+use crate::model::types::*;
 
 verus! {
 

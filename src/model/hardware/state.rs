@@ -1,6 +1,6 @@
 use vstd::prelude::*;
 
-use crate::machine::types::*;
+use crate::model::types::*;
 
 verus! {
 
@@ -11,17 +11,17 @@ verus! {
 /// caches translations and may lag a mapping edit, the data memory reachable
 /// through translation, and the per-CPU VM schedule.  Everything *authoritative*
 /// (ownership, the intended mapping `SoftwareView::s2_map`, the memory partition) is
-/// policy and lives in [`crate::machine::software::SoftwareView`].
+/// policy and lives in [`crate::model::software::SoftwareView`].
 ///
 /// # Two stage-2 maps: hardware-reachable here, software-maintained in `SoftwareView`
 ///
 /// `HardwareView::s2map` is what a page-table walk currently **reaches** (the walker
-/// view); [`SoftwareView::s2_map`](crate::machine::software::SoftwareView) is what the page
+/// view); [`SoftwareView::s2_map`](crate::model::software::SoftwareView) is what the page
 /// table **bytes say** (the software-maintained view).  They are the same kind of
 /// distinction as `MmuSpec` vs `BudgetSpec`: between a `pt.unmap` (which drops the
 /// page from the byte view immediately) and the following `DSB` (which drops it
 /// from the walker view), the two diverge — that is the break-before-make window.
-/// Their agreement, [`MachineState::sync`](crate::machine::machine::MachineState),
+/// Their agreement, [`MachineState::sync`](crate::model::machine::MachineState),
 /// is a machine-level well-formedness clause, *not* a hardware invariant.
 ///
 /// # `tlb_safe` is a hardware invariant
