@@ -1,7 +1,7 @@
 //! Ghost state machine specifications for the hypervisor memory manager.
 //!
-//! - [`weak_spec`]: assumption-1 (`ClosureSpec`, global `all_regions`) state machine and tokens.
-//! - [`strong_spec`]: assumption-2 (`BudgetSpec`, per-zone static budget) state machine and tokens.
+//! - [`closure`]: assumption-1 (`ClosureSpec`, global `all_regions`) state machine and tokens.
+//! - [`budget`]: assumption-2 (`BudgetSpec`, per-zone static budget) state machine and tokens.
 pub mod budget;
 pub mod closure;
 
@@ -10,8 +10,9 @@ use vstd::prelude::*;
 
 pub use budget::{BudgetSpec, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken};
 pub use closure::{
-    all_regions, all_regions_disjoint, all_regions_valid, ClosureRegionToken, ClosureSpec,
-    ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken,
+    all_regions, all_regions_disjoint, all_regions_valid, cpu_insert_region_allowed, gic_region,
+    gic_region_in_all_regions, iommu_insert_region_allowed, ClosureSpec, ClosureSpecInstance,
+    ClosureZoneIdsToken, ClosureZoneToken, ClosureZonesViewToken,
 };
 
 verus! {
@@ -82,19 +83,6 @@ impl GhostZone {
             cpu_mem_set: self.cpu_mem_set,
             iommu_mem_set: self.iommu_mem_set.remove_region_exact(region),
         }
-    }
-
-    /// Compatibility wrapper used by the ClosureSpec path (CPU side).
-    pub open spec fn insert_region(&self, region: MemoryRegion) -> Self {
-        self.cpu_insert_region(region)
-    }
-
-    /// Compatibility wrapper used by the ClosureSpec path (CPU side).
-    pub open spec fn remove_region(&self, region: MemoryRegion) -> Self
-        recommends
-            self.cpu_mem_set.regions.contains(region),
-    {
-        self.cpu_remove_region(region)
     }
 }
 

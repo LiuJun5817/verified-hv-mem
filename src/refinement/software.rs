@@ -35,10 +35,10 @@ use crate::address::addr::SpecVAddr;
 use crate::address::frame::SpecFrame;
 use crate::address::region::{MemoryRegion, SPEC_PAGE_SIZE};
 use crate::hv_mem::spec::budget::{
-    gic_region, gic_region_disjoint_from_zones, zone_regions, zone_regions_in_all_regions,
-    zone_regions_pairwise_disjoint, BudgetSpec,
+    configured_regions_valid, gic_region, gic_region_disjoint_from_zones, zone_regions,
+    zone_regions_internal_disjoint, zone_regions_pairwise_disjoint, BudgetSpec,
 };
-use crate::hv_mem::spec::{all_regions, all_regions_disjoint, all_regions_valid, GhostZone};
+use crate::hv_mem::spec::GhostZone;
 use crate::model::convert::{
     attr_to_perms, frame_phys_page, frame_to_s2, gpa_of_vaddr, lemma_vaddr_of_gpa_injective,
     phys_page_of_paddr, vaddr_of_gpa,
@@ -701,9 +701,6 @@ pub proof fn lemma_state_owned_pages_disjoint(s: BudgetSpec::State)
             zone_regions_pairwise_disjoint();
             assert(!zone_regions(zid2).contains(r1));
             assert(r1 != r2);
-            zone_regions_in_all_regions();
-            assert(all_regions().contains(r1) && all_regions().contains(r2));
-            all_regions_disjoint();
             assert(!r1.spec_overlaps_pmem(r2));
 
             lemma_same_phys_page_implies_pmem_overlap(r1, i1, r2, i2);
@@ -995,8 +992,7 @@ pub proof fn lemma_reachable_iommu_separation(s: SoftwareSpec)
                 gz.cpu_mem_set.regions.contains(rr) && region_owns_page(rr, page);
             assert(gz.cpu_mem_set.regions.contains(r));
             assert(zone_regions(vm.0).contains(r));  // inv_cpu_in_zone_regions
-            zone_regions_in_all_regions();
-            all_regions_valid();
+            configured_regions_valid();
             assert(r.spec_valid());
             if is_gic_page(page) {
                 let i = choose|i: nat| 0 <= i < r.pages && region_phys_page(r, i) == page;
@@ -1140,11 +1136,11 @@ pub proof fn lemma_insert_region_owned_pages(gz: GhostZone, region: MemoryRegion
         region.spec_valid(),
         !gz.cpu_mem_set.overlaps_vmem(region),
     ensures
-        zone_owned_pages(gz.insert_region(region)) =~= zone_owned_pages(gz).union(
+        zone_owned_pages(gz.cpu_insert_region(region)) =~= zone_owned_pages(gz).union(
             region_pages(region),
         ),
 {
-    let new_gz = gz.insert_region(region);
+    let new_gz = gz.cpu_insert_region(region);
     let om = gz.cpu_mem_set.mappings;
     let rm = region.spec_mappings();
     assert(new_gz.cpu_mem_set.mappings == om.union_prefer_right(rm));
@@ -1222,11 +1218,11 @@ pub proof fn lemma_insert_region_all_owned(zones: Map<nat, GhostZone>, zid: nat,
         r.spec_valid(),
         !zones[zid].cpu_mem_set.overlaps_vmem(r),
     ensures
-        all_owned_pages(zones.insert(zid, zones[zid].insert_region(r))) =~= all_owned_pages(
+        all_owned_pages(zones.insert(zid, zones[zid].cpu_insert_region(r))) =~= all_owned_pages(
             zones,
         ).union(region_pages(r)),
 {
-    let zones2 = zones.insert(zid, zones[zid].insert_region(r));
+    let zones2 = zones.insert(zid, zones[zid].cpu_insert_region(r));
     lemma_insert_region_owned_pages(zones[zid], r);
 
     assert forall|p: PhysPage|
@@ -1273,11 +1269,11 @@ pub proof fn lemma_insert_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRe
         r.spec_valid(),
         !gz.cpu_mem_set.overlaps_vmem(r),
     ensures
-        zone_s2_entries(zid, gz.insert_region(r)) =~= zone_s2_entries(zid, gz).union_prefer_right(
+        zone_s2_entries(zid, gz.cpu_insert_region(r)) =~= zone_s2_entries(zid, gz).union_prefer_right(
             region_s2_entries(zid, r),
         ),
 {
-    let new_gz = gz.insert_region(r);
+    let new_gz = gz.cpu_insert_region(r);
     let om = gz.cpu_mem_set.mappings;
     let rm = r.spec_mappings();
     let nm = new_gz.cpu_mem_set.mappings;
@@ -1320,7 +1316,7 @@ pub proof fn lemma_insert_region_state_s2_map(
         r.spec_valid(),
         !pre.zones[zid].cpu_mem_set.overlaps_vmem(r),
         post.zone_ids == pre.zone_ids,
-        post.zones == pre.zones.insert(zid, pre.zones[zid].insert_region(r)),
+        post.zones == pre.zones.insert(zid, pre.zones[zid].cpu_insert_region(r)),
     ensures
         state_s2_map(post) =~= state_s2_map(pre).union_prefer_right(region_s2_entries(zid, r)),
 {
@@ -1360,9 +1356,9 @@ pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
         gz.cpu_mem_set.regions.contains(r),
         region_pmem_exclusive(gz, r),
     ensures
-        zone_owned_pages(gz.remove_region(r)) =~= zone_owned_pages(gz).difference(region_pages(r)),
+        zone_owned_pages(gz.cpu_remove_region(r)) =~= zone_owned_pages(gz).difference(region_pages(r)),
 {
-    let new_gz = gz.remove_region(r);
+    let new_gz = gz.cpu_remove_region(r);
     let om = gz.cpu_mem_set.mappings;
     let rm = r.spec_mappings();
     let nm = new_gz.cpu_mem_set.mappings;
@@ -1430,12 +1426,12 @@ pub proof fn lemma_remove_region_all_owned(pre: BudgetSpec::State, zid: nat, r: 
         pre.zones[zid].cpu_mem_set.regions.contains(r),
         region_pmem_exclusive(pre.zones[zid], r),
     ensures
-        all_owned_pages(pre.zones.insert(zid, pre.zones[zid].remove_region(r))) =~= all_owned_pages(
+        all_owned_pages(pre.zones.insert(zid, pre.zones[zid].cpu_remove_region(r))) =~= all_owned_pages(
             pre.zones,
         ).difference(region_pages(r)),
 {
     let zones = pre.zones;
-    let zones2 = zones.insert(zid, zones[zid].remove_region(r));
+    let zones2 = zones.insert(zid, zones[zid].cpu_remove_region(r));
     assert(zones[zid].wf());  // inv_zones_wf
     lemma_remove_region_owned_pages(zones[zid], r);
     lemma_state_owned_pages_disjoint(pre);
@@ -1495,11 +1491,11 @@ pub proof fn lemma_remove_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRe
         gz.wf(),
         gz.cpu_mem_set.regions.contains(r),
     ensures
-        zone_s2_entries(zid, gz.remove_region(r)) =~= zone_s2_entries(zid, gz).remove_keys(
+        zone_s2_entries(zid, gz.cpu_remove_region(r)) =~= zone_s2_entries(zid, gz).remove_keys(
             region_s2_entries(zid, r).dom(),
         ),
 {
-    let new_gz = gz.remove_region(r);
+    let new_gz = gz.cpu_remove_region(r);
     let om = gz.cpu_mem_set.mappings;
     let rm = r.spec_mappings();
     let nm = new_gz.cpu_mem_set.mappings;
@@ -1534,7 +1530,7 @@ pub proof fn lemma_remove_region_state_s2_map(
         pre.zones.contains_key(zid),
         pre.zones[zid].cpu_mem_set.regions.contains(r),
         post.zone_ids == pre.zone_ids,
-        post.zones == pre.zones.insert(zid, pre.zones[zid].remove_region(r)),
+        post.zones == pre.zones.insert(zid, pre.zones[zid].cpu_remove_region(r)),
     ensures
         state_s2_map(post) =~= state_s2_map(pre).remove_keys(region_s2_entries(zid, r).dom()),
 {
@@ -2133,9 +2129,8 @@ impl SoftwareRefinement for SoftwareSpec {
         axiom_assignable_from_budget(self, region);
         let r = choose|r: MemoryRegion| #[trigger]
             zone_regions(zid).contains(r) && region_to_abstract(zid, r) == region;
-        zone_regions_in_all_regions();
-        all_regions_valid();
-        assert(all_regions().contains(r) && r.spec_valid());
+        configured_regions_valid();
+        assert(r.spec_valid());
 
         // (2) Projection equalities: the abstract region projects to `r`'s pages/entries.
         lemma_region_to_abstract_pages(zid, r);
@@ -2178,7 +2173,7 @@ impl SoftwareRefinement for SoftwareSpec {
 
         let post = SoftwareSpec { budget: BudgetSpec::take_step::cpu_insert_region(self.budget, zid, r) };
         assert(post.budget.zone_ids == self.budget.zone_ids);
-        assert(post.budget.zones == self.budget.zones.insert(zid, self.budget.zones[zid].insert_region(r)));
+        assert(post.budget.zones == self.budget.zones.insert(zid, self.budget.zones[zid].cpu_insert_region(r)));
 
         // (5) Projection deltas ⇒ the SoftwareView step.
         lemma_insert_region_owned_pages(self.budget.zones[zid], r);
@@ -2208,10 +2203,9 @@ impl SoftwareRefinement for SoftwareSpec {
         axiom_assignable_from_budget(self, region);
         let r = choose|r: MemoryRegion| #[trigger]
             zone_regions(zid).contains(r) && region_to_abstract(zid, r) == region;
-        zone_regions_in_all_regions();
-        all_regions_valid();
-        all_regions_disjoint();
-        assert(all_regions().contains(r) && r.spec_valid());
+        configured_regions_valid();
+        zone_regions_internal_disjoint();
+        assert(r.spec_valid());
 
         // (2) Projection equalities.
         lemma_region_to_abstract_pages(zid, r);
@@ -2233,12 +2227,12 @@ impl SoftwareRefinement for SoftwareSpec {
             gz.cpu_mem_set.regions.contains(rr) && region_owns_page(rr, p0);
         assert(gz.cpu_mem_set.regions.contains(r2));
         assert(zone_regions(zid).contains(r2));  // inv: zone regions ⊆ budget
-        assert(all_regions().contains(r2) && r2.spec_valid());
+        assert(r2.spec_valid());
         if r2 != r {
             let i2 = choose|i: nat| 0 <= i < r2.pages && region_phys_page(r2, i) == p0;
             let ir = choose|i: nat| 0 <= i < r.pages && region_phys_page(r, i) == p0;
             lemma_same_phys_page_implies_pmem_overlap(r2, i2, r, ir);
-            assert(!r2.spec_overlaps_pmem(r));  // all_regions_disjoint
+            assert(!r2.spec_overlaps_pmem(r));  // zone_regions_internal_disjoint
             assert(false);
         }
         assert(gz.cpu_mem_set.regions.contains(r));
@@ -2251,14 +2245,14 @@ impl SoftwareRefinement for SoftwareSpec {
             ) by {
                 assert(gz.cpu_mem_set.regions.contains(rr));  // fires the budget inv
                 assert(zone_regions(zid).contains(rr));  // inv
-                assert(all_regions().contains(rr));
+                zone_regions_internal_disjoint();
             }
         }
 
         // (4) Fire the `remove_region` macro transition; `post.invariant()` from the macro.
         let post = SoftwareSpec { budget: BudgetSpec::take_step::cpu_remove_region(self.budget, zid, r) };
         assert(post.budget.zone_ids == self.budget.zone_ids);
-        assert(post.budget.zones == self.budget.zones.insert(zid, self.budget.zones[zid].remove_region(r)));
+        assert(post.budget.zones == self.budget.zones.insert(zid, self.budget.zones[zid].cpu_remove_region(r)));
 
         // (5) Projection deltas ⇒ the SoftwareView step.
         lemma_region_pages_in_all_budget(zid, r);  // r's pages are budget pages (pool algebra)
@@ -2289,9 +2283,8 @@ impl SoftwareRefinement for SoftwareSpec {
         axiom_assignable_from_budget(self, region);
         let r = choose|r: MemoryRegion| #[trigger]
             zone_regions(zid).contains(r) && region_to_abstract(zid, r) == region;
-        zone_regions_in_all_regions();
-        all_regions_valid();
-        assert(all_regions().contains(r) && r.spec_valid());
+        configured_regions_valid();
+        assert(r.spec_valid());
 
         // (2) Projection equalities.
         lemma_region_to_abstract_pages(zid, r);
@@ -2308,9 +2301,7 @@ impl SoftwareRefinement for SoftwareSpec {
                     0 <= ig < gic_region().pages && region_phys_page(gic_region(), ig) == p;
                 gic_region_disjoint_from_zones();
                 assert(!gic_region().spec_overlaps_pmem(r));
-                assert(gic_region().spec_valid()) by {
-                    crate::hv_mem::spec::budget::all_regions_valid();
-                }
+                assert(gic_region().spec_valid());
                 lemma_same_phys_page_implies_pmem_overlap(gic_region(), ig, r, i);
                 assert(false);
             }
@@ -2388,10 +2379,9 @@ impl SoftwareRefinement for SoftwareSpec {
         axiom_assignable_from_budget(self, region);
         let r = choose|r: MemoryRegion| #[trigger]
             zone_regions(zid).contains(r) && region_to_abstract(zid, r) == region;
-        zone_regions_in_all_regions();
-        all_regions_valid();
-        all_regions_disjoint();
-        assert(all_regions().contains(r) && r.spec_valid());
+        configured_regions_valid();
+        zone_regions_internal_disjoint();
+        assert(r.spec_valid());
 
         // (2) Projection equalities.
         lemma_region_to_abstract_pages(zid, r);
@@ -2415,18 +2405,18 @@ impl SoftwareRefinement for SoftwareSpec {
         assert(gz.iommu_mem_set.regions.contains(r2));
         assert(zone_regions(zid).contains(r2) || r2 == gic_region());  // inv_iommu_in_zone_regions
         assert(zone_regions(zid).contains(r2));
-        assert(all_regions().contains(r2) && r2.spec_valid());
+        assert(r2.spec_valid());
         if r2 != r {
             let i2 = choose|i: nat| 0 <= i < r2.pages && region_phys_page(r2, i) == p0;
             let ir = choose|i: nat| 0 <= i < r.pages && region_phys_page(r, i) == p0;
             lemma_same_phys_page_implies_pmem_overlap(r2, i2, r, ir);
-            assert(!r2.spec_overlaps_pmem(r));  // all_regions_disjoint
+            assert(!r2.spec_overlaps_pmem(r));  // zone_regions_internal_disjoint
             assert(false);
         }
         assert(gz.iommu_mem_set.regions.contains(r));
 
         // IOMMU pmem-exclusivity: any *other* IOMMU region is disjoint from `r` — a private
-        // one by `all_regions_disjoint`, the GIC by `gic_region_disjoint_from_zones`.
+        // one by same-zone budget disjointness, the GIC by `gic_region_disjoint_from_zones`.
         assert(region_iommu_pmem_exclusive(gz, r)) by {
             assert forall|rr: MemoryRegion| #[trigger]
                 gz.iommu_mem_set.regions.contains(rr) && rr != r implies !rr.spec_overlaps_pmem(
@@ -2440,7 +2430,7 @@ impl SoftwareRefinement for SoftwareSpec {
                     assert(!gic_region().spec_overlaps_pmem(r));
                 } else {
                     assert(zone_regions(zid).contains(rr));
-                    assert(all_regions().contains(rr));
+                    zone_regions_internal_disjoint();
                 }
             }
         }

@@ -11,8 +11,8 @@
 //! - `spec`: ghost state machines (`ClosureSpec` / `BudgetSpec`) and token type aliases.
 //! - `zone`: single-zone memory abstraction (`ZoneState`, `ZoneKey`, `ZoneRwContent`, `ZonePred`, `Zone`).
 //! - `protocol`: region-assignment protocol layer.
-//!   - `protocol::weak`:   assumption-1 ghost state (`ClosureGlobalState`) + `ClosureProtocol`.
-//!   - `protocol::strong`: assumption-2 ghost state (`BudgetGlobalState`) + `BudgetProtocol`.
+//!   - `protocol::closure`: assumption-1 ghost state (`ClosureGlobalState`) + `ClosureProtocol`.
+//!   - `protocol::budget`:  assumption-2 ghost state (`BudgetGlobalState`) + `BudgetProtocol`.
 //! - `config`: zone configuration types and conversion to `MemoryRegion`.
 //! - `mod` (this file): `ZoneWriteGuard`, `HvMem` — the global exec orchestration layer.
 mod config;
@@ -365,7 +365,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
             let zone_list = content.zone_list_perm@.mem_contents->Init_0;
-            // After push+put: zone_list@ = old_zones.push(new_zone)
+            // After push+put: zone_list@ = old_zones.push(new_zone).
             let new_zones = zone_list@;
             let old_len = old_zones.len() as int;
             assert(new_zones =~= old_zones.push(new_zone));
@@ -542,7 +542,8 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
             let zone_list = content.zone_list_perm@.mem_contents->Init_0;
-            // After push+put: zone_list@ = old_zones.push(new_zone)
+            // After swap_remove+put: zone_list@ is old_zones with index `i`
+            // replaced by the previous last element.
             let new_zones = zone_list@;
             assert(forall|k: int|
                 0 <= k < new_zones.len() && k != i ==> new_zones[k] == old_zones[k]);
