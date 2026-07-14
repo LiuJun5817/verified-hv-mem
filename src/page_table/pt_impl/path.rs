@@ -739,6 +739,43 @@ impl PTTreePath {
         ).as_nat());
     }
 
+    /// Lemma. A virtual address represented by `path` lies within the range of
+    /// every valid prefix of that path.
+    pub proof fn lemma_vaddr_within_prefix_range(
+        arch: SpecPTArch,
+        vaddr: SpecVAddr,
+        path: Self,
+        pref: Self,
+    )
+        by (nonlinear_arith)
+        requires
+            arch.valid(),
+            path.valid(arch, 0),
+            pref.valid(arch, 0),
+            vaddr.0 < arch.vspace_size(),
+            path == Self::from_vaddr_root(vaddr, arch, (path.len() - 1) as nat),
+            path.has_prefix(pref),
+        ensures
+            vaddr.within(
+                pref.to_vaddr(arch),
+                arch.frame_size((pref.len() - 1) as nat).as_nat(),
+            ),
+    {
+        Self::lemma_vaddr_within_path_range(arch, vaddr, path);
+        Self::lemma_to_vaddr_lower_bound(arch, path, pref);
+        Self::lemma_to_vaddr_upper_bound(arch, path, pref);
+
+        let path_size = arch.frame_size((path.len() - 1) as nat).as_nat();
+        let pref_size = arch.frame_size((pref.len() - 1) as nat).as_nat();
+        if pref.len() < path.len() {
+            arch.lemma_frame_size_monotonic(
+                (pref.len() - 1) as nat,
+                (path.len() - 1) as nat,
+            );
+        }
+        assert(path_size <= pref_size);
+    }
+
     /// Lemma. The virtual address computed by `to_vaddr` is within the vspace size
     pub broadcast proof fn lemma_to_vaddr_within_vspace_size(arch: SpecPTArch, path: Self)
         by (nonlinear_arith)

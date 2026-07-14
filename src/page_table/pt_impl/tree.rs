@@ -2594,6 +2594,7 @@ impl PTTreeModel {
     pub proof fn lemma_query_ok_implies_mapping_exist(self, vaddr: SpecVAddr)
         requires
             self.wf(),
+            vaddr.0 < self.arch().vspace_size(),
             self.query(vaddr) is Ok,
         ensures
             self.has_mapping_for(vaddr),
@@ -2611,6 +2612,8 @@ impl PTTreeModel {
         // Path mapping for `vaddr`
         let real_path = self.root.real_path(path);
         self.root.lemma_visit_length_bounds(path);
+        self.root.lemma_real_path_valid(path);
+        self.root.lemma_real_path_is_prefix(path);
         self.root.lemma_real_path_visits_same_entry(path);
         assert(self.root.path_mappings().contains_pair(real_path, frame));
 
@@ -2619,8 +2622,10 @@ impl PTTreeModel {
         self.lemma_mappings_consistent_with_path_mappings();
         assert(self.mappings().contains_pair(vbase, frame));
 
-        // TODO: add lemma to `PTTreePath`
-        assume(vaddr.within(vbase, frame.size.as_nat()));
+        self.root.lemma_path_mappings_valid();
+        PTTreePath::lemma_vaddr_within_prefix_range(self.arch(), vaddr, path, real_path);
+        assert(frame.size == self.arch().frame_size((real_path.len() - 1) as nat));
+        assert(vaddr.within(vbase, frame.size.as_nat()));
 
         // Prove there is only one mapped region that contains `vaddr`
         assert forall|vbase2, frame2| #[trigger]
