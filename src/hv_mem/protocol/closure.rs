@@ -129,7 +129,7 @@ impl ClosureGlobalState {
         ClosureZoneState { zone_tok }
     }
 
-    /// Remove an entire zone from the system, consuming its `ZoneState` token.
+    /// Remove an entire zone from the system, consuming its `ClosureZoneState` token.
     ///
     /// Callers are responsible for draining page-table frames before invoking this.
     pub proof fn remove_zone(tracked &mut self, tracked zone_state: ClosureZoneState)

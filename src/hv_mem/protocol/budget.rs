@@ -17,10 +17,10 @@ verus! {
 
 /// Per-zone tracked ghost state for `BudgetSpec` (assumption 2).
 ///
-/// Parallel to `ZoneState` for `ClosureSpec`, but wraps a `BudgetZoneToken`
+/// Parallel to `ClosureZoneState`, but wraps a `BudgetZoneToken`
 /// (map-sharded `BudgetSpec::zones` entry) instead of a `ClosureZoneToken`.
-/// Stored in the zone-level lock alongside no budget token — configured regions
-/// are accessed as the pure spec function `zone_regions(zid)` instead.
+/// Stored in the zone-level lock without a separate configured-budget token;
+/// configured regions are accessed through the pure `zone_regions(zid)` function.
 pub tracked struct BudgetZoneState {
     pub zone_tok: BudgetZoneToken,
 }

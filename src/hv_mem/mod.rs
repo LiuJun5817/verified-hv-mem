@@ -9,13 +9,11 @@
 //! Module layout:
 //!
 //! - `spec`: ghost state machines (`ClosureSpec` / `BudgetSpec`) and token type aliases.
-//! - `zone`: single-zone memory abstraction (`ZoneState`, `ZoneKey`, `ZoneRwContent`, `ZonePred`, `Zone`).
+//! - `zone`: single-zone memory abstraction (`ZoneKey`, `ZoneRwContent`, `ZonePred`, `Zone`).
 //! - `protocol`: region-assignment protocol layer.
 //!   - `protocol::closure`: assumption-1 ghost state (`ClosureGlobalState`) + `ClosureProtocol`.
 //!   - `protocol::budget`:  assumption-2 ghost state (`BudgetGlobalState`) + `BudgetProtocol`.
-//! - `config`: zone configuration types and conversion to `MemoryRegion`.
-//! - `mod` (this file): `ZoneWriteGuard`, `HvMem` — the global exec orchestration layer.
-mod config;
+//! - `mod` (this file): `HvMem`, the global exec orchestration layer.
 pub mod protocol;
 pub mod spec;
 pub mod zone;
@@ -206,7 +204,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     ///
     /// `HvMemPred::inv` (checked on every write-lock release) additionally
     /// guarantees that the `PointsTo` inside the lock points to the same cell
-    /// and that `ClosureGlobalState` is well-formed.
+    /// and that the protocol-specific global state is well-formed.
     pub open spec fn invariants(&self) -> bool {
         &&& self.lock.wf()
         &&& self.zone_mem_list.id() == self.lock.k@.cell_id

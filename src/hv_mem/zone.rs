@@ -5,8 +5,8 @@
 //!   protecting `RwLock`.
 //!   Generic over `P: ZoneGhostProtocol` — use `Zone<PT, M, A, BudgetProtocol, I>`.
 //!
-//! The CPU memory set is kept in sync with the tokenized MMU (`s2map` slice token).
-//! The IOMMU memory set is a separate, MMU-free page-table-backed region set.
+//! The CPU and IOMMU memory sets are kept in sync with slice tokens from separate
+//! tokenized MMU instances.
 use super::protocol::{BudgetGlobalState, BudgetProtocol, ZoneGhostProtocol, ZoneStateOps};
 use super::spec::budget::{gic_region, zone_regions};
 use crate::{
@@ -35,7 +35,7 @@ verus! {
 ///
 /// Binds the lock to specific CPU/IOMMU `PCell<M>`s, to the
 /// spec instance (via `mem_inst_id`), to the allocator instance
-/// (via `alloc_inst_id`), and to the MMU instance (via `mmu_inst_id`).
+/// (via `alloc_inst_id`), and to the CPU and IOMMU MMU instances.
 pub struct ZoneKey {
     /// Zone ID,
     pub zone_id: usize,
@@ -106,7 +106,7 @@ impl<PT, M, A, P, I> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePr
     /// - the memory sets' allocator instance matches the key's `alloc_inst_id`,
     /// - `zone_state` belongs to the key's spec instance,
     /// - the ghost zone's CPU/IOMMU views mirror the exec memory sets' views, and
-    /// - the CPU MMU `s2map` slice token is *synced* for this zone.
+    /// - the CPU and IOMMU `s2map` slice tokens are synced with their memory sets.
     open spec fn inv(k: ZoneKey, v: ZoneRwContent<M, P>) -> bool {
         &&& v.cpu_mem_set_perm.is_init()
         &&& v.cpu_mem_set_perm@.pcell === k.cpu_cell_id

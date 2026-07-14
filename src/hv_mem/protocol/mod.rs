@@ -18,9 +18,7 @@ use vstd::prelude::*;
 
 verus! {
 
-/// Minimal spec interface shared by `ZoneState` (ClosureSpec) and `BudgetZoneState`
-/// (BudgetSpec). Defined here in the `spec` layer so that `zone.rs` can implement
-/// it without depending on the `protocol` module, avoiding a circular dependency.
+/// Minimal spec interface shared by `ClosureZoneState` and `BudgetZoneState`.
 ///
 /// Used as the bound `P::ZoneToken: ZoneStateOps` in the `ZoneGhostProtocol` trait.
 pub trait ZoneStateOps {
