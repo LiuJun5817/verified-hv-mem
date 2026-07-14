@@ -334,7 +334,7 @@ impl MachineState {
         &&& self.iommu_translation_wf()
     }
 
-    pub open spec fn execution_wf(&self) -> bool {
+    pub open spec fn active_vm_wf(&self) -> bool {
         forall|cpu: CpuId| #[trigger]
             self.active_vm.contains_key(cpu) ==> self.all_vms().contains(self.active_vm[cpu])
     }
@@ -344,7 +344,7 @@ impl MachineState {
         &&& self.sharing_wf()
         &&& self.translation_wf()
         &&& self.iommu_wf()
-        &&& self.execution_wf()
+        &&& self.active_vm_wf()
         &&& self.tlb_safe()
         &&& self.iommu_tlb_safe()
         &&& self.sync()

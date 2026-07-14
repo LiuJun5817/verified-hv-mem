@@ -35,7 +35,7 @@ impl MachineState {
         assert(s.ownership_wf());
         assert(s.sharing_wf());
         assert(s.translation_wf());
-        assert(s.execution_wf());
+        assert(s.active_vm_wf());
         assert(s.tlb_safe());
     }
 
@@ -399,7 +399,7 @@ impl MachineState {
     /// Pointwise: each non-initial state is the post of a `step`, which conjoins
     /// `s2.wf()`; the initial state is `wf` by hypothesis.  (Combined with
     /// `lemma_init_wf`, a run from `init` is `wf` throughout.)
-    pub proof fn lemma_execution_wf(trace: Seq<MachineState>, acts: Seq<MachineAction>, k: int)
+    pub proof fn lemma_active_vm_wf(trace: Seq<MachineState>, acts: Seq<MachineAction>, k: int)
         requires
             MachineState::is_execution(trace, acts),
             trace[0].wf(),
@@ -417,7 +417,7 @@ impl MachineState {
         }
     }
 
-    /// **Reachable ⇒ wf.** Combines `lemma_init_wf` with `lemma_execution_wf`: a
+    /// **Reachable ⇒ wf.** Combines `lemma_init_wf` with `lemma_active_vm_wf`: a
     /// reachable state's witnessing execution starts at
     /// `init` (hence `wf`), and `wf` propagates to its last state.
     pub proof fn lemma_reachable_wf(s: MachineState)
@@ -434,7 +434,7 @@ impl MachineState {
             };
         assert(trace.len() == acts.len() + 1);
         Self::lemma_init_wf(trace[0]);
-        Self::lemma_execution_wf(trace, acts, trace.len() - 1);
+        Self::lemma_active_vm_wf(trace, acts, trace.len() - 1);
     }
 
     /// **State-local read confinement.** In any `wf` state, an environment VM's
@@ -509,7 +509,7 @@ impl MachineState {
         ensures
             trace[k].translated_word(cpu, vm, gva)->Some_0.page() != page,
     {
-        Self::lemma_execution_wf(trace, acts, k);
+        Self::lemma_active_vm_wf(trace, acts, k);
         Self::lemma_trace_preserves_private(trace, acts, subject, page, k);
         Self::lemma_state_read_confined(trace[k], subject, page, vm, cpu, gva);
     }
@@ -551,7 +551,7 @@ impl MachineState {
                 gva,
             ),
     {
-        Self::lemma_execution_wf(trace, acts, i);
+        Self::lemma_active_vm_wf(trace, acts, i);
         Self::lemma_trace_preserves_private(trace, acts, subject, page, i);
         // The subject's backing page is `page`, which the run keeps private, so write
         // isolation applies at this environment edge.
@@ -617,7 +617,7 @@ impl MachineState {
             assert(m <= i < n);
             assert(Self::env_reachable(trace[i], trace[i + 1], subject));
             assert(trace[i + 1] == trace[n]);
-            Self::lemma_execution_wf(trace, acts, i);
+            Self::lemma_active_vm_wf(trace, acts, i);
             // IH gives the backing page is `page` and private at `n-1`, so write
             // isolation preserves the value across this edge.
             assert(trace[i].private_page(
