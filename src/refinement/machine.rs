@@ -3075,12 +3075,10 @@ pub proof fn lemma_iommu_remove_region_machine_trace(
 // 5. The *dead-slice* clauses of [`impl_synced`] (a vm absent from `zone_ids`
 //    has an empty `s2map` slice): `MmuSpec::add_vm` mints every slice empty and
 //    is fired only by `HvMem::add_zone`, in lockstep with `BudgetSpec::add_zone`.
-//    CAVEAT: `HvMem::remove_zone` currently destroys a zone *without* requiring
-//    its memory sets to be empty — `MmuSpec` has no `remove_vm`, so a zone
-//    removed while mappings remain leaves a non-empty orphan slice and **exits
-//    the synced regime** (this predicate goes false, and the security bridge
-//    below no longer applies).  Guarding `remove_zone` on empty memory sets
-//    (or region-removing first) keeps the system inside `impl_synced`.
+//    `HvMem::remove_zone` rejects zones whose CPU or IOMMU memory set is non-empty,
+//    so removing a zone leaves only empty hardware slices and stays inside the
+//    synced regime. `MmuSpec` still has no `remove_vm`, so the VM ID remains
+//    registered and cannot be reused after removal.
 // 6. `sw.invariants()` / `hw.invariants()`: every state of a tokenized
 //    state machine instance satisfies its invariants.
 //

@@ -34,6 +34,12 @@ pub struct SpecMemorySet {
 }
 
 impl SpecMemorySet {
+    /// Whether the set has neither regions nor page-table mappings.
+    pub open spec fn empty(&self) -> bool {
+        &&& self.regions == Set::<MemoryRegion>::empty()
+        &&& self.mappings == Map::<SpecVAddr, SpecFrame>::empty()
+    }
+
     /// Well-formedness.
     pub open spec fn wf(&self) -> bool {
         // Regions are valid
@@ -276,6 +282,14 @@ pub trait MemorySet<PT, A, I> where
 
     /// Page-table constants used by this memory set's backing page table.
     spec fn pt_constants(&self) -> SpecPTConstants;
+
+    /// Check whether the memory set contains no regions or mappings.
+    fn is_empty(&self) -> (res: bool)
+        requires
+            self.invariants(),
+        ensures
+            res == self@.empty(),
+    ;
 
     /// Check if a region overlaps with any existing region in virtual address space.
     fn overlaps_vmem(&self, region: &MemoryRegion) -> (res: bool)

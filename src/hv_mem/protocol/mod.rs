@@ -99,11 +99,13 @@ pub trait ZoneGhostProtocol: Sized {
             Self::zone_ids(gs) =~= Self::zone_ids(old(gs)).insert(zid),
     ;
 
-    /// Deregister a zone; consumes its zone token.
+    /// Deregister an empty zone; consumes its zone token.
     proof fn remove_zone(tracked gs: &mut Self::GlobalState, tracked zt: Self::ZoneToken)
         requires
             Self::global_wf(old(gs)),
             zt.wf(Self::mem_inst_id(old(gs))),
+            zt.ghost_zone().cpu_mem_set.empty(),
+            zt.ghost_zone().iommu_mem_set.empty(),
         ensures
             Self::global_wf(gs),
             Self::mem_inst_id(gs) == Self::mem_inst_id(old(gs)),

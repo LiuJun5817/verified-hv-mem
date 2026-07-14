@@ -33,7 +33,7 @@ use crate::{
     sync::rwlock::{RwLock, RwReadGuard, RwReaderToken, RwWriteGuard, RwWriterToken},
 };
 use core::marker::PhantomData;
-use protocol::{BudgetProtocol, ZoneGhostProtocol};
+use protocol::{BudgetProtocol, ZoneGhostProtocol, ZoneStateOps};
 use spec::budget::{gic_region, zone_regions};
 use vstd::invariant::InvariantPredicate;
 use vstd::{
@@ -474,13 +474,14 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     ///
     /// 1. Acquire the HvMem write lock and take the zone list.
     /// 2. Find the zone by `zone_id` field.
-    /// 3. Swap-remove the zone from the list.
-    /// 4. Acquire the zone write lock to extract the `ZoneState` token, and
-    ///    take `M` (so that both tracked resources are properly consumed).
-    /// 5. Advance `ClosureGlobalState::remove_zone` to drop the `ZoneState` token.
+    /// 3. Acquire the zone write lock and reject removal unless both its CPU and
+    ///    IOMMU memory sets are empty.
+    /// 4. Swap-remove the empty zone from the list.
+    /// 5. Advance the protocol's `remove_zone` transition to drop the zone token.
     /// 6. Restore the zone list and release the HvMem write lock.
     ///
-    /// Returns `Err(())` if no zone with the given `zid` is found.
+    /// Returns `Err(())` if no zone with the given `zid` is found or either of
+    /// its memory sets is non-empty.
     pub fn remove_zone(&self, zid: usize) -> (res: Result<(), ()>)
         requires
             self.invariants(),
@@ -504,28 +505,50 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                 return Err(());
             },
         };
-        // ── Step 3: remove zone from list ─────────────────────────────────────
-
-        let ghost old_zones = zones@;
-        let zone = zones.swap_remove(i);
-
-        // ── Step 4: extract zone token and both exec memory sets from the zone ──
-        // `zone` is an exclusively-owned value here (no Arc copies exist), so
-        // acquiring the write lock cannot deadlock.
-        let zone_guard = zone.lock.lock_write();
+        // ── Step 3: lock the zone and require both memory sets to be empty ─────
+        let zone_guard = zones[i].lock.lock_write();
         let RwWriteGuard { handle: zone_handle, token: zone_token } = zone_guard;
         let tracked mut zone_content: ZoneRwContent<M, P> = zone_token.get();
-        // Take both mem_sets out of the zone's PCells so they are properly dropped below.
-        let _cpu_mem_set: M = zone.cpu_mem_set.take(Tracked(&mut zone_content.cpu_mem_set_perm));
-        let _iommu_mem_set: M = zone.iommu_mem_set.take(
+        let cpu_mem_set: M = zones[i].cpu_mem_set.take(
+            Tracked(&mut zone_content.cpu_mem_set_perm),
+        );
+        let iommu_mem_set: M = zones[i].iommu_mem_set.take(
             Tracked(&mut zone_content.iommu_mem_set_perm),
         );
-        // `_cpu_mem_set` and `_iommu_mem_set` are dropped at end of scope.
+        let cpu_empty = cpu_mem_set.is_empty();
+        let iommu_empty = iommu_mem_set.is_empty();
+        if !cpu_empty || !iommu_empty {
+            zones[i].cpu_mem_set.put(Tracked(&mut zone_content.cpu_mem_set_perm), cpu_mem_set);
+            zones[i].iommu_mem_set.put(
+                Tracked(&mut zone_content.iommu_mem_set_perm),
+                iommu_mem_set,
+            );
+            assert(ZonePred::<PT, M, A, P, I>::inv(zones[i as int].lock.k@, zone_content));
+            zones[i].lock.unlock_write(RwWriteGuard {
+                handle: zone_handle,
+                token: Tracked(zone_content),
+            });
+            self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
+            assert(HvMemPred::<PT, M, A, P, I>::inv(self.lock.k@, content));
+            self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
+            return Err(());
+        }
+
+        proof {
+            assert(zone_content.zone_state.ghost_zone().cpu_mem_set == cpu_mem_set@);
+            assert(zone_content.zone_state.ghost_zone().iommu_mem_set == iommu_mem_set@);
+            assert(zone_content.zone_state.ghost_zone().cpu_mem_set.empty());
+            assert(zone_content.zone_state.ghost_zone().iommu_mem_set.empty());
+        }
+
+        // ── Step 4: remove the empty zone from the list ────────────────────────
+        let ghost old_zones = zones@;
+        let _zone = zones.swap_remove(i);
 
         // ── Step 5: advance protocol ghost state ───────────────────────────────
         proof {
-            // `s2map_tok` is dropped with the destroyed zone (there is no `remove_vm`
-            // transition; the vm's slice simply becomes unreachable).
+            // Both retained hardware slices are empty, so dropping the zone keeps
+            // the dead-slice clauses of `impl_synced` true.
             let tracked ZoneRwContent::<M, P> {
                 cpu_mem_set_perm: _,
                 iommu_mem_set_perm: _,
@@ -534,8 +557,8 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                 iommu_s2map_tok: _,
             } = zone_content;
             P::remove_zone(&mut content.global_state, zone_state);
-            // zone_handle (writer token) is consumed here via assume — the zone is
-            // being destroyed so there is no need to formally unlock it.
+            // The writer token and the empty exec memory sets are dropped with the
+            // destroyed zone; there is no lock to release afterwards.
         }
 
         // ── Step 6: restore zone list and release HvMem write lock ───────────
@@ -552,7 +575,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                 // 1. zone_list_perm.is_init() — from put.
                 // 2. pcell matches — from loop invariant.
                 assert(content.zone_list_perm@.pcell === self.lock.k@.cell_id);
-                // 3. global_wf — from P::add_zone postcondition.
+                // 3. global_wf — from P::remove_zone postcondition.
                 // 4. Bijection: zone_ids(new_gs) <-> new_zones.
                 assert(forall|z: nat|
                     P::zone_ids(&content.global_state).contains(z) == (exists|k: int|

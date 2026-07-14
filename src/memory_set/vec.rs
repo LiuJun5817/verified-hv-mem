@@ -157,6 +157,26 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         VecMemorySet { regions: Vec::new(), pt, phantom: PhantomData }
     }
 
+    fn is_empty(&self) -> (res: bool) {
+        if self.regions.len() == 0 {
+            assert(self@.regions =~= Set::<MemoryRegion>::empty());
+            assert(self@.mappings =~= Map::<SpecVAddr, SpecFrame>::empty()) by {
+                assert forall|v: SpecVAddr| !self@.mappings.contains_key(v) by {
+                    if self@.mappings.contains_key(v) {
+                        let frame = self@.mappings[v];
+                        assert(self.pt@.mappings.contains_pair(v, frame));
+                        assert(self.has_region_for(v, frame));
+                        assert(false);
+                    }
+                }
+            }
+            true
+        } else {
+            assert(self@.regions.contains(self.regions[0]));
+            false
+        }
+    }
+
     fn overlaps_vmem(&self, region: &MemoryRegion) -> (res: bool) {
         for i in 0..self.regions.len()
             invariant
