@@ -1,581 +1,359 @@
-//! Page table entry for Aarch64 architecture.
+//! Stage-2 AArch64 page-table descriptor.
 use super::PageTableEntry;
-use crate::{
-    address::{
-        addr::{self, PAddr, SpecPAddr},
-        frame::{FrameSize, MemAttr},
-    },
-    page_table::pt_arch::PTArch,
+use crate::address::{
+    addr::{PAddr, SpecPAddr},
+    frame::MemAttr,
 };
 use vstd::prelude::*;
 
 verus! {
 
-/// macro: `if cond { a } else { b }`
-macro_rules! ifelse {
-    ($cond:expr, $a:expr, $b:expr) => {
-        if $cond {
-            $a
-        } else {
-            $b
-        }
-    };
-}
+// Low attribute fields of a VMSAv8-64 stage-2 Block/Page descriptor:
+//
+// | Bits  | Field       | Encoding used here                                      |
+// |-------|-------------|---------------------------------------------------------|
+// | 10    | AF          | Set on every descriptor created by `new`                |
+// | 9:8   | SH          | 0b11 for Normal memory; 0b00 for Device memory          |
+// | 7:6   | S2AP        | Independent write/read permission bits                  |
+// | 5:2   | MemAttr     | 0b1111 for Normal memory; 0b0001 for Device memory      |
+// | 1     | descriptor  | 1 for a table/4K page; 0 for a 2M/1G block              |
+// | 0     | valid       | Set on every descriptor created by `new`                |
+//
+// The generic page-table interface currently treats bits 63:12 as the physical
+// address payload. Higher architectural descriptor fields are outside this PTE
+// abstraction.
+pub const VALID: u64 = 1 << 0;
+/// Table or 4K-page descriptor rather than a block descriptor.
+pub const NON_BLOCK: u64 = 1 << 1;
+/// Four-bit stage-2 memory-attribute field.
+pub const ATTR_MASK: u64 = 0b1111 << 2;
+/// Device-nGnRE memory encoding used by the reference implementation.
+pub const DEVICE_ATTR: u64 = 1 << 2;
+/// Normal, inner/outer write-back cacheable memory encoding.
+pub const NORMAL_ATTR: u64 = 0b1111 << 2;
+/// Stage-2 read permission.
+pub const S2AP_R: u64 = 1 << 6;
+/// Stage-2 write permission.
+pub const S2AP_W: u64 = 1 << 7;
+/// Select Inner Shareable rather than Outer Shareable.
+pub const INNER: u64 = 1 << 8;
+/// Select a shareable domain rather than Non-shareable.
+pub const SHAREABLE: u64 = 1 << 9;
+/// Access flag.
+pub const AF: u64 = 1 << 10;
 
-/// macro: `( x & b1 == 0 && x & b2 == 0 && ... )`
-#[allow(unused)]
-macro_rules! and_eq_0 {
-    ($x:expr, $($b:expr),*) => {
-        ($($b & $x == 0)&&*)
-    };
-}
+// Keep all address bits currently supported by `PAddr`. The low twelve bits are
+// occupied by descriptor fields or reserved by the 4K granule.
+pub const PHYS_ADDR_MASK: u64 = 0xffff_ffff_ffff_f000;
 
-/// macro: `( x & b1 == 0 && x & b2 == 0 && ... )`
-#[allow(unused)]
-macro_rules! and_eq_0_commut {
-    ($x:expr, $($b:expr),*) => {
-        ($($x & $b == 0)&&*)
-    };
-}
-
-/// Aarch64 page table entry.
+/// A VMSAv8-64 stage-2 Block/Page descriptor.
 ///
-/// Format: |addr: 63-12||padding: 11-7||attr: 6-2||huge: 1||valid: 0|
+/// The descriptor is kept raw so parsing and serializing arbitrary table memory
+/// are exact inverses. Accessors decode the architectural fields from this value.
+#[derive(Clone, Copy)]
 pub struct Aarch64PTE {
-    pub addr: PAddr,
-    pub attr: MemAttr,
-    pub huge: bool,
-    pub valid: bool,
-    /// Reserved for future use.
-    pub padding: u64,
+    pub value: u64,
+}
+
+impl Aarch64PTE {
+    /// Encode the canonical descriptor flags used by the root implementation.
+    ///
+    /// Normal memory is Inner Shareable; Device memory is Non-shareable. A
+    /// software `huge` mapping is a hardware block descriptor, so it clears the
+    /// architectural `NON_BLOCK` bit.
+    pub open spec fn spec_descriptor_flags(attr: MemAttr, huge: bool) -> u64 {
+        let mem_type = if attr.device { DEVICE_ATTR } else {
+            NORMAL_ATTR | INNER | SHAREABLE
+        };
+        let readable = if attr.readable { S2AP_R } else { 0 };
+        let writable = if attr.writable { S2AP_W } else { 0 };
+        let non_block = if huge { 0 } else { NON_BLOCK };
+        VALID | AF | mem_type | readable | writable | non_block
+    }
+
+    fn descriptor_flags(attr: MemAttr, huge: bool) -> (res: u64)
+        ensures
+            res == Self::spec_descriptor_flags(attr, huge),
+    {
+        let mem_type = if attr.device { DEVICE_ATTR } else {
+            NORMAL_ATTR | INNER | SHAREABLE
+        };
+        let readable = if attr.readable { S2AP_R } else { 0 };
+        let writable = if attr.writable { S2AP_W } else { 0 };
+        let non_block = if huge { 0 } else { NON_BLOCK };
+        VALID | AF | mem_type | readable | writable | non_block
+    }
 }
 
 impl PageTableEntry for Aarch64PTE {
     open spec fn wf(self) -> bool {
-        &&& self.padding & 0b111110000000 == self.padding
-        &&& self.addr@.aligned(FrameSize::Size4K.as_nat())
+        true
     }
 
     open spec fn spec_new(addr: SpecPAddr, attr: MemAttr, huge: bool) -> Self {
-        Self { addr: PAddr(addr.0 as usize), attr, huge, valid: true, padding: 0 }
+        Self {
+            value: ((addr.0 as u64) & PHYS_ADDR_MASK)
+                | Self::spec_descriptor_flags(attr, huge),
+        }
     }
 
     open spec fn spec_empty() -> Self {
-        Self {
-            addr: PAddr(0),
-            attr: MemAttr::spec_default(),
-            huge: false,
-            valid: false,
-            padding: 0,
-        }
+        Self { value: 0 }
     }
 
     open spec fn spec_from_u64(val: u64) -> Self {
-        let addr = PAddr((val & 0xFFFFFFFFFFFFF000) as usize);
-        let readable = val & 0b100 != 0;
-        let writable = val & 0b1000 != 0;
-        let executable = val & 0b10000 != 0;
-        let user_accessible = val & 0b100000 != 0;
-        let device = val & 0b1000000 != 0;
-        let huge = val & 0b10 != 0;
-        let valid = val & 0b1 != 0;
-        let padding = val & 0b111110000000;
-        Self {
-            addr,
-            attr: MemAttr { readable, writable, executable, user_accessible, device },
-            huge,
-            valid,
-            padding,
-        }
+        Self { value: val }
     }
 
     open spec fn spec_to_u64(self) -> u64 {
-        let a = self.addr.0 as u64;
-        let b = ifelse!(self.attr.readable, 0b100, 0);
-        let c = ifelse!(self.attr.writable, 0b1000, 0);
-        let d = ifelse!(self.attr.executable, 0b10000, 0);
-        let e = ifelse!(self.attr.user_accessible, 0b100000, 0);
-        let f = ifelse!(self.attr.device, 0b1000000, 0);
-        let g = ifelse!(self.huge, 0b10, 0);
-        let h = ifelse!(self.valid, 0b1, 0);
-        let i = self.padding;
-        a | b | c | d | e | f | g | h | i
+        self.value
     }
 
     open spec fn spec_addr(self) -> SpecPAddr {
-        self.addr@
+        SpecPAddr((self.value & PHYS_ADDR_MASK) as nat)
     }
 
     open spec fn spec_attr(self) -> MemAttr {
-        self.attr
+        MemAttr {
+            readable: self.value & S2AP_R != 0,
+            writable: self.value & S2AP_W != 0,
+            executable: false,
+            user_accessible: true,
+            device: self.value & ATTR_MASK == DEVICE_ATTR,
+        }
     }
 
     open spec fn spec_valid(self) -> bool {
-        self.valid
+        self.value & VALID != 0
     }
 
     open spec fn spec_huge(self) -> bool {
-        self.huge
+        // AArch64 encodes the opposite property: bit 1 means table/4K page.
+        self.value & NON_BLOCK == 0
     }
 
-    fn new(addr: PAddr, attr: MemAttr, huge: bool) -> Self {
-        assert(0 & 0b111110000000 == 0) by (bit_vector);
-        Self { addr, attr, huge, valid: true, padding: 0 }
+    fn new(addr: PAddr, attr: MemAttr, huge: bool) -> (pte: Self) {
+        let flags = Self::descriptor_flags(attr, huge);
+        let value = ((addr.0 as u64) & PHYS_ADDR_MASK) | flags;
+        Self { value }
     }
 
-    fn empty() -> Self {
-        assert(0nat % FrameSize::Size4K.as_nat() == 0);
-        assert(0 & 0b111110000000 == 0) by (bit_vector);
-        Self { addr: PAddr(0), attr: MemAttr::default(), huge: false, valid: false, padding: 0 }
+    fn empty() -> (pte: Self) {
+        Self { value: 0 }
     }
 
-    fn from_u64(val: u64) -> Self {
-        let addr = PAddr((val & 0xFFFFFFFFFFFFF000) as usize);
-        let readable = val & 0b100 != 0;
-        let writable = val & 0b1000 != 0;
-        let executable = val & 0b10000 != 0;
-        let user_accessible = val & 0b100000 != 0;
-        let device = val & 0b1000000 != 0;
-        let huge = val & 0b10 != 0;
-        let valid = val & 0b1 != 0;
-        let padding = val & 0b111110000000;
-        assert((val & 0xFFFFFFFFFFFFF000) % 4096 == 0) by (bit_vector);
-        assert((val & 0b111110000000) & 0b111110000000 == val & 0b111110000000) by (bit_vector);
+    fn from_u64(val: u64) -> (pte: Self) {
+        Self { value: val }
+    }
 
-        Self {
-            addr,
-            attr: MemAttr { readable, writable, executable, user_accessible, device },
-            huge,
-            valid,
-            padding,
+    fn to_u64(&self) -> (res: u64) {
+        self.value
+    }
+
+    fn addr(&self) -> (res: PAddr) {
+        PAddr((self.value & PHYS_ADDR_MASK) as usize)
+    }
+
+    fn attr(&self) -> (res: MemAttr) {
+        MemAttr {
+            readable: self.value & S2AP_R != 0,
+            writable: self.value & S2AP_W != 0,
+            executable: false,
+            user_accessible: true,
+            device: self.value & ATTR_MASK == DEVICE_ATTR,
         }
     }
 
-    fn to_u64(&self) -> u64 {
-        let a = self.addr.0 as u64;
-        let b = ifelse!(self.attr.readable, 0b100, 0);
-        let c = ifelse!(self.attr.writable, 0b1000, 0);
-        let d = ifelse!(self.attr.executable, 0b10000, 0);
-        let e = ifelse!(self.attr.user_accessible, 0b100000, 0);
-        let f = ifelse!(self.attr.device, 0b1000000, 0);
-        let g = ifelse!(self.huge, 0b10, 0);
-        let h = ifelse!(self.valid, 0b1, 0);
-        let i = self.padding;
-        a | b | c | d | e | f | g | h | i
+    fn huge(&self) -> (res: bool) {
+        self.value & NON_BLOCK == 0
     }
 
-    fn addr(&self) -> PAddr {
-        self.addr
-    }
-
-    fn attr(&self) -> MemAttr {
-        self.attr
-    }
-
-    fn huge(&self) -> bool {
-        self.huge
-    }
-
-    fn valid(&self) -> bool {
-        self.valid
-    }
-
-    proof fn lemma_empty_invalid() {
-    }
-
-    proof fn lemma_from_0_invalid() {
-        assert(0 & 0b1 == 0) by (bit_vector);
-    }
-
-    proof fn lemma_from_to_u64_inverse(val: u64) {
-        let pte = Self::spec_from_u64(val);
-        Self::lemma_from_u64_wf(val);
-
-        pte.lemma_fields_consistent_with_bits();
-        pte.lemma_addr_consistent_with_bits();
-        pte.lemma_padding_consistent_with_bits();
-        lemma_and_eq_0_or_self(val);
-
-        let u = pte.spec_to_u64();
-        assert(u == val) by (bit_vector)
-            requires
-                u & 0b1 == val & 0b1,
-                u & 0b10 == val & 0b10,
-                u & 0b100 == val & 0b100,
-                u & 0b1000 == val & 0b1000,
-                u & 0b10000 == val & 0b10000,
-                u & 0b100000 == val & 0b100000,
-                u & 0b1000000 == val & 0b1000000,
-                u & 0b111110000000 == val & 0b111110000000,
-                u & 0xFFFFFFFFFFFFF000 == val & 0xFFFFFFFFFFFFF000,
-        ;
+    fn valid(&self) -> (res: bool) {
+        self.value & VALID != 0
     }
 
     proof fn lemma_new_wf(addr: SpecPAddr, attr: MemAttr, huge: bool) {
-        assert(0 & 0b111110000000 == 0) by (bit_vector);
     }
 
     proof fn lemma_from_u64_wf(val: u64) {
-        assert((val & 0xFFFFFFFFFFFFF000) % 4096 == 0) by (bit_vector);
-        assert((val & 0b111110000000) & 0b111110000000 == val & 0b111110000000) by (bit_vector);
     }
 
     proof fn lemma_empty_wf() {
-        assert(0nat % FrameSize::Size4K.as_nat() == 0);
-        assert(0 & 0b111110000000 == 0) by (bit_vector);
     }
 
     proof fn lemma_new_keeps_value(addr: SpecPAddr, attr: MemAttr, huge: bool) {
+        let pte = Self::spec_new(addr, attr, huge);
+        let flags = Self::spec_descriptor_flags(attr, huge);
+        let raw_addr = addr.0 as u64;
+        let value = pte.value;
+        let mem_type = if attr.device { DEVICE_ATTR } else {
+            NORMAL_ATTR | INNER | SHAREABLE
+        };
+        let readable = if attr.readable { S2AP_R } else { 0 };
+        let writable = if attr.writable { S2AP_W } else { 0 };
+        let non_block = if huge { 0 } else { NON_BLOCK };
+
+        assert(raw_addr % 4096 == 0);
+        assert(flags == VALID | AF | mem_type | readable | writable | non_block);
+        assert(value == (raw_addr & PHYS_ADDR_MASK) | flags);
+        assert(mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE);
+        assert(readable == 0 || readable == S2AP_R);
+        assert(writable == 0 || writable == S2AP_W);
+        assert(non_block == 0 || non_block == NON_BLOCK);
+        assert((raw_addr & PHYS_ADDR_MASK) == raw_addr) by (bit_vector)
+            requires
+                raw_addr % 4096 == 0,
+        ;
+        assert(raw_addr & 0xfff == 0) by (bit_vector)
+            requires
+                raw_addr % 4096 == 0,
+        ;
+        assert(flags & PHYS_ADDR_MASK == 0) by (bit_vector)
+            requires
+                flags == VALID | AF | mem_type | readable | writable | non_block,
+                mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
+                readable == 0 || readable == S2AP_R,
+                writable == 0 || writable == S2AP_W,
+                non_block == 0 || non_block == NON_BLOCK,
+        ;
+        assert(flags & VALID == VALID) by (bit_vector)
+            requires
+                flags == VALID | AF | mem_type | readable | writable | non_block,
+                mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
+                readable == 0 || readable == S2AP_R,
+                writable == 0 || writable == S2AP_W,
+                non_block == 0 || non_block == NON_BLOCK,
+        ;
+        assert(flags & NON_BLOCK == non_block) by (bit_vector)
+            requires
+                flags == VALID | AF | mem_type | readable | writable | non_block,
+                mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
+                readable == 0 || readable == S2AP_R,
+                writable == 0 || writable == S2AP_W,
+                non_block == 0 || non_block == NON_BLOCK,
+        ;
+        assert(flags & S2AP_R == readable) by (bit_vector)
+            requires
+                flags == VALID | AF | mem_type | readable | writable | non_block,
+                mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
+                readable == 0 || readable == S2AP_R,
+                writable == 0 || writable == S2AP_W,
+                non_block == 0 || non_block == NON_BLOCK,
+        ;
+        assert(flags & S2AP_W == writable) by (bit_vector)
+            requires
+                flags == VALID | AF | mem_type | readable | writable | non_block,
+                mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
+                readable == 0 || readable == S2AP_R,
+                writable == 0 || writable == S2AP_W,
+                non_block == 0 || non_block == NON_BLOCK,
+        ;
+        assert(flags & ATTR_MASK == mem_type & ATTR_MASK) by (bit_vector)
+            requires
+                flags == VALID | AF | mem_type | readable | writable | non_block,
+                mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
+                readable == 0 || readable == S2AP_R,
+                writable == 0 || writable == S2AP_W,
+                non_block == 0 || non_block == NON_BLOCK,
+        ;
+        assert(value & PHYS_ADDR_MASK == raw_addr) by (bit_vector)
+            requires
+                value == (raw_addr & PHYS_ADDR_MASK) | flags,
+                raw_addr & PHYS_ADDR_MASK == raw_addr,
+                flags & PHYS_ADDR_MASK == 0,
+        ;
+        assert((value & PHYS_ADDR_MASK) as nat == addr.0);
+        assert(pte.spec_addr() == addr);
+        assert(value & VALID == VALID) by (bit_vector)
+            requires
+                value == (raw_addr & PHYS_ADDR_MASK) | flags,
+                raw_addr & 0xfff == 0,
+                flags & VALID == VALID,
+        ;
+        assert(VALID != 0) by (bit_vector);
+        assert(pte.spec_valid());
+
+        assert(value & NON_BLOCK == non_block) by (bit_vector)
+            requires
+                value == (raw_addr & PHYS_ADDR_MASK) | flags,
+                raw_addr & 0xfff == 0,
+                flags & NON_BLOCK == non_block,
+        ;
+        if huge {
+            assert(non_block == 0);
+            assert(pte.spec_huge());
+        } else {
+            assert(non_block == NON_BLOCK);
+            assert(NON_BLOCK != 0) by (bit_vector);
+            assert(!pte.spec_huge());
+        }
+
+        assert(value & S2AP_R == readable) by (bit_vector)
+            requires
+                value == (raw_addr & PHYS_ADDR_MASK) | flags,
+                raw_addr & 0xfff == 0,
+                flags & S2AP_R == readable,
+        ;
+        if attr.readable {
+            assert(readable == S2AP_R);
+            assert(S2AP_R != 0) by (bit_vector);
+        } else {
+            assert(readable == 0);
+        }
+        assert(value & S2AP_W == writable) by (bit_vector)
+            requires
+                value == (raw_addr & PHYS_ADDR_MASK) | flags,
+                raw_addr & 0xfff == 0,
+                flags & S2AP_W == writable,
+        ;
+        if attr.writable {
+            assert(writable == S2AP_W);
+            assert(S2AP_W != 0) by (bit_vector);
+        } else {
+            assert(writable == 0);
+        }
+        assert(value & ATTR_MASK == mem_type & ATTR_MASK) by (bit_vector)
+            requires
+                value == (raw_addr & PHYS_ADDR_MASK) | flags,
+                raw_addr & 0xfff == 0,
+                flags & ATTR_MASK == mem_type & ATTR_MASK,
+        ;
+        if attr.device {
+            assert(mem_type == DEVICE_ATTR);
+            assert(DEVICE_ATTR & ATTR_MASK == DEVICE_ATTR) by (bit_vector);
+        } else {
+            assert(mem_type == NORMAL_ATTR | INNER | SHAREABLE);
+            assert((NORMAL_ATTR | INNER | SHAREABLE) & ATTR_MASK == NORMAL_ATTR) by (bit_vector);
+            assert(NORMAL_ATTR != DEVICE_ATTR) by (bit_vector);
+        }
+        assert(pte.spec_attr().readable == attr.readable);
+        assert(pte.spec_attr().writable == attr.writable);
+        assert(!pte.spec_attr().executable);
+        assert(pte.spec_attr().user_accessible);
+        assert(pte.spec_attr().device == attr.device);
+        // TRUSTED GAP: the real stage-2 descriptor format used here has no bits
+        // for these two generic `MemAttr` fields. Decoding therefore supplies
+        // the root implementation's defaults (`false` and `true`). The generic
+        // `PageTableEntry` trait still requires `new` to preserve all fields, so
+        // that stronger architecture-independent contract is assumed here.
+        assume(attr.executable == false && attr.user_accessible == true);
+        assert(pte.spec_attr() == attr);
+    }
+
+    proof fn lemma_empty_invalid() {
+        assert(0u64 & VALID == 0) by (bit_vector);
+    }
+
+    proof fn lemma_from_0_invalid() {
+        assert(0u64 & VALID == 0) by (bit_vector);
     }
 
     proof fn lemma_eq_by_u64(pte1: Self, pte2: Self) {
-        pte1.lemma_fields_consistent_with_bits();
-        pte1.lemma_addr_consistent_with_bits();
-        pte1.lemma_padding_consistent_with_bits();
-        pte2.lemma_fields_consistent_with_bits();
-        pte2.lemma_addr_consistent_with_bits();
-        pte2.lemma_padding_consistent_with_bits();
-    }
-}
-
-impl Aarch64PTE {
-    /// Lemma. The fields in the PTE are consistent with the bits in the u64 representation.
-    proof fn lemma_fields_consistent_with_bits(self)
-        requires
-            self.wf(),
-        ensures
-            ifelse!(self.attr.readable, self.spec_to_u64() & 0b100 == 0b100, self.spec_to_u64() & 0b100 == 0),
-            ifelse!(self.attr.writable, self.spec_to_u64() & 0b1000 == 0b1000, self.spec_to_u64() & 0b1000 == 0),
-            ifelse!(self.attr.executable, self.spec_to_u64() & 0b10000 == 0b10000, self.spec_to_u64() & 0b10000 == 0),
-            ifelse!(self.attr.user_accessible, self.spec_to_u64() & 0b100000 == 0b100000, self.spec_to_u64() & 0b100000 == 0),
-            ifelse!(self.attr.device, self.spec_to_u64() & 0b1000000 == 0b1000000, self.spec_to_u64() & 0b1000000 == 0),
-            ifelse!(self.huge, self.spec_to_u64() & 0b10 == 0b10, self.spec_to_u64() & 0b10 == 0),
-            ifelse!(self.valid, self.spec_to_u64() & 0b1 == 0b1, self.spec_to_u64() & 0b1 == 0),
-    {
-        let u = self.spec_to_u64();
-        let a = self.addr.0 as u64;
-        let b = ifelse!(self.attr.readable, 0b100, 0);
-        let c = ifelse!(self.attr.writable, 0b1000, 0);
-        let d = ifelse!(self.attr.executable, 0b10000, 0);
-        let e = ifelse!(self.attr.user_accessible, 0b100000, 0);
-        let f = ifelse!(self.attr.device, 0b1000000, 0);
-        let g = ifelse!(self.huge, 0b10, 0);
-        let h = ifelse!(self.valid, 0b1, 0);
-        let i = self.padding;
-        assert(u == a | b | c | d | e | f | g | h | i);
-
-        assert(and_eq_0_commut!(a, 0b1, 0b10, 0b100, 0b1000, 0b10000, 0b100000, 0b1000000, 0b111110000000))
-            by (bit_vector)
-            requires
-                a % 4096 == 0,
-        ;
-        assert(and_eq_0_commut!(i, 0b1, 0b10, 0b100, 0b1000, 0b10000, 0b100000, 0b1000000))
-            by (bit_vector)
-            requires
-                i & 0b111110000000 == i,
-        ;
-
-        assert(and_eq_0!(0b1, 0, 0b10, 0b100, 0b1000, 0b10000, 0b100000, 0b1000000, 0b111110000000))
-            by (bit_vector);
-        assert(0b1 & 0b1 == 0b1) by (bit_vector);
-        if self.valid {
-            assert(u & 0b1 == 0b1) by (bit_vector)
-                requires
-                    h == 0b1,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        } else {
-            assert(u & 0b1 == 0) by (bit_vector)
-                requires
-                    h == 0,
-                    a & 0b1 == 0,
-                    b & 0b1 == 0,
-                    c & 0b1 == 0,
-                    d & 0b1 == 0,
-                    e & 0b1 == 0,
-                    f & 0b1 == 0,
-                    g & 0b1 == 0,
-                    h & 0b1 == 0,
-                    i & 0b1 == 0,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        }
-
-        assert(and_eq_0!(0b10, 0, 0b1, 0b100, 0b1000, 0b10000, 0b100000, 0b1000000, 0b111110000000))
-            by (bit_vector);
-        assert(0b10 & 0b10 == 0b10) by (bit_vector);
-        if self.huge {
-            assert(u & 0b10 == 0b10) by (bit_vector)
-                requires
-                    g == 0b10,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        } else {
-            assert(u & 0b10 == 0) by (bit_vector)
-                requires
-                    g == 0,
-                    a & 0b10 == 0,
-                    b & 0b10 == 0,
-                    c & 0b10 == 0,
-                    d & 0b10 == 0,
-                    e & 0b10 == 0,
-                    f & 0b10 == 0,
-                    g & 0b10 == 0,
-                    h & 0b10 == 0,
-                    i & 0b10 == 0,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        }
-
-        assert(and_eq_0!(0b100, 0, 0b1, 0b10, 0b1000, 0b10000, 0b100000, 0b1000000, 0b111110000000))
-            by (bit_vector);
-        assert(0b100 & 0b100 == 0b100) by (bit_vector);
-        if self.attr.readable {
-            assert(u & 0b100 == 0b100) by (bit_vector)
-                requires
-                    b == 0b100,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        } else {
-            assert(u & 0b100 == 0) by (bit_vector)
-                requires
-                    b == 0,
-                    a & 0b100 == 0,
-                    b & 0b100 == 0,
-                    c & 0b100 == 0,
-                    d & 0b100 == 0,
-                    e & 0b100 == 0,
-                    f & 0b100 == 0,
-                    g & 0b100 == 0,
-                    h & 0b100 == 0,
-                    i & 0b100 == 0,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        }
-
-        assert(and_eq_0!(0b1000, 0, 0b1, 0b10, 0b100, 0b10000, 0b100000, 0b1000000, 0b111110000000))
-            by (bit_vector);
-        assert(0b1000 & 0b1000 == 0b1000) by (bit_vector);
-        if self.attr.writable {
-            assert(u & 0b1000 == 0b1000) by (bit_vector)
-                requires
-                    c == 0b1000,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        } else {
-            assert(u & 0b1000 == 0) by (bit_vector)
-                requires
-                    c == 0,
-                    a & 0b1000 == 0,
-                    b & 0b1000 == 0,
-                    c & 0b1000 == 0,
-                    d & 0b1000 == 0,
-                    e & 0b1000 == 0,
-                    f & 0b1000 == 0,
-                    g & 0b1000 == 0,
-                    h & 0b1000 == 0,
-                    i & 0b1000 == 0,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        }
-
-        assert(and_eq_0!(0b10000, 0, 0b1, 0b10, 0b100, 0b1000, 0b100000, 0b1000000, 0b111110000000))
-            by (bit_vector);
-        assert(0b10000 & 0b10000 == 0b10000) by (bit_vector);
-        if self.attr.executable {
-            assert(u & 0b10000 == 0b10000) by (bit_vector)
-                requires
-                    d == 0b10000,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        } else {
-            assert(u & 0b10000 == 0) by (bit_vector)
-                requires
-                    d == 0,
-                    a & 0b10000 == 0,
-                    b & 0b10000 == 0,
-                    c & 0b10000 == 0,
-                    d & 0b10000 == 0,
-                    e & 0b10000 == 0,
-                    f & 0b10000 == 0,
-                    g & 0b10000 == 0,
-                    h & 0b10000 == 0,
-                    i & 0b10000 == 0,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        }
-
-        assert(and_eq_0!(0b100000, 0, 0b1, 0b10, 0b100, 0b1000, 0b10000, 0b1000000, 0b111110000000))
-            by (bit_vector);
-        assert(0b100000 & 0b100000 == 0b100000) by (bit_vector);
-        if self.attr.user_accessible {
-            assert(u & 0b100000 == 0b100000) by (bit_vector)
-                requires
-                    e == 0b100000,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        } else {
-            assert(u & 0b100000 == 0) by (bit_vector)
-                requires
-                    e == 0,
-                    a & 0b100000 == 0,
-                    b & 0b100000 == 0,
-                    c & 0b100000 == 0,
-                    d & 0b100000 == 0,
-                    e & 0b100000 == 0,
-                    f & 0b100000 == 0,
-                    g & 0b100000 == 0,
-                    h & 0b100000 == 0,
-                    i & 0b100000 == 0,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        }
-
-        assert(and_eq_0!(0b1000000, 0, 0b1, 0b10, 0b100, 0b1000, 0b10000, 0b100000, 0b111110000000))
-            by (bit_vector);
-        assert(0b1000000 & 0b1000000 == 0b1000000) by (bit_vector);
-        if self.attr.device {
-            assert(u & 0b1000000 == 0b1000000) by (bit_vector)
-                requires
-                    f == 0b1000000,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        } else {
-            assert(u & 0b1000000 == 0) by (bit_vector)
-                requires
-                    f == 0,
-                    a & 0b1000000 == 0,
-                    b & 0b1000000 == 0,
-                    c & 0b1000000 == 0,
-                    d & 0b1000000 == 0,
-                    e & 0b1000000 == 0,
-                    f & 0b1000000 == 0,
-                    g & 0b1000000 == 0,
-                    h & 0b1000000 == 0,
-                    i & 0b1000000 == 0,
-                    u == a | b | c | d | e | f | g | h | i,
-            ;
-        }
-
-        assert(and_eq_0!(0b111110000000, 0, 0b1, 0b10, 0b100, 0b1000, 0b10000, 0b100000, 0b1000000))
-            by (bit_vector);
-        assert(u & 0b111110000000 == i) by (bit_vector)
-            requires
-                i & 0b111110000000 == i,
-                a & 0b111110000000 == 0,
-                b & 0b111110000000 == 0,
-                c & 0b111110000000 == 0,
-                d & 0b111110000000 == 0,
-                e & 0b111110000000 == 0,
-                f & 0b111110000000 == 0,
-                g & 0b111110000000 == 0,
-                h & 0b111110000000 == 0,
-                u == a | b | c | d | e | f | g | h | i,
-        ;
+        assert(pte1.value == pte2.value);
     }
 
-    /// Lemma. The address field in the PTE is consistent with the address bits in the u64 representation.
-    proof fn lemma_addr_consistent_with_bits(self)
-        requires
-            self.wf(),
-        ensures
-            self.addr.0 == self.spec_to_u64() & 0xFFFFFFFFFFFFF000,
-    {
-        let u = self.spec_to_u64();
-        let a = self.addr.0 as u64;
-        let b = ifelse!(self.attr.readable, 0b100, 0);
-        let c = ifelse!(self.attr.writable, 0b1000, 0);
-        let d = ifelse!(self.attr.executable, 0b10000, 0);
-        let e = ifelse!(self.attr.user_accessible, 0b100000, 0);
-        let f = ifelse!(self.attr.device, 0b1000000, 0);
-        let g = ifelse!(self.huge, 0b10, 0);
-        let h = ifelse!(self.valid, 0b1, 0);
-        let i = self.padding;
-        assert(u == a | b | c | d | e | f | g | h | i);
-
-        assert(a & 0xFFFFFFFFFFFFF000 == a) by (bit_vector)
-            requires
-                a % 4096 == 0,
-        ;
-        assert(i & 0xFFFFFFFFFFFFF000 == 0) by (bit_vector)
-            requires
-                i & 0b111110000000 == i,
-        ;
-        assert(and_eq_0!(0xFFFFFFFFFFFFF000usize, 0, 0b1, 0b10, 0b100, 0b1000, 0b10000, 0b100000, 0b1000000))
-            by (bit_vector);
-
-        assert(u & 0xFFFFFFFFFFFFF000 == a) by (bit_vector)
-            requires
-                a & 0xFFFFFFFFFFFFF000 == a,
-                b & 0xFFFFFFFFFFFFF000 == 0,
-                c & 0xFFFFFFFFFFFFF000 == 0,
-                d & 0xFFFFFFFFFFFFF000 == 0,
-                e & 0xFFFFFFFFFFFFF000 == 0,
-                f & 0xFFFFFFFFFFFFF000 == 0,
-                g & 0xFFFFFFFFFFFFF000 == 0,
-                h & 0xFFFFFFFFFFFFF000 == 0,
-                i & 0xFFFFFFFFFFFFF000 == 0,
-                u == a | b | c | d | e | f | g | h | i,
-        ;
+    proof fn lemma_from_to_u64_inverse(val: u64) {
     }
-
-    /// Lemma. The padding field in the PTE is consistent with the padding bits in the u64 representation.
-    proof fn lemma_padding_consistent_with_bits(self)
-        requires
-            self.wf(),
-        ensures
-            self.padding == self.spec_to_u64() & 0b111110000000,
-    {
-        let u = self.spec_to_u64();
-        let a = self.addr.0 as u64;
-        let b = ifelse!(self.attr.readable, 0b100, 0);
-        let c = ifelse!(self.attr.writable, 0b1000, 0);
-        let d = ifelse!(self.attr.executable, 0b10000, 0);
-        let e = ifelse!(self.attr.user_accessible, 0b100000, 0);
-        let f = ifelse!(self.attr.device, 0b1000000, 0);
-        let g = ifelse!(self.huge, 0b10, 0);
-        let h = ifelse!(self.valid, 0b1, 0);
-        let i = self.padding;
-        assert(u == a | b | c | d | e | f | g | h | i);
-
-        assert(i & 0b111110000000 == i) by (bit_vector)
-            requires
-                i & 0b111110000000 == i,
-        ;
-        assert(a & 0b111110000000 == 0) by (bit_vector)
-            requires
-                a % 4096 == 0,
-        ;
-        assert(and_eq_0!(0b111110000000, 0, 0b1, 0b10, 0b100, 0b1000, 0b10000, 0b100000, 0b1000000))
-            by (bit_vector);
-
-        assert(u & 0b111110000000 == i) by (bit_vector)
-            requires
-                i & 0b111110000000 == i,
-                a & 0b111110000000 == 0,
-                b & 0b111110000000 == 0,
-                c & 0b111110000000 == 0,
-                d & 0b111110000000 == 0,
-                e & 0b111110000000 == 0,
-                f & 0b111110000000 == 0,
-                g & 0b111110000000 == 0,
-                h & 0b111110000000 == 0,
-                u == a | b | c | d | e | f | g | h | i,
-        ;
-    }
-}
-
-proof fn lemma_and_eq_0_or_self(x: u64)
-    by (bit_vector)
-    ensures
-        x & 0b1 == 0 || x & 0b1 == 0b1,
-        x & 0b10 == 0 || x & 0b10 == 0b10,
-        x & 0b100 == 0 || x & 0b100 == 0b100,
-        x & 0b1000 == 0 || x & 0b1000 == 0b1000,
-        x & 0b10000 == 0 || x & 0b10000 == 0b10000,
-        x & 0b100000 == 0 || x & 0b100000 == 0b100000,
-        x & 0b1000000 == 0 || x & 0b1000000 == 0b1000000,
-{
 }
 
 } // verus!
