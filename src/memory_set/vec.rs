@@ -8,18 +8,28 @@
 //! (used inside the proofs).  Because `self@.mappings` is *defined* as
 //! `self.pt@.mappings`, the two coincide on `mappings`; we deliberately keep both
 //! spellings to mark which layer each statement is reasoning about.
-use super::*;
-use crate::address::addr::{PAddr, SpecVAddr};
+use super::{MemorySet, SpecMemorySet};
+
+extern crate alloc;
+
+use crate::address::{
+    addr::{PAddr, SpecVAddr, VAddr},
+    frame::{Frame, FrameSize, SpecFrame},
+};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
+use crate::global_allocator::GlobalAllocator;
 use crate::hardware::spec::MmuS2MapToken;
 use crate::hardware::{HardwareInstr, MmuHardware};
-use crate::model::convert::{frame_to_s2, lemma_pt_s2map_inner_insert, pt_s2map_inner};
-use crate::model::types::VmId;
-use crate::model::VmPageKey;
-use crate::page_table::{PTConstants, PageTable};
+use crate::model::types::{VmId, VmPageKey};
+use crate::page_table::{PTConstants, PageTable, SpecPTConstants};
+use alloc::vec::Vec;
+use core::marker::PhantomData;
 use vstd::prelude::*;
 
 verus! {
+
+use crate::address::region::*;
+use crate::model::convert::*;
 
 broadcast use crate::page_table::PageTable::lemma_invariants_implies_wf;
 

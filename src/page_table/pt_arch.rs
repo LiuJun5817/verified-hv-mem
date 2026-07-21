@@ -11,7 +11,7 @@ use crate::address::{
     addr::{SpecVAddr, VAddr},
     frame::FrameSize,
 };
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 verus! {
 

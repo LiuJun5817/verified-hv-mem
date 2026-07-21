@@ -6,7 +6,7 @@
 //! `insert_region` under `BudgetProtocol` is zone-local: only the `BudgetSpec::zones[zid]`
 //! map-sharded token is updated, so **no global HvMem write lock is required**.
 use super::super::spec::{
-    budget::{gic_region, zone_regions, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken},
+    budget::{BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken},
     GhostZone,
 };
 use super::{ZoneGhostProtocol, ZoneStateOps};
@@ -14,6 +14,8 @@ use crate::address::region::MemoryRegion;
 use vstd::prelude::*;
 
 verus! {
+
+use super::super::spec::budget::*;
 
 /// Per-zone tracked ghost state for `BudgetSpec` (assumption 2).
 ///

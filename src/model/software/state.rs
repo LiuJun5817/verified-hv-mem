@@ -1,7 +1,7 @@
 use vstd::prelude::*;
 
 use super::Region;
-use crate::model::types::*;
+use crate::model::types::{PhysPage, S2Entry, SharedPage, VmId, VmPageKey};
 
 verus! {
 
@@ -71,7 +71,6 @@ impl SoftwareView {
                 == vm)
     }
 
-
     // ------------------------------------------------------------------
     // Well-formedness predicates
     // ------------------------------------------------------------------
@@ -118,24 +117,31 @@ impl SoftwareView {
     /// *its own* CPU pages — there is deliberately no same-VM `iommu_owned ∩ vm_owned = ∅`
     /// clause.
     pub open spec fn iommu_ownership_wf(&self) -> bool {
-        &&& self.iommu_owned.dom() == self.all_vms
+        &&& self.iommu_owned.dom()
+            == self.all_vms
         // (1) Private DMA pages are pairwise cross-VM disjoint.
         &&& forall|vm1: VmId, vm2: VmId| #[trigger]
             self.all_vms.contains(vm1) && #[trigger] self.all_vms.contains(vm2) && vm1 != vm2
                 ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm1].contains(page) ==> !self.iommu_owned[vm2].contains(page)
-        // (2) A VM's private DMA pages are never another VM's CPU-owned pages.
+                self.iommu_owned[vm1].contains(page) ==> !self.iommu_owned[vm2].contains(
+                    page,
+                )
+                // (2) A VM's private DMA pages are never another VM's CPU-owned pages.
         &&& forall|vm1: VmId, vm2: VmId| #[trigger]
             self.all_vms.contains(vm1) && #[trigger] self.all_vms.contains(vm2) && vm1 != vm2
                 ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(page)
-        // (3) Private DMA pages are disjoint from the shared region (truly private).
+                self.iommu_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(
+                    page,
+                )
+                // (3) Private DMA pages are disjoint from the shared region (truly private).
         &&& forall|vm: VmId| #[trigger]
             self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
-        // (4) The shared region is disjoint from every VM's CPU ownership (the shared GIC
-        // is a device region, never a VM's private RAM) — so a device DMA to a shared page
-        // can never land on another VM's CPU-private page.
+                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(
+                    page,
+                )
+                // (4) The shared region is disjoint from every VM's CPU ownership (the shared GIC
+                // is a device region, never a VM's private RAM) — so a device DMA to a shared page
+                // can never land on another VM's CPU-private page.
         &&& forall|vm: VmId| #[trigger]
             self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
                 self.vm_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)

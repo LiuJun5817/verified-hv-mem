@@ -1,4 +1,8 @@
 use core::marker::PhantomData;
+use core::option::Option::{self, None, Some};
+use core::result::Result::{Err, Ok};
+use core::unimplemented;
+use core::unreachable;
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::atomic_ghost::*;
 use vstd::invariant::InvariantPredicate;
@@ -502,15 +506,15 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                 read_guard_opt is Some,
                 read_guard_opt->Some_0.wf(self),
         {
-            let rc_val = atomic_with_ghost!(
+            let rc_val =
+                atomic_with_ghost!(
                 &self.rc => load();
                 returning loaded_rc;
                 ghost g => { }
             );
             if rc_val >= u64::MAX {
-                continue;
+                continue ;
             }
-
             let tracked mut pending_reader_token: Option<RwPendingReaderToken<K, V, Pred>> = None;
             let rc_cas_result =
                 atomic_with_ghost!(
@@ -525,9 +529,8 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                 }
             );
             if rc_cas_result.is_err() {
-                continue;
+                continue ;
             }
-
             let tracked mut mock_reader_token_opt: Option<RwMockReaderToken<K, V, Pred>> = None;
             let exc_value =
                 atomic_with_ghost!(
@@ -561,16 +564,17 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                         read_guard_opt is Some,
                         read_guard_opt->Some_0.wf(self),
                 {
-                    let real_rc_val = atomic_with_ghost!(
+                    let real_rc_val =
+                        atomic_with_ghost!(
                         &self.real_rc => load();
                         returning loaded_real_rc;
                         ghost g => { }
                     );
                     if real_rc_val >= u64::MAX {
-                        continue;
+                        continue ;
                     }
-
-                    let real_rc_cas_result = atomic_with_ghost!(
+                    let real_rc_cas_result =
+                        atomic_with_ghost!(
                         &self.real_rc => compare_exchange(real_rc_val, real_rc_val + 1);
                         returning cas_res;
                         ghost g => {
@@ -598,24 +602,23 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                                     &reader_token,
                                 );
                             }
-                            let read_guard = RwReadGuard {
-                                handle: Tracked(reader_token),
-                            };
+                            let read_guard = RwReadGuard { handle: Tracked(reader_token) };
                             read_guard_opt = Some(read_guard);
-                            break;
+                            break ;
                         },
-                        Err(_) => {}
+                        Err(_) => {},
                     }
                 }
 
-                break;
+                break ;
             } else {
                 let tracked pr_token = match pending_reader_token {
                     Some(t) => t,
                     None => proof_from_false(),
                 };
 
-                let _ = atomic_with_ghost!(
+                let _ =
+                    atomic_with_ghost!(
                     &self.rc => fetch_sub(1);
                     returning old_rc;
                     ghost g => {
@@ -654,7 +657,8 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
         let tracked reader_token = guard.handle.get();
         let tracked mut mock_reader_token_opt: Option<RwMockReaderToken<K, V, Pred>> = Option::None;
 
-        let _ = atomic_with_ghost!(
+        let _ =
+            atomic_with_ghost!(
             &self.real_rc => fetch_sub(1);
             returning old_real_rc;
             ghost g => {
@@ -727,4 +731,4 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwReadGuard<K, V, Pred> {
     }
 }
 
-}
+} // verus!

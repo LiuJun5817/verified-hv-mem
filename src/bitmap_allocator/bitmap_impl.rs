@@ -1,6 +1,4 @@
-use super::bitmap_trait::*;
-use core::ops::Range;
-use vstd::{prelude::*, seq_lib::*};
+use vstd::{assert_seqs_equal, prelude::*};
 
 /// Macro to get a specific bit from a u16 value.
 /// Returns true if the bit at the given index is 1, false otherwise.
@@ -82,6 +80,14 @@ macro_rules! set_bits16 {
 }
 
 verus! {
+
+use super::bitmap_trait::*;
+use core::ops::Range;
+use core::marker::Sized;
+use core::marker::Copy;
+use core::clone::Clone;
+use core::option::Option::{self, Some, None};
+use core::prelude::rust_2021::derive;
 
 pub trait BitAllocView {
     /// Specification function to view the internal u16 as a sequence of booleans.
@@ -419,7 +425,7 @@ impl<T: BitAllocView + Copy> Clone for BitAllocCascade16<T> {
     }
 }
 
-impl<T: BitAllocView + std::marker::Copy> BitAllocView for BitAllocCascade16<T> {
+impl<T: BitAllocView + Copy> BitAllocView for BitAllocCascade16<T> {
     open spec fn view(&self) -> Seq<bool> {
         // 把 16 个子分配器的 view 拼接在一起
         let sub_len = T::spec_cap() as int;
@@ -477,7 +483,7 @@ impl<T: BitAllocView + std::marker::Copy> BitAllocView for BitAllocCascade16<T> 
     fn default() -> Self {
         BitAllocCascade16 {
             bitset: BitAlloc16 { bits: 0 },
-            sub: [T::default();16],  // need the trait "std::marker::Copy"
+            sub: [T::default();16],  // need the trait "core::marker::Copy"
         }
     }
 
@@ -977,7 +983,7 @@ pub open spec fn view_index_mapping(ba: Seq<bool>, i: int, sub_ba: Seq<bool>, ca
     forall|j: int| 0 <= j < cap ==> ba[(cap * i + j)] == sub_ba[j]
 }
 
-impl<T: BitAlloc + std::marker::Copy> BitAlloc for BitAllocCascade16<T> {
+impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
     fn alloc(&mut self) -> (res: Option<usize>) {
         let ghost cap = T::spec_cap() as int;
         if !self.any() {
@@ -2022,7 +2028,7 @@ impl<T: BitAlloc + std::marker::Copy> BitAlloc for BitAllocCascade16<T> {
     }
 }
 
-impl<T: BitAllocView + std::marker::Copy> BitAllocCascade16<T> {
+impl<T: BitAllocView + Copy> BitAllocCascade16<T> {
     /// Lemma: Ensures the parent view correctly maps each index range to its corresponding child sub-allocator.
     proof fn lemma_maintain_view_indexs_mapping(&self)
         requires
@@ -2670,7 +2676,11 @@ impl BitmapAllocator for BitAlloc1M {
         <Self as BitAlloc>::dealloc(self, key)
     }
 
-    broadcast proof fn lemma_view_len_is_cap(self) {
+    fn insert(&mut self, range: Range<usize>) {
+        <Self as BitAlloc>::insert(self, range)
+    }
+
+    proof fn lemma_view_len_is_cap(self) {
         assert(<Self as BitmapAllocator>::view(&self).len()
             == <Self as BitmapAllocator>::spec_cap()) by {
             assert(<Self as BitAllocView>::view(&self).len() == <Self as BitAllocView>::spec_cap());

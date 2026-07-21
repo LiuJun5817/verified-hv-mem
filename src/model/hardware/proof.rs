@@ -8,7 +8,9 @@
 use vstd::prelude::*;
 
 use super::HardwareView;
-use crate::model::types::*;
+use crate::model::types::{
+    CpuId, DataWord, GuestPage, PhysWordAddr, S2Entry, TlbKey, VmId, VmPageKey,
+};
 
 verus! {
 

@@ -6,13 +6,14 @@
 //! This is the single place those two worlds meet.  Everything here is a pure
 //! function (plus the arithmetic lemmas characterizing it); no state, no
 //! refinement-specific predicates.
-use crate::address::addr::{SpecPAddr, SpecVAddr};
-use crate::address::frame::{MemAttr, SpecFrame};
-use crate::address::region::SPEC_PAGE_SIZE;
-use crate::model::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 use vstd::prelude::*;
 
 verus! {
+
+use crate::address::addr::{SpecPAddr, SpecVAddr};
+use crate::address::frame::{MemAttr, SpecFrame};
+use crate::address::region::*;
+use crate::model::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 
 // ─────────────────────────── page-number extraction ───────────────────────────
 // The two primitives that turn a byte address into its (model) page number — the

@@ -1,8 +1,10 @@
-use super::bitmap_impl::{BitAlloc, BitAlloc16, BitAllocView};
-use core::ops::Range;
-use vstd::{prelude::*, seq_lib::*};
+use vstd::prelude::*;
 
 verus! {
+
+use core::ops::Range;
+use core::option::Option;
+use core::marker::Sized;
 
 /// Allocator that uses a bitmap to track resource usage (0: allocated, 1: free).
 pub trait BitmapAllocator {
@@ -100,6 +102,22 @@ pub trait BitmapAllocator {
             !old(self)@[key as int],
         ensures
             self@ == old(self)@.update(key as int, true),
+            self.wf(),
+    ;
+
+    /// Mark a range as free.
+    fn insert(&mut self, range: Range<usize>)
+        requires
+            old(self).wf(),
+            range.start < Self::spec_cap(),
+            range.end <= Self::spec_cap(),
+            range.start < range.end,
+        ensures
+            forall|loc1: int| (range.start <= loc1 < range.end) ==> self@[loc1] == true,
+            forall|loc2: int|
+                (0 <= loc2 < range.start || range.end <= loc2 < Self::spec_cap()) ==> self@[loc2]
+                    == old(self)@[loc2],
+            self@.len() == old(self)@.len(),
             self.wf(),
     ;
 

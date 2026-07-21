@@ -20,7 +20,7 @@ use super::GhostZone;
 use crate::address::region::MemoryRegion;
 use crate::memory_set::SpecMemorySet;
 use verus_state_machines_macros::tokenized_state_machine;
-use vstd::{prelude::*, tokens::InstanceId};
+use vstd::prelude::*;
 
 verus! {
 

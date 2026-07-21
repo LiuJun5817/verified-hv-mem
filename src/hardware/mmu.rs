@@ -48,10 +48,9 @@
 //! unprovable unless its real `DSB`+`TLBI` actually run, since only they advance
 //! the encapsulated tokens.
 use crate::hardware::spec::{MmuInstance, MmuS2MapToken, MmuTlbToken, MmuVmIdsToken};
-use crate::model::types::*;
+use crate::model::types::{GuestPage, S2Entry, VmId};
 use core::marker::PhantomData;
 use vstd::prelude::*;
-use vstd::tokens::InstanceId;
 
 verus! {
 
@@ -92,7 +91,6 @@ pub trait MmuInstr {
     /// visible to walkers; after a TLBI, it waits for the invalidation to complete
     /// on every PE in the domain.
     fn issue_dsb_ish();
-
 }
 
 /// Trusted **IOMMU (SMMU)** stage-2 maintenance instructions.
@@ -130,7 +128,9 @@ pub trait SmmuInstr {
 /// the CPU MMU ([`MmuInstr`]) and the SMMU ([`SmmuInstr`]).  It is only a marker, so
 /// every `I: HardwareInstr` bound (in `MemorySet`, `Zone`, `HvMem`, …) keeps working
 /// while the actual instructions are cleanly partitioned into the two regime traits.
-pub trait HardwareInstr: MmuInstr + SmmuInstr {}
+pub trait HardwareInstr: MmuInstr + SmmuInstr {
+
+}
 
 /// Concrete stage-2 hardware handle for **one regime** — the owner of that
 /// regime's `MmuSpec` instance and its global `tlb`/`vm_ids` tokens.  The
@@ -196,7 +196,6 @@ impl<I: HardwareInstr> MmuHardware<I> {
     // ── CPU MMU stage-2 maintenance ─────────────────────────────────────────────
     // Emit `MmuInstr` asm (`DSB ISH` / `TLBI IPAS2E1IS`) and run on the CPU MMU
     // instance.  The SMMU counterparts are further below.
-
     /// One per-page break-before-make step: the caller has written the PTE invalid;
     /// this issues the pre-TLBI `DSB ISH` (drops `(vm, gpa)` from the vm's slice)
     /// and the completed `TLBI IPAS2E1IS` broadcast (clears the page's cached
@@ -274,7 +273,6 @@ impl<I: HardwareInstr> MmuHardware<I> {
     // (the `MmuSpec` model is regime-agnostic), but they emit `SmmuInstr` command-
     // queue asm instead of CPU `DSB`/`TLBI`, and run on the separate `iommu_mmu`
     // instance — so their tokens never alias the CPU MMU's.
-
     /// SMMU counterpart of [`unmap_dsb_tlbi`](Self::unmap_dsb_tlbi): one per-page
     /// break-before-make unmap on the IOMMU regime.
     ///

@@ -1,7 +1,6 @@
 //! Executable page table implementation.
-use core::{alloc, marker::PhantomData};
+use core::marker::PhantomData;
 use vstd::prelude::*;
-use vstd::tokens::InstanceId;
 
 use super::{path::PTTreePath, spec_pt::SpecPageTable};
 use crate::{

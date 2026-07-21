@@ -1,6 +1,6 @@
 use vstd::prelude::*;
 
-use crate::model::types::*;
+use crate::model::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 
 verus! {
 

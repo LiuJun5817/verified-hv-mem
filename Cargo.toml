@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-vstd = { version = "0.0.0-2025-08-12-1837", default-features = false }
-bitflags = "2.1"
+vstd = { version = "0.0.0-2026-06-14-0213", default-features = false, features = ["alloc"] }
+verus_state_machines_macros = "0.0.0-2026-06-14-0213"
+spin = "0.10.0"

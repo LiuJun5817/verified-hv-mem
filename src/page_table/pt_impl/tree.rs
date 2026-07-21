@@ -2,10 +2,7 @@
 use vstd::prelude::*;
 
 use super::path::PTTreePath;
-use crate::address::{
-    addr::{SpecPAddr, SpecVAddr},
-    frame::SpecFrame,
-};
+use crate::address::{addr::SpecVAddr, frame::SpecFrame};
 use crate::page_table::{
     pt_arch::SpecPTArch,
     pt_trait::{PageTableState, PagingResult, SpecPTConstants},

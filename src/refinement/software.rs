@@ -31,24 +31,19 @@
 //! | §6 | transition-guard derivations                                        |
 //! | §7 | per-op projection-delta lemmas (consumed by the §8 impl)            |
 //! | §8 | the [`SoftwareRefinement`] contract + `impl for SoftwareSpec`       |
-use crate::address::addr::SpecVAddr;
-use crate::address::frame::SpecFrame;
-use crate::address::region::{MemoryRegion, SPEC_PAGE_SIZE};
-use crate::hv_mem::spec::budget::{
-    configured_regions_valid, gic_region, gic_region_disjoint_from_zones, zone_regions,
-    zone_regions_internal_disjoint, zone_regions_pairwise_disjoint, BudgetSpec,
-};
-use crate::hv_mem::spec::GhostZone;
-use crate::model::convert::{
-    attr_to_perms, frame_phys_page, frame_to_s2, gpa_of_vaddr, lemma_vaddr_of_gpa_injective,
-    phys_page_of_paddr, vaddr_of_gpa,
-};
-use crate::model::software::{Region, SoftwareView};
-use crate::model::types::*;
-use crate::memory_set::SpecMemorySet;
 use vstd::prelude::*;
 
 verus! {
+
+use crate::address::addr::SpecVAddr;
+use crate::address::frame::SpecFrame;
+use crate::address::region::*;
+use crate::hv_mem::spec::budget::*;
+use crate::hv_mem::spec::GhostZone;
+use crate::model::convert::*;
+use crate::model::software::{Region, SoftwareView};
+use crate::model::types::{GuestPage, PhysPage, S2Entry, SharedPage, VmId, VmPageKey};
+use crate::memory_set::SpecMemorySet;
 
 // ---------------------------------------------------------------------------
 // §1  Per-region geometry
@@ -393,9 +388,10 @@ pub open spec fn zone_iommu_s2_entries(zid: nat, gz: GhostZone) -> Map<VmPageKey
 pub open spec fn state_iommu_s2_map(s: BudgetSpec::State) -> Map<VmPageKey, S2Entry> {
     Map::new(
         |k: VmPageKey|
-            s.zone_ids.contains(k.vm.0) && zone_iommu_s2_entries(k.vm.0, s.zones[k.vm.0]).contains_key(
-                k,
-            ),
+            s.zone_ids.contains(k.vm.0) && zone_iommu_s2_entries(
+                k.vm.0,
+                s.zones[k.vm.0],
+            ).contains_key(k),
         |k: VmPageKey| zone_iommu_s2_entries(k.vm.0, s.zones[k.vm.0])[k],
     )
 }
@@ -519,9 +515,11 @@ pub proof fn lemma_zone_owned_pages_region_witness(gz: GhostZone, p: PhysPage)
 pub proof fn lemma_zone_iommu_s2_target_owned(zid: nat, gz: GhostZone)
     ensures
         forall|k: VmPageKey| #[trigger]
-            zone_iommu_s2_entries(zid, gz).contains_key(k)
-                ==> zone_iommu_private_pages(gz).contains(zone_iommu_s2_entries(zid, gz)[k].page)
-                    || is_gic_page(zone_iommu_s2_entries(zid, gz)[k].page),
+            zone_iommu_s2_entries(zid, gz).contains_key(k) ==> zone_iommu_private_pages(
+                gz,
+            ).contains(zone_iommu_s2_entries(zid, gz)[k].page) || is_gic_page(
+                zone_iommu_s2_entries(zid, gz)[k].page,
+            ),
 {
 }
 
@@ -544,8 +542,8 @@ pub proof fn lemma_zone_iommu_private_pages_region_witness(gz: GhostZone, p: Phy
     let (r, i) = choose|r: MemoryRegion, i: nat|
         gz.iommu_mem_set.regions.contains(r) && 0 <= i < r.pages && v == r.spec_page_vaddr(i) && f
             == r.spec_frame(i);
-    assert(gz.iommu_mem_set.regions.contains(r) && 0 <= i < r.pages && v == r.spec_page_vaddr(i) && f
-        == r.spec_frame(i));
+    assert(gz.iommu_mem_set.regions.contains(r) && 0 <= i < r.pages && v == r.spec_page_vaddr(i)
+        && f == r.spec_frame(i));
     assert(region_phys_page(r, i) == p);
     assert(region_owns_page(r, p));  // witness i
     // `p` is private => not a GIC page, so its backing region is not the GIC region
@@ -662,8 +660,9 @@ pub proof fn lemma_state_iommu_private_disjoint(s: BudgetSpec::State)
     assert forall|zid1: nat, zid2: nat, p: PhysPage|
         #![trigger zone_iommu_private_pages(s.zones[zid1]).contains(p), s.zones[zid2]]
         s.zones.contains_key(zid1) && s.zones.contains_key(zid2) && zid1 != zid2
-            && zone_iommu_private_pages(s.zones[zid1]).contains(p) implies
-            !zone_iommu_private_pages(s.zones[zid2]).contains(p) by {
+            && zone_iommu_private_pages(s.zones[zid1]).contains(
+            p,
+        ) implies !zone_iommu_private_pages(s.zones[zid2]).contains(p) by {
         if zone_iommu_private_pages(s.zones[zid2]).contains(p) {
             let gz1 = s.zones[zid1];
             let gz2 = s.zones[zid2];
@@ -671,10 +670,12 @@ pub proof fn lemma_state_iommu_private_disjoint(s: BudgetSpec::State)
             lemma_zone_iommu_private_pages_region_witness(gz2, p);
             let r1 = choose|r: MemoryRegion|
                 #![trigger gz1.iommu_mem_set.regions.contains(r)]
-                gz1.iommu_mem_set.regions.contains(r) && region_owns_page(r, p) && r != gic_region();
+                gz1.iommu_mem_set.regions.contains(r) && region_owns_page(r, p) && r
+                    != gic_region();
             let r2 = choose|r: MemoryRegion|
                 #![trigger gz2.iommu_mem_set.regions.contains(r)]
-                gz2.iommu_mem_set.regions.contains(r) && region_owns_page(r, p) && r != gic_region();
+                gz2.iommu_mem_set.regions.contains(r) && region_owns_page(r, p) && r
+                    != gic_region();
             // inv_iommu_in_zone_regions + non-GIC => both are private zone regions.
             assert(zone_regions(zid1).contains(r1) || r1 == gic_region());
             assert(zone_regions(zid2).contains(r2) || r2 == gic_region());
@@ -717,7 +718,8 @@ pub proof fn lemma_state_iommu_cpu_disjoint(s: BudgetSpec::State)
             lemma_zone_owned_pages_region_witness(gz2, p);
             let r1 = choose|r: MemoryRegion|
                 #![trigger gz1.iommu_mem_set.regions.contains(r)]
-                gz1.iommu_mem_set.regions.contains(r) && region_owns_page(r, p) && r != gic_region();
+                gz1.iommu_mem_set.regions.contains(r) && region_owns_page(r, p) && r
+                    != gic_region();
             let r2 = choose|r: MemoryRegion|
                 #![trigger gz2.cpu_mem_set.regions.contains(r)]
                 gz2.cpu_mem_set.regions.contains(r) && region_owns_page(r, p);
@@ -752,15 +754,11 @@ pub proof fn lemma_state_iommu_proj_unchanged(s1: SoftwareSpec, s2: SoftwareSpec
         s2@.iommu_shared =~= s1@.iommu_shared,
 {
     assert forall|k: VmPageKey|
-        s2@.iommu_s2_map.contains_key(k) == s1@.iommu_s2_map.contains_key(k)
-        && (s1@.iommu_s2_map.contains_key(k) ==> s2@.iommu_s2_map[k]
-            == s1@.iommu_s2_map[k]) by {
-    }
+        s2@.iommu_s2_map.contains_key(k) == s1@.iommu_s2_map.contains_key(k) && (
+        s1@.iommu_s2_map.contains_key(k) ==> s2@.iommu_s2_map[k] == s1@.iommu_s2_map[k]) by {}
     assert forall|vm: VmId|
-        s2@.iommu_owned.contains_key(vm) == s1@.iommu_owned.contains_key(vm)
-        && (s1@.iommu_owned.contains_key(vm) ==> s2@.iommu_owned[vm]
-            =~= s1@.iommu_owned[vm]) by {
-    }
+        s2@.iommu_owned.contains_key(vm) == s1@.iommu_owned.contains_key(vm) && (
+        s1@.iommu_owned.contains_key(vm) ==> s2@.iommu_owned[vm] =~= s1@.iommu_owned[vm]) by {}
 }
 
 /// The dual of [`lemma_state_iommu_proj_unchanged`]: an op that leaves every zone's
@@ -772,7 +770,8 @@ pub proof fn lemma_state_cpu_proj_unchanged(s1: SoftwareSpec, s2: SoftwareSpec)
         s2.budget.invariant(),
         s2.budget.zone_ids == s1.budget.zone_ids,
         forall|zid: nat| #[trigger]
-            s1.budget.zones.contains_key(zid) ==> s2.budget.zones[zid].cpu_mem_set == s1.budget.zones[zid].cpu_mem_set,
+            s1.budget.zones.contains_key(zid) ==> s2.budget.zones[zid].cpu_mem_set
+                == s1.budget.zones[zid].cpu_mem_set,
     ensures
         s2@.all_vms =~= s1@.all_vms,
         s2@.vm_owned =~= s1@.vm_owned,
@@ -782,26 +781,29 @@ pub proof fn lemma_state_cpu_proj_unchanged(s1: SoftwareSpec, s2: SoftwareSpec)
 {
     assert forall|vm: VmId|
         s2@.vm_owned.contains_key(vm) == s1@.vm_owned.contains_key(vm) && (
-        s1@.vm_owned.contains_key(vm) ==> s2@.vm_owned[vm] =~= s1@.vm_owned[vm])
-        by {
-    }
+        s1@.vm_owned.contains_key(vm) ==> s2@.vm_owned[vm] =~= s1@.vm_owned[vm]) by {}
     assert forall|k: VmPageKey|
-        s2@.s2_map.contains_key(k) == s1@.s2_map.contains_key(k) && (
-        s1@.s2_map.contains_key(k) ==> s2@.s2_map[k] == s1@.s2_map[k]) by {
-    }
+        s2@.s2_map.contains_key(k) == s1@.s2_map.contains_key(k) && (s1@.s2_map.contains_key(k)
+            ==> s2@.s2_map[k] == s1@.s2_map[k]) by {}
     // hypervisor_owned = all_budget \ all_owned; all_owned is the union of each zone's
     // `zone_owned_pages` (a function of `cpu_mem_set` only), so it is unchanged.
     assert(all_owned_pages(s2.budget.zones) =~= all_owned_pages(s1.budget.zones)) by {
         assert forall|p: PhysPage|
-            all_owned_pages(s2.budget.zones).contains(p) <==> all_owned_pages(s1.budget.zones).contains(p) by {
+            all_owned_pages(s2.budget.zones).contains(p) <==> all_owned_pages(
+                s1.budget.zones,
+            ).contains(p) by {
             if all_owned_pages(s2.budget.zones).contains(p) {
                 let z = choose|z: nat| #[trigger]
-                    s2.budget.zones.contains_key(z) && zone_owned_pages(s2.budget.zones[z]).contains(p);
+                    s2.budget.zones.contains_key(z) && zone_owned_pages(
+                        s2.budget.zones[z],
+                    ).contains(p);
                 lemma_zone_owned_in_all_owned(s1.budget.zones, z, p);
             }
             if all_owned_pages(s1.budget.zones).contains(p) {
                 let z = choose|z: nat| #[trigger]
-                    s1.budget.zones.contains_key(z) && zone_owned_pages(s1.budget.zones[z]).contains(p);
+                    s1.budget.zones.contains_key(z) && zone_owned_pages(
+                        s1.budget.zones[z],
+                    ).contains(p);
                 lemma_zone_owned_in_all_owned(s2.budget.zones, z, p);
             }
         }
@@ -826,14 +828,14 @@ pub proof fn lemma_reachable_iommu_separation(s: SoftwareSpec)
     // Bridge: for an active VM, its projected `iommu_owned` set is exactly its private
     // DMA pages, and `iommu_shared` membership is exactly GIC-membership.
     assert forall|vm: VmId| sw.all_vms.contains(vm) implies #[trigger] sw.iommu_owned[vm]
-        == zone_iommu_private_pages(s.budget.zones[vm.0]) by {
-    }
+        == zone_iommu_private_pages(s.budget.zones[vm.0]) by {}
 
     // iommu_translation_wf: every IOMMU entry targets a private DMA page or a shared GIC page.
     assert forall|key: VmPageKey| #[trigger] sw.iommu_s2_map.contains_key(key) implies (
-    sw.all_vms.contains(key.vm) && sw.iommu_owned.contains_key(key.vm)
-        && (sw.iommu_owned[key.vm].contains(sw.iommu_s2_map[key].page)
-            || sw.iommu_shared.contains(sw.iommu_s2_map[key].page))) by {
+    sw.all_vms.contains(key.vm) && sw.iommu_owned.contains_key(key.vm) && (
+    sw.iommu_owned[key.vm].contains(sw.iommu_s2_map[key].page) || sw.iommu_shared.contains(
+        sw.iommu_s2_map[key].page,
+    ))) by {
         lemma_zone_iommu_s2_target_owned(key.vm.0, s.budget.zones[key.vm.0]);
         let p = sw.iommu_s2_map[key].page;
         // The entry's target is private (⇒ `iommu_owned[key.vm]`) or a GIC page (⇒ `iommu_shared`).
@@ -848,29 +850,31 @@ pub proof fn lemma_reachable_iommu_separation(s: SoftwareSpec)
     lemma_state_iommu_private_disjoint(s.budget);
     lemma_state_iommu_cpu_disjoint(s.budget);
     // (1)
-    assert forall|vm1: VmId, vm2: VmId| #[trigger] sw.all_vms.contains(vm1) && #[trigger]
-        sw.all_vms.contains(vm2) && vm1 != vm2 implies (forall|page: PhysPage| #[trigger]
-        sw.iommu_owned[vm1].contains(page) ==> !sw.iommu_owned[vm2].contains(page)) by {
-    }
+    assert forall|vm1: VmId, vm2: VmId| #[trigger]
+        sw.all_vms.contains(vm1) && #[trigger] sw.all_vms.contains(vm2) && vm1 != vm2 implies (
+    forall|page: PhysPage| #[trigger]
+        sw.iommu_owned[vm1].contains(page) ==> !sw.iommu_owned[vm2].contains(page)) by {}
     // (2)
-    assert forall|vm1: VmId, vm2: VmId| #[trigger] sw.all_vms.contains(vm1) && #[trigger]
-        sw.all_vms.contains(vm2) && vm1 != vm2 implies (forall|page: PhysPage| #[trigger]
-        sw.iommu_owned[vm1].contains(page) ==> !sw.vm_owned[vm2].contains(page)) by {
-    }
+    assert forall|vm1: VmId, vm2: VmId| #[trigger]
+        sw.all_vms.contains(vm1) && #[trigger] sw.all_vms.contains(vm2) && vm1 != vm2 implies (
+    forall|page: PhysPage| #[trigger]
+        sw.iommu_owned[vm1].contains(page) ==> !sw.vm_owned[vm2].contains(page)) by {}
     // (3) private pages are non-GIC by construction, so disjoint from `iommu_shared`.
     assert forall|vm: VmId| #[trigger] sw.all_vms.contains(vm) implies (forall|page: PhysPage|
-        #[trigger] sw.iommu_owned[vm].contains(page) ==> !sw.iommu_shared.contains(page)) by {
-        assert forall|page: PhysPage| #[trigger] sw.iommu_owned[vm].contains(page) implies
-            !sw.iommu_shared.contains(page) by {
+     #[trigger]
+        sw.iommu_owned[vm].contains(page) ==> !sw.iommu_shared.contains(page)) by {
+        assert forall|page: PhysPage| #[trigger]
+            sw.iommu_owned[vm].contains(page) implies !sw.iommu_shared.contains(page) by {
             assert(zone_iommu_private_pages(s.budget.zones[vm.0]).contains(page));
         }
     }
     // (4) CPU-owned pages are disjoint from the shared GIC: a CPU page is backed by a zone
     // region, and the GIC is pmem-disjoint from every zone's regions.
     assert forall|vm: VmId| #[trigger] sw.all_vms.contains(vm) implies (forall|page: PhysPage|
-        #[trigger] sw.vm_owned[vm].contains(page) ==> !sw.iommu_shared.contains(page)) by {
-        assert forall|page: PhysPage| #[trigger] sw.vm_owned[vm].contains(page) implies
-            !sw.iommu_shared.contains(page) by {
+     #[trigger]
+        sw.vm_owned[vm].contains(page) ==> !sw.iommu_shared.contains(page)) by {
+        assert forall|page: PhysPage| #[trigger]
+            sw.vm_owned[vm].contains(page) implies !sw.iommu_shared.contains(page) by {
             let gz = s.budget.zones[vm.0];
             lemma_zone_owned_pages_region_witness(gz, page);
             let r = choose|rr: MemoryRegion| #[trigger]
@@ -1133,9 +1137,10 @@ pub proof fn lemma_insert_region_s2_entries(zid: nat, gz: GhostZone, r: MemoryRe
         r.spec_valid(),
         !gz.cpu_mem_set.overlaps_vmem(r),
     ensures
-        zone_s2_entries(zid, gz.cpu_insert_region(r)) =~= zone_s2_entries(zid, gz).union_prefer_right(
-            region_s2_entries(zid, r),
-        ),
+        zone_s2_entries(zid, gz.cpu_insert_region(r)) =~= zone_s2_entries(
+            zid,
+            gz,
+        ).union_prefer_right(region_s2_entries(zid, r)),
 {
     let new_gz = gz.cpu_insert_region(r);
     let om = gz.cpu_mem_set.mappings;
@@ -1210,7 +1215,9 @@ pub proof fn lemma_remove_region_owned_pages(gz: GhostZone, r: MemoryRegion)
         gz.cpu_mem_set.regions.contains(r),
         region_pmem_exclusive(gz, r),
     ensures
-        zone_owned_pages(gz.cpu_remove_region(r)) =~= zone_owned_pages(gz).difference(region_pages(r)),
+        zone_owned_pages(gz.cpu_remove_region(r)) =~= zone_owned_pages(gz).difference(
+            region_pages(r),
+        ),
 {
     let new_gz = gz.cpu_remove_region(r);
     let om = gz.cpu_mem_set.mappings;
@@ -1279,9 +1286,8 @@ pub proof fn lemma_remove_region_all_owned(pre: BudgetSpec::State, zid: nat, r: 
         pre.zones[zid].cpu_mem_set.regions.contains(r),
         region_pmem_exclusive(pre.zones[zid], r),
     ensures
-        all_owned_pages(pre.zones.insert(zid, pre.zones[zid].cpu_remove_region(r))) =~= all_owned_pages(
-            pre.zones,
-        ).difference(region_pages(r)),
+        all_owned_pages(pre.zones.insert(zid, pre.zones[zid].cpu_remove_region(r)))
+            =~= all_owned_pages(pre.zones).difference(region_pages(r)),
 {
     let zones = pre.zones;
     let zones2 = zones.insert(zid, zones[zid].cpu_remove_region(r));
@@ -1451,24 +1457,26 @@ pub proof fn lemma_iommu_insert_region_private_pages(gz: GhostZone, region: Memo
             }
         }
         // (⟸ old)
+
         if zone_iommu_private_pages(gz).contains(p) {
             assert(!is_gic_page(p));
             let v = choose|v: SpecVAddr| #[trigger]
                 om.contains_key(v) && frame_phys_page(om[v]) == p;
             assert(!rm.contains_key(v));
-            assert(new_gz.iommu_mem_set.mappings.contains_key(v)
-                && new_gz.iommu_mem_set.mappings[v] == om[v]);
+            assert(new_gz.iommu_mem_set.mappings.contains_key(v) && new_gz.iommu_mem_set.mappings[v]
+                == om[v]);
             assert(zone_iommu_private_pages(new_gz).contains(p));  // witness v
         }
         // (⟸ region)
+
         if region_pages(region).contains(p) {
             assert(!is_gic_page(p));  // hypothesis
             let i = choose|i: nat| 0 <= i < region.pages && region_phys_page(region, i) == p;
             region.lemma_mappings_contains_pair(i);
             let v = region.spec_page_vaddr(i);
             assert(rm.contains_pair(v, region.spec_frame(i)));
-            assert(new_gz.iommu_mem_set.mappings.contains_key(v)
-                && new_gz.iommu_mem_set.mappings[v] == region.spec_frame(i));
+            assert(new_gz.iommu_mem_set.mappings.contains_key(v) && new_gz.iommu_mem_set.mappings[v]
+                == region.spec_frame(i));
             assert(frame_phys_page(region.spec_frame(i)) == p);
             assert(zone_iommu_private_pages(new_gz).contains(p));  // witness v
         }
@@ -1601,6 +1609,7 @@ pub proof fn lemma_iommu_remove_region_private_pages(gz: GhostZone, r: MemoryReg
             }
         }
         // (⟸)
+
         if zone_iommu_private_pages(gz).contains(p) && !region_pages(r).contains(p) {
             assert(!is_gic_page(p));
             let v = choose|v: SpecVAddr| #[trigger]
@@ -1861,7 +1870,9 @@ impl SoftwareRefinement for SoftwareSpec {
             ).contains(pp) by {
                 let zid = choose|zid: nat|
                     #![auto]
-                    post.budget.zones.contains_key(zid) && zone_owned_pages(post.budget.zones[zid]).contains(pp);
+                    post.budget.zones.contains_key(zid) && zone_owned_pages(
+                        post.budget.zones[zid],
+                    ).contains(pp);
                 lemma_zone_owned_in_all_owned(self.budget.zones, zid, pp);
             }
             assert forall|pp: PhysPage|
@@ -1870,7 +1881,9 @@ impl SoftwareRefinement for SoftwareSpec {
             ).contains(pp) by {
                 let zid = choose|zid: nat|
                     #![auto]
-                    self.budget.zones.contains_key(zid) && zone_owned_pages(self.budget.zones[zid]).contains(pp);
+                    self.budget.zones.contains_key(zid) && zone_owned_pages(
+                        self.budget.zones[zid],
+                    ).contains(pp);
                 lemma_zone_owned_in_all_owned(post.budget.zones, zid, pp);
             }
         }
@@ -1901,7 +1914,9 @@ impl SoftwareRefinement for SoftwareSpec {
             ).contains(pp) by {
                 let zid = choose|zid: nat|
                     #![auto]
-                    self.budget.zones.contains_key(zid) && zone_owned_pages(self.budget.zones[zid]).contains(pp);
+                    self.budget.zones.contains_key(zid) && zone_owned_pages(
+                        self.budget.zones[zid],
+                    ).contains(pp);
                 lemma_zone_owned_in_all_owned(post.budget.zones, zid, pp);
             }
             assert forall|pp: PhysPage|
@@ -1910,7 +1925,9 @@ impl SoftwareRefinement for SoftwareSpec {
             ).contains(pp) by {
                 let zid = choose|zid: nat|
                     #![auto]
-                    post.budget.zones.contains_key(zid) && zone_owned_pages(post.budget.zones[zid]).contains(pp);
+                    post.budget.zones.contains_key(zid) && zone_owned_pages(
+                        post.budget.zones[zid],
+                    ).contains(pp);
                 lemma_zone_owned_in_all_owned(self.budget.zones, zid, pp);
             }
         }
@@ -1973,9 +1990,14 @@ impl SoftwareRefinement for SoftwareSpec {
         }
         // (4) Fire the `insert_region` macro transition; `post.invariant()` from the macro.
 
-        let post = SoftwareSpec { budget: BudgetSpec::take_step::cpu_insert_region(self.budget, zid, r) };
+        let post = SoftwareSpec {
+            budget: BudgetSpec::take_step::cpu_insert_region(self.budget, zid, r),
+        };
         assert(post.budget.zone_ids == self.budget.zone_ids);
-        assert(post.budget.zones == self.budget.zones.insert(zid, self.budget.zones[zid].cpu_insert_region(r)));
+        assert(post.budget.zones == self.budget.zones.insert(
+            zid,
+            self.budget.zones[zid].cpu_insert_region(r),
+        ));
 
         // (5) Projection deltas ⇒ the SoftwareView step.
         lemma_insert_region_owned_pages(self.budget.zones[zid], r);
@@ -2045,9 +2067,14 @@ impl SoftwareRefinement for SoftwareSpec {
         }
 
         // (4) Fire the `remove_region` macro transition; `post.invariant()` from the macro.
-        let post = SoftwareSpec { budget: BudgetSpec::take_step::cpu_remove_region(self.budget, zid, r) };
+        let post = SoftwareSpec {
+            budget: BudgetSpec::take_step::cpu_remove_region(self.budget, zid, r),
+        };
         assert(post.budget.zone_ids == self.budget.zone_ids);
-        assert(post.budget.zones == self.budget.zones.insert(zid, self.budget.zones[zid].cpu_remove_region(r)));
+        assert(post.budget.zones == self.budget.zones.insert(
+            zid,
+            self.budget.zones[zid].cpu_remove_region(r),
+        ));
 
         // (5) Projection deltas ⇒ the SoftwareView step.
         lemma_region_pages_in_all_budget(zid, r);  // r's pages are budget pages (pool algebra)
@@ -2109,6 +2136,7 @@ impl SoftwareRefinement for SoftwareSpec {
             assert(false);
         }
         // !overlaps_vmem(r): an overlapping IOMMU region shares a mapped gpa.
+
         if gz.iommu_mem_set.overlaps_vmem(r) {
             let r2 = choose|r2: MemoryRegion| #[trigger]
                 gz.iommu_mem_set.regions.contains(r2) && r2.spec_overlaps_vmem(r);
@@ -2124,11 +2152,16 @@ impl SoftwareRefinement for SoftwareSpec {
             assert(!self@.iommu_s2_map.contains_key(k));  // freshness - contradiction
             assert(false);
         }
-
         // (4) Fire the `iommu_insert_region` macro transition.
-        let post = SoftwareSpec { budget: BudgetSpec::take_step::iommu_insert_region(self.budget, zid, r) };
+
+        let post = SoftwareSpec {
+            budget: BudgetSpec::take_step::iommu_insert_region(self.budget, zid, r),
+        };
         assert(post.budget.zone_ids == self.budget.zone_ids);
-        assert(post.budget.zones == self.budget.zones.insert(zid, self.budget.zones[zid].iommu_insert_region(r)));
+        assert(post.budget.zones == self.budget.zones.insert(
+            zid,
+            self.budget.zones[zid].iommu_insert_region(r),
+        ));
 
         // (5) Projection deltas ⇒ the SoftwareView step.
         lemma_iommu_insert_region_private_pages(self.budget.zones[zid], r);
@@ -2140,7 +2173,10 @@ impl SoftwareRefinement for SoftwareSpec {
         )) by {
             assert forall|w: VmId| #[trigger]
                 post@.iommu_owned.contains_key(w) implies post@.iommu_owned[w]
-                =~= self@.iommu_owned.insert(vm, self@.iommu_owned[vm].union(region.pages()))[w] by {
+                =~= self@.iommu_owned.insert(
+                vm,
+                self@.iommu_owned[vm].union(region.pages()),
+            )[w] by {
                 if w.0 != zid {
                 }
             }
@@ -2177,8 +2213,7 @@ impl SoftwareRefinement for SoftwareSpec {
         assert(self@.iommu_owned[vm] == zone_iommu_private_pages(gz));  // view
         lemma_zone_iommu_private_pages_region_witness(gz, p0);
         let r2 = choose|rr: MemoryRegion| #[trigger]
-            gz.iommu_mem_set.regions.contains(rr) && region_owns_page(rr, p0) && rr
-                != gic_region();
+            gz.iommu_mem_set.regions.contains(rr) && region_owns_page(rr, p0) && rr != gic_region();
         assert(gz.iommu_mem_set.regions.contains(r2));
         assert(zone_regions(zid).contains(r2) || r2 == gic_region());  // inv_iommu_in_zone_regions
         assert(zone_regions(zid).contains(r2));
@@ -2213,9 +2248,14 @@ impl SoftwareRefinement for SoftwareSpec {
         }
 
         // (4) Fire the `iommu_remove_region` macro transition.
-        let post = SoftwareSpec { budget: BudgetSpec::take_step::iommu_remove_region(self.budget, zid, r) };
+        let post = SoftwareSpec {
+            budget: BudgetSpec::take_step::iommu_remove_region(self.budget, zid, r),
+        };
         assert(post.budget.zone_ids == self.budget.zone_ids);
-        assert(post.budget.zones == self.budget.zones.insert(zid, self.budget.zones[zid].iommu_remove_region(r)));
+        assert(post.budget.zones == self.budget.zones.insert(
+            zid,
+            self.budget.zones[zid].iommu_remove_region(r),
+        ));
 
         // (5) Projection deltas ⇒ the SoftwareView step.
         lemma_iommu_remove_region_private_pages(self.budget.zones[zid], r);
@@ -2227,8 +2267,10 @@ impl SoftwareRefinement for SoftwareSpec {
         )) by {
             assert forall|w: VmId| #[trigger]
                 post@.iommu_owned.contains_key(w) implies post@.iommu_owned[w]
-                =~= self@.iommu_owned.insert(vm, self@.iommu_owned[vm].difference(region.pages()))[w]
-                by {
+                =~= self@.iommu_owned.insert(
+                vm,
+                self@.iommu_owned[vm].difference(region.pages()),
+            )[w] by {
                 if w.0 != zid {
                 }
             }

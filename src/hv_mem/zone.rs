@@ -8,7 +8,6 @@
 //! The CPU and IOMMU memory sets are kept in sync with slice tokens from separate
 //! tokenized MMU instances.
 use super::protocol::{BudgetGlobalState, BudgetProtocol, ZoneGhostProtocol, ZoneStateOps};
-use super::spec::budget::{gic_region, zone_regions};
 use crate::{
     address::region::MemoryRegion,
     bitmap_allocator::bitmap_trait::BitmapAllocator,
@@ -16,7 +15,6 @@ use crate::{
     hardware::spec::MmuS2MapToken,
     hardware::{HardwareInstr, MmuHardware},
     memory_set::MemorySet,
-    model::convert::pt_s2map_inner,
     model::types::VmId,
     page_table::{PageTable, SpecPTConstants},
     sync::rwlock::{RwLock, RwReadGuard, RwWriteGuard},
@@ -30,6 +28,9 @@ use vstd::{
 };
 
 verus! {
+
+use super::spec::budget::*;
+use crate::model::convert::*;
 
 /// Ghost key for a `Zone`'s `RwLock`.
 ///

@@ -10,12 +10,12 @@ use vstd::prelude::*;
 
 pub use budget::{BudgetSpec, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken};
 pub use closure::{
-    all_regions, all_regions_disjoint, all_regions_valid, cpu_insert_region_allowed, gic_region,
-    gic_region_in_all_regions, iommu_insert_region_allowed, ClosureSpec, ClosureSpecInstance,
-    ClosureZoneIdsToken, ClosureZoneToken, ClosureZonesViewToken,
+    ClosureSpec, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken, ClosureZonesViewToken,
 };
 
 verus! {
+
+pub use closure::*;
 
 /// Ghost state for one zone tracked inside `ClosureSpec` or `BudgetSpec`.
 ///

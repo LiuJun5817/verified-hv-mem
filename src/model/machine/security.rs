@@ -724,8 +724,11 @@ impl MachineState {
         // The effective DMA entry's page is the IOMMU stage-2 map's page for `(vm, gpa)`:
         // a cached SMMU-TLB entry agrees with the reachable map (`iommu_tlb_safe`), which
         // equals the software map (`iommu_sync`); otherwise the entry *is* the map entry.
-        assert(s.iommu_s2_map.contains_key(sk)
-            && s.iommu_effective_entry(stream, vm, gpa)->Some_0.page == s.iommu_s2_map[sk].page) by {
+        assert(s.iommu_s2_map.contains_key(sk) && s.iommu_effective_entry(
+            stream,
+            vm,
+            gpa,
+        )->Some_0.page == s.iommu_s2_map[sk].page) by {
             assert(s.iommu_sync());
             if s.iommu_tlb.contains_key(key) {
                 assert(s.iommu_tlb_safe());

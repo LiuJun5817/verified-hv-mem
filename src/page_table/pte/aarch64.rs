@@ -23,22 +23,31 @@ verus! {
 // address payload. Higher architectural descriptor fields are outside this PTE
 // abstraction.
 pub const VALID: u64 = 1 << 0;
+
 /// Table or 4K-page descriptor rather than a block descriptor.
 pub const NON_BLOCK: u64 = 1 << 1;
+
 /// Four-bit stage-2 memory-attribute field.
 pub const ATTR_MASK: u64 = 0b1111 << 2;
+
 /// Device-nGnRE memory encoding used by the reference implementation.
 pub const DEVICE_ATTR: u64 = 1 << 2;
+
 /// Normal, inner/outer write-back cacheable memory encoding.
 pub const NORMAL_ATTR: u64 = 0b1111 << 2;
+
 /// Stage-2 read permission.
 pub const S2AP_R: u64 = 1 << 6;
+
 /// Stage-2 write permission.
 pub const S2AP_W: u64 = 1 << 7;
+
 /// Select Inner Shareable rather than Outer Shareable.
 pub const INNER: u64 = 1 << 8;
+
 /// Select a shareable domain rather than Non-shareable.
 pub const SHAREABLE: u64 = 1 << 9;
+
 /// Access flag.
 pub const AF: u64 = 1 << 10;
 
@@ -62,12 +71,26 @@ impl Aarch64PTE {
     /// software `huge` mapping is a hardware block descriptor, so it clears the
     /// architectural `NON_BLOCK` bit.
     pub open spec fn spec_descriptor_flags(attr: MemAttr, huge: bool) -> u64 {
-        let mem_type = if attr.device { DEVICE_ATTR } else {
+        let mem_type = if attr.device {
+            DEVICE_ATTR
+        } else {
             NORMAL_ATTR | INNER | SHAREABLE
         };
-        let readable = if attr.readable { S2AP_R } else { 0 };
-        let writable = if attr.writable { S2AP_W } else { 0 };
-        let non_block = if huge { 0 } else { NON_BLOCK };
+        let readable = if attr.readable {
+            S2AP_R
+        } else {
+            0
+        };
+        let writable = if attr.writable {
+            S2AP_W
+        } else {
+            0
+        };
+        let non_block = if huge {
+            0
+        } else {
+            NON_BLOCK
+        };
         VALID | AF | mem_type | readable | writable | non_block
     }
 
@@ -75,12 +98,26 @@ impl Aarch64PTE {
         ensures
             res == Self::spec_descriptor_flags(attr, huge),
     {
-        let mem_type = if attr.device { DEVICE_ATTR } else {
+        let mem_type = if attr.device {
+            DEVICE_ATTR
+        } else {
             NORMAL_ATTR | INNER | SHAREABLE
         };
-        let readable = if attr.readable { S2AP_R } else { 0 };
-        let writable = if attr.writable { S2AP_W } else { 0 };
-        let non_block = if huge { 0 } else { NON_BLOCK };
+        let readable = if attr.readable {
+            S2AP_R
+        } else {
+            0
+        };
+        let writable = if attr.writable {
+            S2AP_W
+        } else {
+            0
+        };
+        let non_block = if huge {
+            0
+        } else {
+            NON_BLOCK
+        };
         VALID | AF | mem_type | readable | writable | non_block
     }
 }
@@ -91,10 +128,7 @@ impl PageTableEntry for Aarch64PTE {
     }
 
     open spec fn spec_new(addr: SpecPAddr, attr: MemAttr, huge: bool) -> Self {
-        Self {
-            value: ((addr.0 as u64) & PHYS_ADDR_MASK)
-                | Self::spec_descriptor_flags(attr, huge),
-        }
+        Self { value: ((addr.0 as u64) & PHYS_ADDR_MASK) | Self::spec_descriptor_flags(attr, huge) }
     }
 
     open spec fn spec_empty() -> Self {
@@ -186,12 +220,26 @@ impl PageTableEntry for Aarch64PTE {
         let flags = Self::spec_descriptor_flags(attr, huge);
         let raw_addr = addr.0 as u64;
         let value = pte.value;
-        let mem_type = if attr.device { DEVICE_ATTR } else {
+        let mem_type = if attr.device {
+            DEVICE_ATTR
+        } else {
             NORMAL_ATTR | INNER | SHAREABLE
         };
-        let readable = if attr.readable { S2AP_R } else { 0 };
-        let writable = if attr.writable { S2AP_W } else { 0 };
-        let non_block = if huge { 0 } else { NON_BLOCK };
+        let readable = if attr.readable {
+            S2AP_R
+        } else {
+            0
+        };
+        let writable = if attr.writable {
+            S2AP_W
+        } else {
+            0
+        };
+        let non_block = if huge {
+            0
+        } else {
+            NON_BLOCK
+        };
 
         assert(raw_addr % 4096 == 0);
         assert(flags == VALID | AF | mem_type | readable | writable | non_block);

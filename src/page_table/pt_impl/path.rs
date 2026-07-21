@@ -1,11 +1,12 @@
 //! Visit path of the page table tree model.
-use vstd::arithmetic::mul::{lemma_mul_is_distributive_add_other_way, lemma_mul_strictly_positive};
 use vstd::prelude::*;
 
 use crate::address::addr::SpecVAddr;
 use crate::page_table::pt_arch::SpecPTArch;
 
 verus! {
+
+use vstd::arithmetic::mul::*;
 
 /// Represents a path from a node to an entry in the page table tree.
 ///
@@ -756,10 +757,7 @@ impl PTTreePath {
             path == Self::from_vaddr_root(vaddr, arch, (path.len() - 1) as nat),
             path.has_prefix(pref),
         ensures
-            vaddr.within(
-                pref.to_vaddr(arch),
-                arch.frame_size((pref.len() - 1) as nat).as_nat(),
-            ),
+            vaddr.within(pref.to_vaddr(arch), arch.frame_size((pref.len() - 1) as nat).as_nat()),
     {
         Self::lemma_vaddr_within_path_range(arch, vaddr, path);
         Self::lemma_to_vaddr_lower_bound(arch, path, pref);
@@ -768,10 +766,7 @@ impl PTTreePath {
         let path_size = arch.frame_size((path.len() - 1) as nat).as_nat();
         let pref_size = arch.frame_size((pref.len() - 1) as nat).as_nat();
         if pref.len() < path.len() {
-            arch.lemma_frame_size_monotonic(
-                (pref.len() - 1) as nat,
-                (path.len() - 1) as nat,
-            );
+            arch.lemma_frame_size_monotonic((pref.len() - 1) as nat, (path.len() - 1) as nat);
         }
         assert(path_size <= pref_size);
     }

@@ -3,14 +3,12 @@ use core::marker::PhantomData;
 use vstd::prelude::*;
 
 use super::{
-    path::*,
+    path::PTTreePath,
     tree::{NodeEntry, PTTreeModel, PTTreeNode},
 };
 use crate::page_table::{
-    pt_arch::SpecPTArch,
     pt_mem::SpecPageTableMem,
     pt_trait::{PagingResult, SpecPTConstants},
-    pte,
 };
 use crate::{
     address::{

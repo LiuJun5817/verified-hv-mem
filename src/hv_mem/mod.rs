@@ -18,6 +18,8 @@ pub mod protocol;
 pub mod spec;
 pub mod zone;
 
+extern crate alloc;
+
 use crate::{
     address::frame::FrameSize,
     address::region::MemoryRegion,
@@ -25,23 +27,25 @@ use crate::{
     global_allocator::GlobalAllocator,
     hardware::{HardwareInstr, MmuHardware},
     memory_set::{MemorySet, SpecMemorySet},
-    model::convert::pt_s2map_inner,
     model::types::{GuestPage, S2Entry, VmId},
     page_table::{PTConstants, PageTable, SpecPTConstants},
-    sync::rwlock::{RwLock, RwReadGuard, RwReaderToken, RwWriteGuard, RwWriterToken},
+    sync::rwlock::{RwLock, RwWriteGuard},
 };
+use alloc::vec::Vec;
 use core::marker::PhantomData;
-use protocol::{BudgetProtocol, ZoneGhostProtocol, ZoneStateOps};
-use spec::budget::{gic_region, zone_regions};
+use protocol::{BudgetProtocol, ZoneGhostProtocol};
 use vstd::invariant::InvariantPredicate;
 use vstd::{
     cell::{CellId, PCell, PointsTo},
     prelude::*,
     tokens::InstanceId,
 };
-use zone::{Zone, ZoneKey, ZoneRwContent};
+use zone::{Zone, ZoneRwContent};
 
 verus! {
+
+use crate::model::convert::*;
+use spec::budget::*;
 
 /// Ghost key for `HvMem`'s outer `RwLock`.
 ///

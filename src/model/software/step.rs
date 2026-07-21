@@ -1,7 +1,7 @@
 use vstd::prelude::*;
 
 use super::{Region, SoftwareView};
-use crate::model::types::*;
+use crate::model::types::{GuestPage, PhysPage, S2Entry, SharedPage, VmId, VmPageKey};
 
 verus! {
 
@@ -28,7 +28,10 @@ impl SoftwareView {
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.shared_pages == s1.shared_pages
-        &&& s2.s2_map == s1.s2_map.insert(key, entry)
+        &&& s2.s2_map == s1.s2_map.insert(
+            key,
+            entry,
+        )
         // A CPU stage-2 edit leaves the IOMMU contexts untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_owned == s1.iommu_owned
@@ -48,7 +51,9 @@ impl SoftwareView {
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.shared_pages == s1.shared_pages
-        &&& s2.s2_map == s1.s2_map.remove(key)
+        &&& s2.s2_map == s1.s2_map.remove(
+            key,
+        )
         // A CPU stage-2 edit leaves the IOMMU contexts untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_owned == s1.iommu_owned
@@ -111,7 +116,9 @@ impl SoftwareView {
         page: PhysPage,
     ) -> bool {
         &&& s1.all_vms.contains(vm)
-        &&& s1.hypervisor_owned.contains(page)
+        &&& s1.hypervisor_owned.contains(
+            page,
+        )
         // IOMMU-aware guard: the page handed to `vm`'s CPU ownership must not be another
         // VM's private DMA page (else `iommu_ownership_wf` clause (2) would break) nor a
         // shared (GIC) page (else clause (4) would break).
@@ -122,7 +129,8 @@ impl SoftwareView {
         &&& s2.hypervisor_owned == s1.hypervisor_owned.remove(page)
         &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].insert(page))
         &&& s2.shared_pages == s1.shared_pages
-        &&& s2.s2_map == s1.s2_map
+        &&& s2.s2_map
+            == s1.s2_map
         // Ownership transfer on the CPU side leaves the IOMMU contexts untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_owned == s1.iommu_owned
@@ -142,7 +150,8 @@ impl SoftwareView {
         &&& s2.hypervisor_owned == s1.hypervisor_owned.insert(page)
         &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].remove(page))
         &&& s2.shared_pages == s1.shared_pages
-        &&& s2.s2_map == s1.s2_map
+        &&& s2.s2_map
+            == s1.s2_map
         // Ownership transfer on the CPU side leaves the IOMMU contexts untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_owned == s1.iommu_owned
@@ -165,7 +174,9 @@ impl SoftwareView {
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.s2_map == s1.s2_map
-        &&& s2.shared_pages == s1.shared_pages.insert(edge).insert(edge.reverse())
+        &&& s2.shared_pages == s1.shared_pages.insert(edge).insert(
+            edge.reverse(),
+        )
         // CPU sharing does not touch the IOMMU contexts.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_owned == s1.iommu_owned
@@ -186,7 +197,9 @@ impl SoftwareView {
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.s2_map == s1.s2_map
-        &&& s2.shared_pages == s1.shared_pages.remove(edge).remove(edge.reverse())
+        &&& s2.shared_pages == s1.shared_pages.remove(edge).remove(
+            edge.reverse(),
+        )
         // CPU sharing does not touch the IOMMU contexts.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_owned == s1.iommu_owned
@@ -205,7 +218,8 @@ impl SoftwareView {
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned.insert(vm, Set::empty())
         &&& s2.shared_pages == s1.shared_pages
-        &&& s2.s2_map == s1.s2_map
+        &&& s2.s2_map
+            == s1.s2_map
         // The fresh VM owns nothing for DMA either; `iommu_owned` tracks `all_vms`.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_owned == s1.iommu_owned.insert(vm, Set::empty())
@@ -218,7 +232,8 @@ impl SoftwareView {
         &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned.remove(vm)
         &&& s2.shared_pages == s1.shared_pages
-        &&& s2.s2_map == s1.s2_map
+        &&& s2.s2_map
+            == s1.s2_map
         // Drop the VM's (empty) DMA ownership; `iommu_owned` tracks `all_vms`.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_owned == s1.iommu_owned.remove(vm)
@@ -238,7 +253,9 @@ impl SoftwareView {
             s1.vm_owned[region.vm].union(region.pages()),
         )
         &&& s2.shared_pages == s1.shared_pages
-        &&& s2.s2_map == s1.s2_map.union_prefer_right(region.entries())
+        &&& s2.s2_map == s1.s2_map.union_prefer_right(
+            region.entries(),
+        )
         // A CPU region insert leaves the IOMMU contexts untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_owned == s1.iommu_owned
@@ -258,7 +275,9 @@ impl SoftwareView {
             s1.vm_owned[region.vm].difference(region.pages()),
         )
         &&& s2.shared_pages == s1.shared_pages
-        &&& s2.s2_map == s1.s2_map.remove_keys(region.entries().dom())
+        &&& s2.s2_map == s1.s2_map.remove_keys(
+            region.entries().dom(),
+        )
         // A CPU region remove leaves the IOMMU contexts untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_owned == s1.iommu_owned
@@ -298,13 +317,16 @@ impl SoftwareView {
         &&& (forall|p: PhysPage| #[trigger]
             region.pages().contains(p) ==> s1.hypervisor_owned.contains(p))
         &&& (forall|k: VmPageKey| #[trigger]
-            region.entries().contains_key(k) ==> !s1.s2_map.contains_key(k))
+            region.entries().contains_key(k) ==> !s1.s2_map.contains_key(
+                k,
+            ))
         // IOMMU-aware guard: none of the region's pages is another VM's private DMA page
         // (clause (2)) nor a shared (GIC) page (clause (4)); assigning them to
         // `region.vm`'s CPU ownership would otherwise break `iommu_ownership_wf`.
         // Discharged in the refinement from zone-region / GIC disjointness.
-        &&& (forall|p: PhysPage, v1: VmId| #[trigger] region.pages().contains(p) && #[trigger]
-            s1.all_vms.contains(v1) && v1 != region.vm ==> !s1.iommu_owned[v1].contains(p))
+        &&& (forall|p: PhysPage, v1: VmId| #[trigger]
+            region.pages().contains(p) && #[trigger] s1.all_vms.contains(v1) && v1 != region.vm
+                ==> !s1.iommu_owned[v1].contains(p))
         &&& (forall|p: PhysPage| #[trigger]
             region.pages().contains(p) ==> !s1.iommu_shared.contains(p))
     }
@@ -393,9 +415,9 @@ impl SoftwareView {
         &&& s1.is_region_assignable(region)
         &&& (forall|k: VmPageKey| #[trigger]
             region.entries().contains_key(k) ==> !s1.iommu_s2_map.contains_key(k))
-        &&& (forall|p: PhysPage, v2: VmId| #[trigger] region.pages().contains(p) && #[trigger]
-            s1.all_vms.contains(v2) && v2 != region.vm ==> !s1.iommu_owned[v2].contains(p)
-                && !s1.vm_owned[v2].contains(p))
+        &&& (forall|p: PhysPage, v2: VmId| #[trigger]
+            region.pages().contains(p) && #[trigger] s1.all_vms.contains(v2) && v2 != region.vm
+                ==> !s1.iommu_owned[v2].contains(p) && !s1.vm_owned[v2].contains(p))
         &&& (forall|p: PhysPage| #[trigger]
             region.pages().contains(p) ==> !s1.iommu_shared.contains(p))
     }

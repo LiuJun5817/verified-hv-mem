@@ -1,4 +1,6 @@
 use core::marker::PhantomData;
+use core::unimplemented;
+use core::unreachable;
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::atomic_ghost::*;
 use vstd::invariant::InvariantPredicate;
@@ -224,7 +226,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> Mutex<K, V, Pred> {
                 };
                 let guard = MutexGuard { handle: Tracked(owner_token), token: Tracked(value) };
                 guard_opt = Some(guard);
-                break;
+                break ;
             }
         }
 

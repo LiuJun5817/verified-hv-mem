@@ -1,10 +1,8 @@
-use super::{
-    addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
-    frame::{FrameSize, MemAttr, SpecFrame},
-};
 use vstd::prelude::*;
 
 verus! {
+
+use super::{addr::{PAddr, SpecPAddr, SpecVAddr, VAddr}, frame::{FrameSize, MemAttr, SpecFrame}};
 
 /// Page size in bytes (4KB).
 pub const PAGE_SIZE: usize = 0x1000;

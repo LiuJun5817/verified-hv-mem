@@ -1,6 +1,8 @@
 use vstd::prelude::*;
 
-use crate::model::types::*;
+use crate::model::types::{
+    CpuId, DataWord, PhysWordAddr, S2Entry, TlbEntry, TlbKey, VmId, VmPageKey,
+};
 
 verus! {
 
