@@ -5,4 +5,4 @@ mod pt_trait;
 mod pte;
 mod table;
 
-pub use pt_trait::{PTConstants, PageTable};
+pub use pt_trait::{PTConstants, PageTable, SpecPTConstants};

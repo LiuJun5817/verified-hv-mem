@@ -2,7 +2,10 @@ use vstd::prelude::*;
 
 use crate::model::hardware::HardwareView;
 use crate::model::software::SoftwareView;
-use crate::model::types::*;
+use crate::model::types::{
+    CpuId, DataWord, GuestPage, GuestWordAddr, PhysPage, PhysWordAddr, S2Entry, SharedPage,
+    TlbEntry, TlbKey, VmId, VmPageKey,
+};
 
 verus! {
 
@@ -109,9 +112,7 @@ impl MachineState {
 
     /// IOMMU TLB keys invalidated by an SMMU page edit.
     pub open spec fn iommu_invalidation_targets(&self, vm: VmId, gpa: GuestPage) -> Set<TlbKey> {
-        Set::new(
-            |key: TlbKey| key.vm == vm && key.gpa == gpa && self.iommu_tlb.contains_key(key),
-        )
+        Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa && self.iommu_tlb.contains_key(key))
     }
 
     /// `page` is referenced by no `s2_map` entry, no TLB entry, and no sharing edge.
@@ -311,9 +312,11 @@ impl MachineState {
                 self.iommu_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(page)
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
-        // (4) The shared region is disjoint from every VM's CPU ownership: a device DMA to
-        // a shared page can never land on another VM's CPU-private page.
+                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(
+                    page,
+                )
+                // (4) The shared region is disjoint from every VM's CPU ownership: a device DMA to
+                // a shared page can never land on another VM's CPU-private page.
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
                 self.vm_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
@@ -334,7 +337,7 @@ impl MachineState {
         &&& self.iommu_translation_wf()
     }
 
-    pub open spec fn execution_wf(&self) -> bool {
+    pub open spec fn active_vm_wf(&self) -> bool {
         forall|cpu: CpuId| #[trigger]
             self.active_vm.contains_key(cpu) ==> self.all_vms().contains(self.active_vm[cpu])
     }
@@ -344,7 +347,7 @@ impl MachineState {
         &&& self.sharing_wf()
         &&& self.translation_wf()
         &&& self.iommu_wf()
-        &&& self.execution_wf()
+        &&& self.active_vm_wf()
         &&& self.tlb_safe()
         &&& self.iommu_tlb_safe()
         &&& self.sync()

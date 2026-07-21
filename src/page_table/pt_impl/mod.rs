@@ -1,20 +1,15 @@
 //! Executable page table implementation. Implements the `PageTable` trait to satisfy the specification
 //! required by higher-level components.
 use super::{
-    pt_mem::PageTableMem,
     pt_trait::{PTConstants, PageTable, PageTableState},
     pte::PageTableEntry,
 };
 use crate::{
-    address::{
-        addr::{SpecPAddr, VAddr},
-        frame::Frame,
-    },
+    address::{addr::VAddr, frame::Frame},
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
 };
 use vstd::prelude::*;
-use vstd::tokens::InstanceId;
 
 mod path;
 mod pt;

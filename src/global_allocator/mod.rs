@@ -15,10 +15,7 @@ use vstd::tokens::InstanceId;
 
 verus! {
 
-use crate::address::{
-    addr::{PAddr, SpecPAddr},
-    frame::Frame,
-};
+use crate::address::addr::{PAddr, SpecPAddr};
 use crate::bitmap_allocator::{bitmap_trait::BitmapAllocator, bitmap_impl::BitAlloc1M};
 use crate::sync::mutex::{Mutex, MutexGuard};
 use core::unreachable;
@@ -143,7 +140,7 @@ tokenized_state_machine! {
         }
 
         // ── Transitions ──────────────────────────────────────────────────────
-  
+
         transition! {
             init_free_set(size: FrameID) {
                 require(size <= pre.cap);
@@ -776,7 +773,8 @@ impl AllocatorState {
             client.wf(old(self).inst.id()),
             0 < count,
             forall|fid: FrameID| start <= fid < start + count ==> client.owns(fid),
-            forall|fid: FrameID| start <= fid < start + count ==> frame_is_empty(&client.frame_perms[fid]),
+            forall|fid: FrameID|
+                start <= fid < start + count ==> frame_is_empty(&client.frame_perms[fid]),
         ensures
             self.wf(),
             self.inst.id() == old(self).inst.id(),
@@ -802,7 +800,9 @@ impl AllocatorState {
         assert(old_owned =~= old_client_dom) by {
             assert(client.wf(old(self).inst.id()));
         }
-        assert forall|fid: FrameID| #[trigger] removed.contains(fid) implies old_owned.contains(fid) by {
+        assert forall|fid: FrameID| #[trigger] removed.contains(fid) implies old_owned.contains(
+            fid,
+        ) by {
             assert(start <= fid < start + count);
             assert(client.owns(fid));
         }
@@ -812,12 +812,14 @@ impl AllocatorState {
         assert(client_tok.value() =~= old_owned);
         assert(perms.dom() =~= old_client_dom);
         assert(removed.subset_of(client_tok.value())) by {
-            assert forall|fid: FrameID| #[trigger] removed.contains(fid) implies client_tok.value().contains(fid) by {
+            assert forall|fid: FrameID| #[trigger]
+                removed.contains(fid) implies client_tok.value().contains(fid) by {
                 assert(old_owned.contains(fid));
             }
         }
         assert(removed.subset_of(perms.dom())) by {
-            assert forall|fid: FrameID| #[trigger] removed.contains(fid) implies perms.dom().contains(fid) by {
+            assert forall|fid: FrameID| #[trigger]
+                removed.contains(fid) implies perms.dom().contains(fid) by {
                 assert(old_owned.contains(fid));
                 assert(old_client_dom.contains(fid));
             }
@@ -1096,11 +1098,7 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
     }
 
     /// Initialize the empty allocator by marking `[0, size)` as free.
-    pub fn init(
-        &self,
-        size: usize,
-        Tracked(free_perms): Tracked<Map<FrameID, Frame4KPerm>>,
-    )
+    pub fn init(&self, size: usize, Tracked(free_perms): Tracked<Map<FrameID, Frame4KPerm>>)
         requires
             self.invariants(),
             size <= A::spec_cap(),
@@ -1110,7 +1108,8 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
             forall|fid: FrameID| #[trigger]
                 free_perms.contains_key(fid) ==> free_perms[fid].is_init(),
             forall|fid: FrameID| #[trigger]
-                free_perms.contains_key(fid) ==> self.base@.0 + fid * SPEC_FRAME_SIZE == free_perms[fid].addr(),
+                free_perms.contains_key(fid) ==> self.base@.0 + fid * SPEC_FRAME_SIZE
+                    == free_perms[fid].addr(),
         ensures
             self.invariants(),
     {
@@ -1288,8 +1287,12 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
 
     /// Remove `count` frames starting at `start` from `client`
     /// and return them to the free pool.
-    pub fn dealloc_contiguous(&self, Tracked(client): Tracked<ClientState>, start: PAddr, count: usize) -> (new_client:
-        Tracked<ClientState>)
+    pub fn dealloc_contiguous(
+        &self,
+        Tracked(client): Tracked<ClientState>,
+        start: PAddr,
+        count: usize,
+    ) -> (new_client: Tracked<ClientState>)
         requires
             self.invariants(),
             client.wf(self.inst_id()),
@@ -1308,8 +1311,11 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
             new_client.wf(self.inst_id()),
             new_client.cid() == client.cid(),
             new_client.owned_frames() =~= client.owned_frames().difference(
-                Set::new(|fid: FrameID|
-                    self.paddr_to_fid_spec(start@) <= fid < self.paddr_to_fid_spec(start@) + count),
+                Set::new(
+                    |fid: FrameID|
+                        self.paddr_to_fid_spec(start@) <= fid < self.paddr_to_fid_spec(start@)
+                            + count,
+                ),
             ),
     {
         let start_fid = self.paddr_to_fid(start);
@@ -1325,7 +1331,8 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
 
         let tracked new_client;
         proof {
-            new_client = content.allocator_state.dealloc_contiguous(client, start_fid as nat, count as nat);
+            new_client =
+            content.allocator_state.dealloc_contiguous(client, start_fid as nat, count as nat);
             assert(AllocMutexPred::<A>::inv(self.mutex.k@, content));
         }
 

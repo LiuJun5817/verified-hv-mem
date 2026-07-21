@@ -1,15 +1,8 @@
 use vstd::prelude::*;
 
 verus! {
-use core::prelude::rust_2021::derive;
-use core::fmt::Debug;
-use core::marker::Copy;
-use core::clone::Clone;
 
-use super::{
-    addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
-    frame::{FrameSize, MemAttr, SpecFrame},
-};
+use super::{addr::{PAddr, SpecPAddr, SpecVAddr, VAddr}, frame::{FrameSize, MemAttr, SpecFrame}};
 
 /// Page size in bytes (4KB).
 pub const PAGE_SIZE: usize = 0x1000;
@@ -50,6 +43,12 @@ impl MemoryRegion {
     /// Spec-mode check if a virtual address is within the region.
     pub open spec fn spec_contains_vaddr(self, vaddr: SpecVAddr) -> bool {
         self.vstart@.0 <= vaddr.0 < self.vstart@.0 + (self.pages as nat) * SPEC_PAGE_SIZE
+    }
+
+    /// Spec-mode check if every page base of the region is inside a page-table
+    /// virtual address space of size `vspace_size`.
+    pub open spec fn spec_within_vspace(self, vspace_size: nat) -> bool {
+        forall|i: nat| 0 <= i < self.pages ==> #[trigger] self.spec_page_vaddr(i).0 < vspace_size
     }
 
     /// Spec-mode check if two regions overlap in virtual address space.

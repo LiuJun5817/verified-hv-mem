@@ -13,8 +13,9 @@
 //! not proved against a formal ISA model.  `TLBI IPAS2E1IS` is a register-form op,
 //! so it takes a **real** `usize` operand `ipa_page` (the IPA `>> 12`, i.e. the
 //! guest page number); `MmuHardware::unmap_dsb_tlbi` derives the spec page from it.
-//! The VMID is read from the current `VTTBR_EL2`, which the caller must already
-//! have programmed.
+//! The CPU invalidation seam includes the completion `DSB ISH`, matching the
+//! model's synchronous invalidate transition.  The VMID is read from the current
+//! `VTTBR_EL2`, which the caller must already have programmed.
 //!
 //! The SMMU command-queue methods ([`SmmuInstr`]) are currently placeholder bodies
 //! (`dsb ish`): the real `CMD_TLBI_S2_IPA`/`CMD_SYNC` command-queue MMIO writes
@@ -33,14 +34,16 @@ pub struct Aarch64Hw;
 
 impl MmuInstr for Aarch64Hw {
     #[verifier::external_body]
-    fn issue_tlbi_s2(ipa_page: usize) {
-        // Broadcast a CPU stage-2 IPA invalidation across the inner-shareable domain.
+    fn issue_tlbi_s2_sync(ipa_page: usize) {
+        // Broadcast and complete a CPU stage-2 IPA invalidation across the
+        // inner-shareable domain.
         // `IPAS2E1IS` requires a register operand: Xt holds IPA >> 12 = the 4K
         // guest page number.  One instruction removes every cached `(*, vm, gpa)`
-        // entry on every PE (VMID comes from VTTBR_EL2).
-        #[cfg(target_arch = "aarch64")]
+        // entry on every PE (VMID comes from VTTBR_EL2); the following DSB makes
+        // that invalidation complete before the model transition fires.
         unsafe {
             asm!("tlbi ipas2e1is, {x}", x = in(reg) ipa_page);
+            asm!("dsb ish");
         }
     }
 
@@ -51,15 +54,6 @@ impl MmuInstr for Aarch64Hw {
         #[cfg(target_arch = "aarch64")]
         unsafe {
             asm!("dsb ish");
-        }
-    }
-
-    #[verifier::external_body]
-    fn issue_isb() {
-        // Instruction Synchronization Barrier (executing PE's own context).
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            asm!("isb");
         }
     }
 }
@@ -92,6 +86,8 @@ impl SmmuInstr for Aarch64Hw {
     }
 }
 
-impl HardwareInstr for Aarch64Hw {}
+impl HardwareInstr for Aarch64Hw {
+
+}
 
 } // verus!

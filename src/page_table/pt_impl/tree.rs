@@ -2,10 +2,7 @@
 use vstd::prelude::*;
 
 use super::path::PTTreePath;
-use crate::address::{
-    addr::{SpecPAddr, SpecVAddr},
-    frame::SpecFrame,
-};
+use crate::address::{addr::SpecVAddr, frame::SpecFrame};
 use crate::page_table::{
     pt_arch::SpecPTArch,
     pt_trait::{PageTableState, PagingResult, SpecPTConstants},
@@ -1090,47 +1087,62 @@ impl PTTreeNode {
         let (idx, remain) = path.step();
         let entry = self.entries[idx as int];
         assert(self.entries.contains(entry));
-        if path.len() <= 1 {
-            match entry {
-                NodeEntry::Frame(_) => {
-                    assert(self.path_mappings().contains_key(path));
-                },
-                NodeEntry::Node(node) => {
-                    node.lemma_all_nonempty_implies_path_mappings_nonempty();
-                    let remain2 = choose|path: PTTreePath| node.path_mappings().contains_key(path);
-                    let path2 = PTTreePath(Seq::new(1, |_i| idx).add(remain2.0));
-                    assert(path2.0.skip(1) == remain2.0);
-                    assert(self.path_mappings().contains_key(path2));
-                    assert(path2.has_prefix(path));
-                },
-                _ => assert(false),
+        assert(exists|path2: PTTreePath| #[trigger]
+            self.path_mappings().contains_key(path2) && (path2.has_prefix(path) || path.has_prefix(
+                path2,
+            ))) by {
+            if path.len() <= 1 {
+                match entry {
+                    NodeEntry::Frame(_) => {
+                        assert(self.path_mappings().contains_key(path));
+                        assert(path.has_prefix(path));
+                    },
+                    NodeEntry::Node(node) => {
+                        node.lemma_all_nonempty_implies_path_mappings_nonempty();
+                        let remain2 = choose|path: PTTreePath|
+                            node.path_mappings().contains_key(path);
+                        let path2 = PTTreePath(Seq::new(1, |_i| idx).add(remain2.0));
+                        assert(path2.0.skip(1) == remain2.0);
+                        assert(self.path_mappings().contains_key(path2));
+                        assert(path2.has_prefix(path));
+                    },
+                    _ => {
+                        assert(self.insert(path, frame).1 is Ok);
+                        assert(false);
+                    },
+                }
+            } else {
+                match entry {
+                    NodeEntry::Frame(_) => {
+                        let path2 = PTTreePath(Seq::new(1, |_i| idx));
+                        assert(self.path_mappings().contains_key(path2));
+                        assert(path.has_prefix(path2));
+                    },
+                    NodeEntry::Node(node) => {
+                        node.lemma_insert_fails_implies_prefix(remain, frame);
+                        let remain2 = choose|subpath2: PTTreePath| #[trigger]
+                            node.path_mappings().contains_key(subpath2) && (subpath2.has_prefix(
+                                remain,
+                            ) || remain.has_prefix(subpath2));
+                        let path2 = PTTreePath(Seq::new(1, |_i| idx).add(remain2.0));
+                        assert(path2.0.skip(1) == remain2.0);
+                        assert(self.path_mappings().contains_key(path2));
+                        if remain2.has_prefix(remain) {
+                            path2.lemma_prefix_step(path);
+                            assert(path2.has_prefix(path));
+                        } else {
+                            path.lemma_prefix_step(path2);
+                            assert(path.has_prefix(path2));
+                        }
+                    },
+                    NodeEntry::Empty => {
+                        self.lemma_empty_entry_implies_insert_ok(path, frame);
+                        assert(self.insert(path, frame).1 is Ok);
+                        assert(false);
+                    },
+                }
             }
-        } else {
-            match entry {
-                NodeEntry::Frame(_) => {
-                    let path2 = PTTreePath(Seq::new(1, |_i| idx));
-                    assert(self.path_mappings().contains_key(path2));
-                    assert(path.has_prefix(path2));
-                },
-                NodeEntry::Node(node) => {
-                    node.lemma_insert_fails_implies_prefix(remain, frame);
-                    let remain2 = choose|subpath2: PTTreePath| #[trigger]
-                        node.path_mappings().contains_key(subpath2) && (subpath2.has_prefix(remain)
-                            || remain.has_prefix(subpath2));
-                    let path2 = PTTreePath(Seq::new(1, |_i| idx).add(remain2.0));
-                    assert(path2.0.skip(1) == remain2.0);
-                    assert(self.path_mappings().contains_key(path2));
-                    if remain2.has_prefix(remain) {
-                        path2.lemma_prefix_step(path);
-                    } else {
-                        path.lemma_prefix_step(path2);
-                    }
-                },
-                NodeEntry::Empty => self.lemma_empty_entry_implies_insert_ok(path, frame),
-            }
-        }
-        // TODO Resource limit (rlimit) exceeded
-        assume(false);
+        };
     }
 
     /// Lemma. If an empty entry is reached during `insert`, the result must be `Ok`.
@@ -2579,6 +2591,7 @@ impl PTTreeModel {
     pub proof fn lemma_query_ok_implies_mapping_exist(self, vaddr: SpecVAddr)
         requires
             self.wf(),
+            vaddr.0 < self.arch().vspace_size(),
             self.query(vaddr) is Ok,
         ensures
             self.has_mapping_for(vaddr),
@@ -2596,6 +2609,8 @@ impl PTTreeModel {
         // Path mapping for `vaddr`
         let real_path = self.root.real_path(path);
         self.root.lemma_visit_length_bounds(path);
+        self.root.lemma_real_path_valid(path);
+        self.root.lemma_real_path_is_prefix(path);
         self.root.lemma_real_path_visits_same_entry(path);
         assert(self.root.path_mappings().contains_pair(real_path, frame));
 
@@ -2604,8 +2619,10 @@ impl PTTreeModel {
         self.lemma_mappings_consistent_with_path_mappings();
         assert(self.mappings().contains_pair(vbase, frame));
 
-        // TODO: add lemma to `PTTreePath`
-        assume(vaddr.within(vbase, frame.size.as_nat()));
+        self.root.lemma_path_mappings_valid();
+        PTTreePath::lemma_vaddr_within_prefix_range(self.arch(), vaddr, path, real_path);
+        assert(frame.size == self.arch().frame_size((real_path.len() - 1) as nat));
+        assert(vaddr.within(vbase, frame.size.as_nat()));
 
         // Prove there is only one mapped region that contains `vaddr`
         assert forall|vbase2, frame2| #[trigger]

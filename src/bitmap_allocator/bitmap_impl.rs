@@ -1,4 +1,4 @@
-use vstd::{prelude::*, seq_lib::*};
+use vstd::{assert_seqs_equal, prelude::*};
 
 /// Macro to get a specific bit from a u16 value.
 /// Returns true if the bit at the given index is 1, false otherwise.
@@ -2680,7 +2680,7 @@ impl BitmapAllocator for BitAlloc1M {
         <Self as BitAlloc>::insert(self, range)
     }
 
-    broadcast proof fn lemma_view_len_is_cap(self) {
+    proof fn lemma_view_len_is_cap(self) {
         assert(<Self as BitmapAllocator>::view(&self).len()
             == <Self as BitmapAllocator>::spec_cap()) by {
             assert(<Self as BitAllocView>::view(&self).len() == <Self as BitAllocView>::spec_cap());

@@ -4,8 +4,8 @@
 //! `Zone` and `HvMem` are generic over `P: ZoneGhostProtocol` rather than hard-wired.
 //!
 //! Submodules:
-//! - [`weak`]:   assumption-1 ghost state (`ClosureGlobalState`) and `ClosureProtocol`.
-//! - [`strong`]: assumption-2 ghost state (`BudgetGlobalState`) and `BudgetProtocol`.
+//! - [`closure`]: assumption-1 ghost state (`ClosureGlobalState`) and `ClosureProtocol`.
+//! - [`budget`]:  assumption-2 ghost state (`BudgetGlobalState`) and `BudgetProtocol`.
 pub mod budget;
 pub mod closure;
 
@@ -18,9 +18,7 @@ use vstd::prelude::*;
 
 verus! {
 
-/// Minimal spec interface shared by `ZoneState` (ClosureSpec) and `BudgetZoneState`
-/// (BudgetSpec). Defined here in the `spec` layer so that `zone.rs` can implement
-/// it without depending on the `protocol` module, avoiding a circular dependency.
+/// Minimal spec interface shared by `ClosureZoneState` and `BudgetZoneState`.
 ///
 /// Used as the bound `P::ZoneToken: ZoneStateOps` in the `ZoneGhostProtocol` trait.
 pub trait ZoneStateOps {
@@ -50,7 +48,7 @@ pub trait ZoneStateOps {
 ///
 /// | Protocol          | region insert/remove borrow | Why                              |
 /// |-------------------|-----------------------------|----------------------------------|
-/// | `ClosureProtocol` | `&mut ClosureGlobalState`   | must mutate `region_closure_tok` |
+/// | `ClosureProtocol` | `&mut ClosureGlobalState`   | must update the prototype `zones_view` token |
 /// | `BudgetProtocol`  | `&BudgetGlobalState`        | zone-local only; `gs` unchanged  |
 ///
 /// Region operations live in protocol-specific `impl Zone<..., P>` blocks and are
@@ -61,8 +59,8 @@ pub trait ZoneGhostProtocol: Sized {
 
     /// Global tracked ghost state stored inside `HvMem`'s write-lock content.
     ///
-    /// `ClosureProtocol`: `ClosureGlobalState` (holds `region_closure_tok` — global write lock required).
-    /// `BudgetProtocol`:  `BudgetGlobalState` (no `region_closure_tok` — zone-local insert).
+    /// `ClosureProtocol`: `ClosureGlobalState` (holds the prototype `zones_view` token).
+    /// `BudgetProtocol`:  `BudgetGlobalState` (zone-local insert).
     type GlobalState;
 
     // ─── Spec predicates ─────────────────────────────────────────────────────
@@ -99,11 +97,13 @@ pub trait ZoneGhostProtocol: Sized {
             Self::zone_ids(gs) =~= Self::zone_ids(old(gs)).insert(zid),
     ;
 
-    /// Deregister a zone; consumes its zone token.
+    /// Deregister an empty zone; consumes its zone token.
     proof fn remove_zone(tracked gs: &mut Self::GlobalState, tracked zt: Self::ZoneToken)
         requires
             Self::global_wf(old(gs)),
             zt.wf(Self::mem_inst_id(old(gs))),
+            zt.ghost_zone().cpu_mem_set.empty(),
+            zt.ghost_zone().iommu_mem_set.empty(),
         ensures
             Self::global_wf(gs),
             Self::mem_inst_id(gs) == Self::mem_inst_id(old(gs)),

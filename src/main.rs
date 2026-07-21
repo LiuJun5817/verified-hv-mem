@@ -9,7 +9,7 @@ use verified_hv_mem::{
 
 static GB_ALLOCATOR: Once<GbAlloc> = Once::new();
 
-pub fn init_global_allocator(base:usize) -> &'static GbAlloc {
+pub fn init_global_allocator(base: usize) -> &'static GbAlloc {
     GB_ALLOCATOR.call_once(|| GbAlloc::default(PAddr(base)))
 }
 
@@ -51,7 +51,8 @@ impl Frame {
         frame_count: usize,
         align_log2: usize,
     ) -> (Self, Tracked<ClientState>) {
-        let (start_paddr, client) = gb_allocator().alloc_contiguous(client, frame_count, align_log2);
+        let (start_paddr, client) =
+            gb_allocator().alloc_contiguous(client, frame_count, align_log2);
         (
             Self {
                 start_paddr: start_paddr.0,
@@ -62,7 +63,11 @@ impl Frame {
     }
 
     /// allocate contigugous frames, and you can specify the alignment, set the lower `align_log2` bits to 0.
-    pub fn new_contiguous_with_base(client: Tracked<ClientState>, frame_count: usize, align_log2: usize) -> (Self, Tracked<ClientState>) {
+    pub fn new_contiguous_with_base(
+        client: Tracked<ClientState>,
+        frame_count: usize,
+        align_log2: usize,
+    ) -> (Self, Tracked<ClientState>) {
         let align_mask = (1 << align_log2) - 1;
         let mut client = client;
         // Create a vector to keep track of attempted frames
@@ -93,9 +98,12 @@ impl Frame {
     }
 
     pub fn dealloc(self, client: Tracked<ClientState>) -> Tracked<ClientState> {
-        assert_eq!(self.frame_count, 1, "only single-frame dealloc is supported");
+        assert_eq!(
+            self.frame_count, 1,
+            "only single-frame dealloc is supported"
+        );
         gb_allocator().dealloc(client, PAddr(self.start_paddr))
-    }    
+    }
 
     /// Constructs a frame from a raw physical address without automatically calling the destructor.
     ///

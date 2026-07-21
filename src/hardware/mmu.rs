@@ -23,7 +23,7 @@
 //! Only the *real instructions* differ between regimes, so the trusted asm seam is
 //! split in two:
 //!
-//! * [`MmuInstr`] — CPU MMU maintenance (`TLBI IPAS2E1IS`, `DSB ISH`, `ISB`);
+//! * [`MmuInstr`] — CPU MMU maintenance (`TLBI IPAS2E1IS`, `DSB ISH`);
 //! * [`SmmuInstr`] — SMMU command-queue maintenance (`CMD_TLBI_S2_IPA`, `CMD_SYNC`).
 //!
 //! [`HardwareInstr`] is just the combined marker (`MmuInstr + SmmuInstr`) a single
@@ -44,14 +44,13 @@
 //! implementation hands: `MmuHardware`'s fields are **private** and never handed
 //! out, so only this module's methods fire transitions.  `MemorySet::remove` holds
 //! an `&mut MmuHardware` and can *call* [`MmuHardware::unmap_dsb_tlbi`], but cannot
-//! fire `unmap`/`invalidate` itself.  And `unmap_dsb_tlbi`'s post — restoring the
-//! [`synced`](MmuHardware::synced) sync point — is unprovable unless its real
-//! `DSB`+`TLBI` actually run, since only they advance the encapsulated tokens.
+//! fire `unmap`/`invalidate` itself.  And `unmap_dsb_tlbi`'s postcondition is
+//! unprovable unless its real `DSB`+`TLBI` actually run, since only they advance
+//! the encapsulated tokens.
 use crate::hardware::spec::{MmuInstance, MmuS2MapToken, MmuTlbToken, MmuVmIdsToken};
-use crate::model::types::*;
+use crate::model::types::{GuestPage, S2Entry, VmId};
 use core::marker::PhantomData;
 use vstd::prelude::*;
-use vstd::tokens::InstanceId;
 
 verus! {
 
@@ -65,15 +64,15 @@ pub trait MmuInstr {
     // ------------------------------------------------------------------
     // S2 TLB invalidation broadcast
     // ------------------------------------------------------------------
-    /// Broadcast a CPU stage-2 TLB invalidation for the IPA `(vm, gpa)` across every
-    /// PE in the inner-shareable domain.
+    /// Broadcast and complete a CPU stage-2 TLB invalidation for the IPA
+    /// `(vm, gpa)` across every PE in the inner-shareable domain.
     ///
-    /// On AArch64: a single `TLBI IPAS2E1IS, Xt` instruction.  Because it is
-    /// inner-shareable it is a *broadcast* — one instruction removes the cached
-    /// `(*, vm, gpa)` entries on **every** PE — so it takes no per-CPU argument.
-    /// It must be followed by a completion `DSB ISH` ([`issue_dsb_ish`](Self::issue_dsb_ish))
-    /// before the new translation may be relied upon.  Note this flushes only the
-    /// **CPU** TLB — the SMMU TLB is unaffected (use [`SmmuInstr::issue_smmu_tlbi_s2`]).
+    /// On AArch64 this is `TLBI IPAS2E1IS, Xt` followed by the completion
+    /// `DSB ISH`.  `IPAS2E1IS` is inner-shareable, so the invalidation is a
+    /// broadcast over every PE in that domain and takes no per-CPU argument; the
+    /// trailing `DSB ISH` is part of this method because the model-level invalidate
+    /// transition is synchronous.  This flushes only the **CPU** TLB — the SMMU TLB
+    /// is unaffected (use [`SmmuInstr::issue_smmu_tlbi_s2`]).
     ///
     /// `IPAS2E1IS` is a **register-form** maintenance op: the target IPA travels in
     /// `Xt` as `Xt[..] = IPA >> 12`, which for the model's 4K pages is exactly the
@@ -81,24 +80,17 @@ pub trait MmuInstr {
     /// *not* an operand; it is read from the current `VTTBR_EL2`, which the caller
     /// must already have programmed.  ([`MmuHardware::unmap_dsb_tlbi`] derives the
     /// spec page from `ipa_page`, so the asm and the ghost transition agree.)
-    fn issue_tlbi_s2(ipa_page: usize);
+    fn issue_tlbi_s2_sync(ipa_page: usize);
 
     // ------------------------------------------------------------------
     // Data Synchronization Barrier (DSB ISH)
     // ------------------------------------------------------------------
     /// Issue a Data Synchronization Barrier in the inner-shareable domain.
     ///
-    /// On AArch64: `DSB ISH`.  It does not retire until the preceding
-    /// `TLBI IPAS2E1IS` has completed on every PE in the domain.
+    /// On AArch64: `DSB ISH`.  Before a TLBI, this makes prior page-table writes
+    /// visible to walkers; after a TLBI, it waits for the invalidation to complete
+    /// on every PE in the domain.
     fn issue_dsb_ish();
-
-    // ------------------------------------------------------------------
-    // Instruction Synchronization Barrier (ISB)
-    // ------------------------------------------------------------------
-    /// Issue an Instruction Synchronization Barrier.
-    ///
-    /// On AArch64: `ISB`.  Synchronizes only the executing PE's own context.
-    fn issue_isb();
 }
 
 /// Trusted **IOMMU (SMMU)** stage-2 maintenance instructions.
@@ -136,7 +128,9 @@ pub trait SmmuInstr {
 /// the CPU MMU ([`MmuInstr`]) and the SMMU ([`SmmuInstr`]).  It is only a marker, so
 /// every `I: HardwareInstr` bound (in `MemorySet`, `Zone`, `HvMem`, …) keeps working
 /// while the actual instructions are cleanly partitioned into the two regime traits.
-pub trait HardwareInstr: MmuInstr + SmmuInstr {}
+pub trait HardwareInstr: MmuInstr + SmmuInstr {
+
+}
 
 /// Concrete stage-2 hardware handle for **one regime** — the owner of that
 /// regime's `MmuSpec` instance and its global `tlb`/`vm_ids` tokens.  The
@@ -202,13 +196,12 @@ impl<I: HardwareInstr> MmuHardware<I> {
     // ── CPU MMU stage-2 maintenance ─────────────────────────────────────────────
     // Emit `MmuInstr` asm (`DSB ISH` / `TLBI IPAS2E1IS`) and run on the CPU MMU
     // instance.  The SMMU counterparts are further below.
-
     /// One per-page break-before-make step: the caller has written the PTE invalid;
-    /// this issues the `DSB ISH` (drops `(vm, gpa)` from the vm's slice) and the
-    /// `TLBI IPAS2E1IS` broadcast (clears the page's cached entries) — together,
-    /// firing the bundled `unmap_invalidate`.  Consumes the vm's slice token and
-    /// returns it with the page removed; `tlb_coherent` is preserved by the `MmuSpec`
-    /// invariant, so it is not part of this contract.
+    /// this issues the pre-TLBI `DSB ISH` (drops `(vm, gpa)` from the vm's slice)
+    /// and the completed `TLBI IPAS2E1IS` broadcast (clears the page's cached
+    /// entries) — together, firing the bundled `unmap_invalidate`.  Consumes the
+    /// vm's slice token and returns it with the page removed; `tlb_coherent` is
+    /// preserved by the `MmuSpec` invariant, so it is not part of this contract.
     ///
     /// `ipa_page` is the real operand (`IPA >> 12`); the spec page is **derived**
     /// from it, so the asm and the ghost transition target the same page.
@@ -233,7 +226,7 @@ impl<I: HardwareInstr> MmuHardware<I> {
         let ghost gpa = GuestPage(ipa_page as nat);
         let tracked s2 = s2_tok.get();
         I::issue_dsb_ish();
-        I::issue_tlbi_s2(ipa_page);
+        I::issue_tlbi_s2_sync(ipa_page);
         let tracked new_tok = self.instance.borrow().unmap_invalidate(
             vm@,
             gpa,
@@ -280,7 +273,6 @@ impl<I: HardwareInstr> MmuHardware<I> {
     // (the `MmuSpec` model is regime-agnostic), but they emit `SmmuInstr` command-
     // queue asm instead of CPU `DSB`/`TLBI`, and run on the separate `iommu_mmu`
     // instance — so their tokens never alias the CPU MMU's.
-
     /// SMMU counterpart of [`unmap_dsb_tlbi`](Self::unmap_dsb_tlbi): one per-page
     /// break-before-make unmap on the IOMMU regime.
     ///

@@ -2,6 +2,7 @@
 use vstd::prelude::*;
 
 verus! {
+
 use core::prelude::rust_2021::derive;
 use core::cmp::{Eq, PartialEq};
 use core::marker::Copy;

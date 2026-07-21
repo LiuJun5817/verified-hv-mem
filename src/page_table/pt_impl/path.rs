@@ -296,10 +296,7 @@ impl PTTreePath {
     }
 
     /// Lemma. The address computed by `to_vaddr` is aligned to the frame size of the last level.
-    ///
-    /// TODO: This lemma takes 20+s to verify. Optimize it.
     pub broadcast proof fn lemma_to_vaddr_frame_alignment(self, arch: SpecPTArch)
-        by (nonlinear_arith)
         requires
             arch.valid(),
             self.valid(arch, 0),
@@ -317,8 +314,14 @@ impl PTTreePath {
             == 0 by {
             arch.lemma_frame_size_aligned((self.len() - 1) as nat, i);
         }
-        assert(forall|i| 0 <= i < self.len() ==> parts[i] % fsize == 0);
-        // All parts align to the frame size of the last level, prove that sum does too.
+        assert forall|i| 0 <= i < self.len() implies #[trigger] parts[i] % fsize == 0 by {
+            let size = arch.frame_size(i as nat).as_nat();
+            vstd::arithmetic::div_mod::lemma_mul_mod_noop_right(
+                self.0[i] as int,
+                size as int,
+                fsize as int,
+            );
+        }
         lemma_parts_align_implies_sum_align(parts, fsize);
     }
 
@@ -737,6 +740,37 @@ impl PTTreePath {
         ).as_nat());
     }
 
+    /// Lemma. A virtual address represented by `path` lies within the range of
+    /// every valid prefix of that path.
+    pub proof fn lemma_vaddr_within_prefix_range(
+        arch: SpecPTArch,
+        vaddr: SpecVAddr,
+        path: Self,
+        pref: Self,
+    )
+        by (nonlinear_arith)
+        requires
+            arch.valid(),
+            path.valid(arch, 0),
+            pref.valid(arch, 0),
+            vaddr.0 < arch.vspace_size(),
+            path == Self::from_vaddr_root(vaddr, arch, (path.len() - 1) as nat),
+            path.has_prefix(pref),
+        ensures
+            vaddr.within(pref.to_vaddr(arch), arch.frame_size((pref.len() - 1) as nat).as_nat()),
+    {
+        Self::lemma_vaddr_within_path_range(arch, vaddr, path);
+        Self::lemma_to_vaddr_lower_bound(arch, path, pref);
+        Self::lemma_to_vaddr_upper_bound(arch, path, pref);
+
+        let path_size = arch.frame_size((path.len() - 1) as nat).as_nat();
+        let pref_size = arch.frame_size((pref.len() - 1) as nat).as_nat();
+        if pref.len() < path.len() {
+            arch.lemma_frame_size_monotonic((pref.len() - 1) as nat, (path.len() - 1) as nat);
+        }
+        assert(path_size <= pref_size);
+    }
+
     /// Lemma. The virtual address computed by `to_vaddr` is within the vspace size
     pub broadcast proof fn lemma_to_vaddr_within_vspace_size(arch: SpecPTArch, path: Self)
         by (nonlinear_arith)
@@ -984,39 +1018,17 @@ pub proof fn lemma_parts_align_implies_sum_align(s: Seq<nat>, align: nat)
 
 /// Lemma. `v % f + v / f % e * f == v % (e * f)` for any natural `v`, positive `f`, and positive `e`.
 proof fn lemma_mod_div_mod_mul_eq(v: nat, f: nat, e: nat)
-    by (nonlinear_arith)
     requires
         f > 0,
         e > 0,
     ensures
         v % f + (v / f) % e * f == v % (e * f),
 {
-    let k = v / f;
-    let b = v % f;
-    assert(v == k * f + b && b < f);
-    let p = k / e;
-    let q = k % e;
-    assert(k == p * e + q && q < e);
-    // Left side
-    assert(v % f + (v / f) % e * f == b + q * f);
-    // Right side
-    assert(v % (e * f) == (p * (e * f) + (q * f + b)) % (e * f));
-    assert((p * e * f + q * f + b) % (e * f) == (b + q * f) % (e * f));
-    assert(b + q * f < e * f);
-    lemma_mod_eq_self(b + q * f, e * f);
-    assert((b + q * f) % (e * f) == b + q * f);
-    assert(v % (e * f) == b + q * f);
-    // Left side == Right side
-}
-
-proof fn lemma_mod_eq_self(v: nat, m: nat)
-    by (nonlinear_arith)
-    requires
-        m > 0,
-        v < m,
-    ensures
-        v % m == v,
-{
+    vstd::arithmetic::div_mod::lemma_mod_breakdown(v as int, f as int, e as int);
+    assert(e * f == f * e) by (nonlinear_arith);
+    assert(v % (e * f) == v % (f * e));
+    assert(v % (f * e) == f * ((v / f) % e) + v % f);
+    assert(f * ((v / f) % e) + v % f == v % f + (v / f) % e * f) by (nonlinear_arith);
 }
 
 pub broadcast group group_pt_tree_path_lemmas {

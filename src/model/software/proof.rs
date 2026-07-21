@@ -9,8 +9,8 @@
 //! 3. **region `wf`-preservation** — proved directly by set/map algebra.
 use vstd::prelude::*;
 
-use super::{Region, SoftwareView};
-use crate::model::types::*;
+use super::SoftwareView;
+use crate::model::types::{GuestPage, PhysPage, S2Entry, SharedPage, VmId, VmPageKey};
 
 verus! {
 
@@ -93,9 +93,10 @@ pub proof fn lemma_iommu_map_step_preserves_iommu_wf(
     // targets a page `vm` may DMA — private (`iommu_owned`) or shared (`iommu_shared`) —
     // by the step's enabling guard.
     assert forall|k: VmPageKey| #[trigger] s2.iommu_s2_map.contains_key(k) implies (
-    s2.all_vms.contains(k.vm) && s2.iommu_owned.contains_key(k.vm)
-        && (s2.iommu_owned[k.vm].contains(s2.iommu_s2_map[k].page)
-            || s2.iommu_shared.contains(s2.iommu_s2_map[k].page))) by {
+    s2.all_vms.contains(k.vm) && s2.iommu_owned.contains_key(k.vm) && (
+    s2.iommu_owned[k.vm].contains(s2.iommu_s2_map[k].page) || s2.iommu_shared.contains(
+        s2.iommu_s2_map[k].page,
+    ))) by {
         if k != key {
             assert(s1.iommu_s2_map.contains_key(k));
         }
@@ -119,9 +120,10 @@ pub proof fn lemma_iommu_unmap_step_preserves_iommu_wf(
     // keeps its valid private-or-shared DMA target.
     assert(s2.iommu_ownership_wf());
     assert forall|k: VmPageKey| #[trigger] s2.iommu_s2_map.contains_key(k) implies (
-    s2.all_vms.contains(k.vm) && s2.iommu_owned.contains_key(k.vm)
-        && (s2.iommu_owned[k.vm].contains(s2.iommu_s2_map[k].page)
-            || s2.iommu_shared.contains(s2.iommu_s2_map[k].page))) by {
+    s2.all_vms.contains(k.vm) && s2.iommu_owned.contains_key(k.vm) && (
+    s2.iommu_owned[k.vm].contains(s2.iommu_s2_map[k].page) || s2.iommu_shared.contains(
+        s2.iommu_s2_map[k].page,
+    ))) by {
         assert(s1.iommu_s2_map.contains_key(k));
     }
     assert(s2.iommu_translation_wf());
@@ -187,7 +189,8 @@ pub proof fn lemma_assign_page_step_preserves_wf(
     assert forall|v1: VmId, v2: VmId| #[trigger]
         s2.all_vms.contains(v1) && #[trigger] s2.all_vms.contains(v2) && v1 != v2 implies (forall|
         p: PhysPage,
-    | #[trigger] s2.iommu_owned[v1].contains(p) ==> !s2.vm_owned[v2].contains(p)) by {
+    | #[trigger]
+        s2.iommu_owned[v1].contains(p) ==> !s2.vm_owned[v2].contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             s2.iommu_owned[v1].contains(p) implies !s2.vm_owned[v2].contains(p) by {
             if v2 == vm {
@@ -262,7 +265,8 @@ pub proof fn lemma_reclaim_page_step_preserves_wf(
     assert forall|v1: VmId, v2: VmId| #[trigger]
         s2.all_vms.contains(v1) && #[trigger] s2.all_vms.contains(v2) && v1 != v2 implies (forall|
         p: PhysPage,
-    | #[trigger] s2.iommu_owned[v1].contains(p) ==> !s2.vm_owned[v2].contains(p)) by {
+    | #[trigger]
+        s2.iommu_owned[v1].contains(p) ==> !s2.vm_owned[v2].contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             s2.iommu_owned[v1].contains(p) implies !s2.vm_owned[v2].contains(p) by {
             if s2.vm_owned[v2].contains(p) {
@@ -435,23 +439,26 @@ pub proof fn lemma_add_vm_step_preserves_wf(s1: SoftwareView, s2: SoftwareView, 
     assert forall|v1: VmId, v2: VmId| #[trigger]
         s2.all_vms.contains(v1) && #[trigger] s2.all_vms.contains(v2) && v1 != v2 implies ((forall|
         p: PhysPage,
-    | #[trigger] s2.iommu_owned[v1].contains(p) ==> !s2.iommu_owned[v2].contains(p)) && (forall|
-        p: PhysPage,
-    | #[trigger] s2.iommu_owned[v1].contains(p) ==> !s2.vm_owned[v2].contains(p))) by {
+    | #[trigger]
+        s2.iommu_owned[v1].contains(p) ==> !s2.iommu_owned[v2].contains(p)) && (forall|p: PhysPage|
+     #[trigger]
+        s2.iommu_owned[v1].contains(p) ==> !s2.vm_owned[v2].contains(p))) by {
         if v1 != vm && v2 != vm {
             assert(s1.all_vms.contains(v1) && s1.all_vms.contains(v2));
         }
     }
-    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage| #[trigger]
+    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
+     #[trigger]
         s2.iommu_owned[w].contains(p) ==> !s2.iommu_shared.contains(p)) by {
         if w != vm {
             assert(s1.all_vms.contains(w));
         }
     }
     assert forall|k: VmPageKey| #[trigger] s2.iommu_s2_map.contains_key(k) implies (
-    s2.all_vms.contains(k.vm) && s2.iommu_owned.contains_key(k.vm) && (s2.iommu_owned[k.vm].contains(
+    s2.all_vms.contains(k.vm) && s2.iommu_owned.contains_key(k.vm) && (
+    s2.iommu_owned[k.vm].contains(s2.iommu_s2_map[k].page) || s2.iommu_shared.contains(
         s2.iommu_s2_map[k].page,
-    ) || s2.iommu_shared.contains(s2.iommu_s2_map[k].page))) by {
+    ))) by {
         assert(s1.iommu_s2_map.contains_key(k));  // ⇒ k.vm ∈ s1.all_vms, so k.vm != vm (fresh)
     }
     assert(s2.iommu_wf());
@@ -505,19 +512,22 @@ pub proof fn lemma_remove_vm_step_preserves_wf(s1: SoftwareView, s2: SoftwareVie
     assert forall|v1: VmId, v2: VmId| #[trigger]
         s2.all_vms.contains(v1) && #[trigger] s2.all_vms.contains(v2) && v1 != v2 implies ((forall|
         p: PhysPage,
-    | #[trigger] s2.iommu_owned[v1].contains(p) ==> !s2.iommu_owned[v2].contains(p)) && (forall|
-        p: PhysPage,
-    | #[trigger] s2.iommu_owned[v1].contains(p) ==> !s2.vm_owned[v2].contains(p))) by {
+    | #[trigger]
+        s2.iommu_owned[v1].contains(p) ==> !s2.iommu_owned[v2].contains(p)) && (forall|p: PhysPage|
+     #[trigger]
+        s2.iommu_owned[v1].contains(p) ==> !s2.vm_owned[v2].contains(p))) by {
         assert(s1.all_vms.contains(v1) && s1.all_vms.contains(v2));
     }
-    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage| #[trigger]
+    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
+     #[trigger]
         s2.iommu_owned[w].contains(p) ==> !s2.iommu_shared.contains(p)) by {
         assert(s1.all_vms.contains(w));
     }
     assert forall|k: VmPageKey| #[trigger] s2.iommu_s2_map.contains_key(k) implies (
-    s2.all_vms.contains(k.vm) && s2.iommu_owned.contains_key(k.vm) && (s2.iommu_owned[k.vm].contains(
+    s2.all_vms.contains(k.vm) && s2.iommu_owned.contains_key(k.vm) && (
+    s2.iommu_owned[k.vm].contains(s2.iommu_s2_map[k].page) || s2.iommu_shared.contains(
         s2.iommu_s2_map[k].page,
-    ) || s2.iommu_shared.contains(s2.iommu_s2_map[k].page))) by {
+    ))) by {
         assert(s1.iommu_s2_map.contains_key(k));
         assert(k.vm != vm);  // enabling: no IOMMU entry names `vm`
     }

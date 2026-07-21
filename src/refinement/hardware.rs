@@ -5,13 +5,13 @@
 //! projection into [`HardwareView`] exposes both walker-reachable maps and both TLBs.
 //! This avoids having two competing `View` impls for `MmuSpec::State` while keeping the
 //! MMU state machine itself shared between CPU and IOMMU.
-use crate::hardware::spec::MmuSpec;
-use crate::model::hardware::HardwareView;
-use crate::model::types::*;
 use vstd::prelude::*;
 
 verus! {
 
+use crate::hardware::spec::MmuSpec;
+use crate::model::hardware::HardwareView;
+use crate::model::types::{GuestPage, S2Entry, TlbKey, VmId, VmPageKey};
 use crate::model::convert::*;
 
 /// The pair of hardware-side tokenized states: CPU MMU plus SMMU/IOMMU.

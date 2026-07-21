@@ -1,11 +1,10 @@
 //! Page table trait with formal specification.
-use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
-use crate::address::frame::{Frame, MemAttr, SpecFrame};
+use crate::address::addr::{SpecPAddr, SpecVAddr, VAddr};
+use crate::address::frame::{Frame, SpecFrame};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
-use crate::global_allocator::{ClientID, GlobalAllocator};
+use crate::global_allocator::GlobalAllocator;
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 use vstd::prelude::*;
-use vstd::tokens::InstanceId;
 
 verus! {
 

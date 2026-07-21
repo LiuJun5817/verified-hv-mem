@@ -19,10 +19,10 @@ use super::super::spec::budget::*;
 
 /// Per-zone tracked ghost state for `BudgetSpec` (assumption 2).
 ///
-/// Parallel to `ZoneState` for `ClosureSpec`, but wraps a `BudgetZoneToken`
+/// Parallel to `ClosureZoneState`, but wraps a `BudgetZoneToken`
 /// (map-sharded `BudgetSpec::zones` entry) instead of a `ClosureZoneToken`.
-/// Stored in the zone-level lock alongside no budget token — configured regions
-/// are accessed as the pure spec function `zone_regions(zid)` instead.
+/// Stored in the zone-level lock without a separate configured-budget token;
+/// configured regions are accessed through the pure `zone_regions(zid)` function.
 pub tracked struct BudgetZoneState {
     pub zone_tok: BudgetZoneToken,
 }
@@ -47,9 +47,9 @@ impl ZoneStateOps for BudgetZoneState {
 // ─── BudgetGlobalState ───────────────────────────────────────────────────────
 /// Global tracked ghost state for assumption-2 (BudgetSpec).
 ///
-/// Unlike `ClosureGlobalState`, there is no `region_closure_tok` here because
+/// Unlike `ClosureGlobalState`, there are no dynamic closure tokens here because
 /// `BudgetSpec` tracks ownership via a static per-zone budget function
-/// (`zone_budget`) rather than a dynamic global set.  As a result,
+/// (`zone_regions`) rather than a dynamic global set.  As a result,
 /// `insert_region` does **not** need to acquire the `HvMem` write lock.
 pub tracked struct BudgetGlobalState {
     /// The `BudgetSpec` instance (constant-sharded; freely duplicable ghost value).

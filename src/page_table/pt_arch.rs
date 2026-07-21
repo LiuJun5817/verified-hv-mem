@@ -11,7 +11,7 @@ use crate::address::{
     addr::{SpecVAddr, VAddr},
     frame::FrameSize,
 };
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 verus! {
 
@@ -224,7 +224,10 @@ impl PTArchLevel {
 }
 
 impl Clone for PTArchLevel {
-    fn clone(&self) -> Self {
+    fn clone(&self) -> (res: Self)
+        ensures
+            res.view() == self.view(),
+    {
         PTArchLevel { entry_count: self.entry_count, frame_size: self.frame_size }
     }
 }
@@ -240,9 +243,13 @@ impl Clone for PTArch {
         ensures
             self@ == res@,
     {
-        let res = PTArch(self.0.clone());
-        // Assume equivalence of the clone.
-        assume(self@ == res@);
+        let levels = self.0.clone();
+        assert forall|i: int| 0 <= i < levels.len() implies #[trigger] levels[i].view()
+            == self.0[i].view() by {
+            assert(cloned(self.0[i], levels[i]));
+        }
+        let res = PTArch(levels);
+        assert(self@.0 =~= res@.0);
         res
     }
 }

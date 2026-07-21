@@ -6,8 +6,8 @@
 //! token — no global lock is needed.
 //!
 //! Compared to [`super::ClosureSpec`]:
-//! - `ClosureSpec` has a `#[sharding(variable)] region_closure` field, whose single
-//!   global token forces a global write-lock on every `insert_region`.
+//! - `ClosureSpec` has a `#[sharding(variable)]` `zones_view` mirror, whose
+//!   global token lets the prototype state cross-zone overlap guards directly.
 //! - `BudgetSpec` uses external uninterpreted spec functions to model static
 //!   per-zone regions (`zone_regions`) and static GIC regions (`gic_region`).
 //!   No budget token exists in the state machine, so there is less token plumbing.
@@ -20,29 +20,18 @@ use super::GhostZone;
 use crate::address::region::MemoryRegion;
 use crate::memory_set::SpecMemorySet;
 use verus_state_machines_macros::tokenized_state_machine;
-use vstd::{prelude::*, tokens::InstanceId};
+use vstd::prelude::*;
 
 verus! {
-
-use super::closure::*;
 
 /// Static configured regions owned by one zone.
 pub uninterp spec fn zone_regions(zid: nat) -> Set<MemoryRegion>;
 
-/// Axiom: every configured zone region is drawn from the global `all_regions()`
-/// pool (a trusted configuration property; lets the refinement layer reuse the
-/// `all_regions_valid` / `all_regions_disjoint` facts of the closure spec).
-pub axiom fn zone_regions_in_all_regions()
-    ensures
-        forall|zid: nat, r: MemoryRegion| #[trigger]
-            zone_regions(zid).contains(r) ==> all_regions().contains(r),
-;
-
 /// Static configured GIC region.
 pub uninterp spec fn gic_region() -> MemoryRegion;
 
-/// Axiom: all configured regions are valid memory regions.
-pub axiom fn all_regions_valid()
+/// Axiom: all configured zone and GIC regions are valid memory regions.
+pub axiom fn configured_regions_valid()
     ensures
         forall|zid: nat, r: MemoryRegion| #[trigger]
             zone_regions(zid).contains(r) ==> r.spec_valid(),
@@ -288,7 +277,7 @@ tokenized_state_machine! {
                     // `region` is valid (in zone_regions, which are valid); the transition
                     // requires non-overlap and non-membership on the CPU set, so the
                     // SpecMemorySet wf-preservation lemma discharges `new_zone.cpu_mem_set.wf()`.
-                    all_regions_valid();
+                    configured_regions_valid();
                     assert(region.spec_valid());
                     assert(new_zone.cpu_mem_set == old_zone.cpu_mem_set.insert_region(region));
                     old_zone.cpu_mem_set.lemma_insert_region_wf(region);
@@ -385,7 +374,7 @@ tokenized_state_machine! {
                     assert(new_zone == old_zone.iommu_insert_region(region));
                     // `region` is valid (in zone_regions or the GIC region, both valid);
                     // the transition requires non-overlap and non-membership on the IOMMU set.
-                    all_regions_valid();
+                    configured_regions_valid();
                     assert(region.spec_valid());
                     assert(new_zone.iommu_mem_set == old_zone.iommu_mem_set.insert_region(region));
                     old_zone.iommu_mem_set.lemma_insert_region_wf(region);

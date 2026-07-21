@@ -1,4 +1,4 @@
-use vstd::{prelude::*, seq_lib::*};
+use vstd::prelude::*;
 
 verus! {
 

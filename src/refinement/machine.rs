@@ -24,27 +24,21 @@
 use vstd::invariant::InvariantPredicate;
 use vstd::prelude::*;
 
+verus! {
+
 use super::hardware::{HardwareRefinement, HardwareSpec};
-use super::software::{SoftwareRefinement, SoftwareSpec};
+use super::software::*;
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 use crate::hardware::HardwareInstr;
 use crate::hv_mem::protocol::{BudgetProtocol, ZoneStateOps};
-use crate::hv_mem::spec::budget::BudgetSpec;
 use crate::hv_mem::zone::{ZoneKey, ZonePred, ZoneRwContent};
-use crate::memory_set::MemorySet;
-use crate::model::hardware::HardwareView;
-use crate::model::machine::MachineState;
-use crate::model::software::Region;
-use crate::model::software::SoftwareView;
-use crate::model::types::*;
-use crate::page_table::PageTable;
-
-verus! {
-
-use super::software::*;
 use crate::model::convert::*;
-use crate::model::hardware::proof::*;
-use crate::model::software::proof::*;
+use crate::memory_set::MemorySet;
+use crate::page_table::PageTable;
+use crate::model::hardware::{proof::*, HardwareView};
+use crate::model::machine::MachineState;
+use crate::model::software::{proof::*, Region, SoftwareView};
+use crate::model::types::{CpuId, GuestPage, PhysPage, S2Entry, SharedPage, TlbKey, VmId, VmPageKey};
 
 // ---------------------------------------------------------------------------
 // §1  `wf` bridges: view-level ⟺ machine-level well-formedness
@@ -53,7 +47,7 @@ use crate::model::software::proof::*;
 // IOMMU) clauses are exactly `SoftwareView::wf` — `assemble` copies the SW
 // fields verbatim and both views define the predicates identically — so a
 // refinement only has to additionally re-establish the cross-cutting clauses
-// (`execution_wf`, `sync`, `tlb_safe` and their IOMMU twins).
+// (`active_vm_wf`, `sync`, `tlb_safe` and their IOMMU twins).
 // ---------------------------------------------------------------------------
 /// Bridge: the assembled machine state's SW-side `wf` clauses *are* the software
 /// view's, because `assemble` copies the SW fields verbatim and both views define
@@ -112,17 +106,13 @@ proof fn lemma_machine_hw_wf(sw: SoftwareView, hw: HardwareView)
     }
 }
 
-/// **The point-4 payoff.** A software view and a hardware view that are each
-/// internally well-formed and *synced* — the hardware-reachable map equals the
-/// software-maintained one (`hw.s2map == sw.s2_map`) — assemble into a `wf`
-/// `MachineState`.
+/// A software view and a hardware view that are each internally well-formed and *synced*
+/// assemble into a `wf` `MachineState`.
 ///
 /// This is where the forced lock invariant pays off: the implementation drives the
 /// `MmuSpec`/`BudgetSpec` tokens so that their reachable/maintained maps agree
 /// (sync), and `tlb_safe` rides the `MmuSpec` invariant; this lemma turns that into
-/// the full machine `wf` on which the isolation theorems rest.  The scheduler
-/// hypothesis (every running vm is live) is the only `wf` clause spanning neither
-/// view alone.
+/// the full machine `wf` on which the isolation theorems rest.
 pub proof fn lemma_synced_views_wf(sw: SoftwareView, hw: HardwareView)
     requires
         sw.wf(),
@@ -134,33 +124,7 @@ pub proof fn lemma_synced_views_wf(sw: SoftwareView, hw: HardwareView)
     ensures
         MachineState::assemble(sw, hw).wf(),
 {
-    let m = MachineState::assemble(sw, hw);
-    // ownership / sharing / translation clauses from the SW view.
     lemma_sw_machine_wf_equiv(sw, hw);
-    // execution_wf and sync from the field copies.
-    assert(m.execution_wf());
-    assert(m.sync());
-    assert(m.iommu_sync());
-    // tlb_safe: identical to `hw.tlb_safe()` (both over `hw.s2map` and `hw.tlb`).
-    assert(m.tlb_safe()) by {
-        assert forall|k: TlbKey| #[trigger] m.tlb.contains_key(k) implies {
-            let sk = VmPageKey::new(k.vm, k.gpa);
-            &&& m.hw_s2map.contains_key(sk)
-            &&& m.tlb[k].as_s2_entry() == m.hw_s2map[sk]
-        } by {
-            assert(hw.tlb.contains_key(k));
-        }
-    }
-    assert(m.iommu_tlb_safe()) by {
-        assert forall|k: TlbKey| #[trigger] m.iommu_tlb.contains_key(k) implies {
-            let sk = VmPageKey::new(k.vm, k.gpa);
-            &&& m.iommu_hw_s2map.contains_key(sk)
-            &&& m.iommu_tlb[k].as_s2_entry() == m.iommu_hw_s2map[sk]
-        } by {
-            assert(hw.iommu_tlb.contains_key(k));
-        }
-    }
-    assert(m.wf());
 }
 
 proof fn lemma_assembled_wf_from_parts(sw: SoftwareView, hw: HardwareView)
@@ -169,15 +133,14 @@ proof fn lemma_assembled_wf_from_parts(sw: SoftwareView, hw: HardwareView)
         hw.wf(),
         MachineState::assemble(sw, hw).sync(),
         MachineState::assemble(sw, hw).iommu_sync(),
-        MachineState::assemble(sw, hw).execution_wf(),
+        MachineState::assemble(sw, hw).active_vm_wf(),
     ensures
         MachineState::assemble(sw, hw).wf(),
 {
     let m = MachineState::assemble(sw, hw);
-    assert(hw.s2map == sw.s2_map);
-    assert(hw.iommu_s2map == sw.iommu_s2_map);
-    assert forall|cpu: CpuId| #[trigger]
-        hw.active_vm.contains_key(cpu) implies sw.all_vms.contains(hw.active_vm[cpu]) by {
+    assert forall|cpu: CpuId| #[trigger] hw.active_vm.contains_key(cpu) implies sw.all_vms.contains(
+        hw.active_vm[cpu],
+    ) by {
         assert(m.active_vm.contains_key(cpu));
     }
     lemma_synced_views_wf(sw, hw);
@@ -189,21 +152,11 @@ proof fn lemma_pure_sw_assembled_wf(sw1: SoftwareView, sw2: SoftwareView, hw: Ha
         sw2.wf(),
         sw2.s2_map == sw1.s2_map,
         sw2.iommu_s2_map == sw1.iommu_s2_map,
-        MachineState::assemble(sw2, hw).execution_wf(),
+        MachineState::assemble(sw2, hw).active_vm_wf(),
     ensures
         MachineState::assemble(sw2, hw).wf(),
 {
-    let m1 = MachineState::assemble(sw1, hw);
-    let m2 = MachineState::assemble(sw2, hw);
     lemma_machine_hw_wf(sw1, hw);
-    assert(m1.sync());
-    assert(hw.s2map == sw1.s2_map);
-    assert(hw.s2map == sw2.s2_map);
-    assert(m2.sync());
-    assert(m1.iommu_sync());
-    assert(hw.iommu_s2map == sw1.iommu_s2_map);
-    assert(hw.iommu_s2map == sw2.iommu_s2_map);
-    assert(m2.iommu_sync());
     lemma_assembled_wf_from_parts(sw2, hw);
 }
 
@@ -213,20 +166,11 @@ proof fn lemma_pure_hw_assembled_wf(sw: SoftwareView, hw1: HardwareView, hw2: Ha
         hw2.wf(),
         hw2.s2map == hw1.s2map,
         hw2.iommu_s2map == hw1.iommu_s2map,
-        MachineState::assemble(sw, hw2).execution_wf(),
+        MachineState::assemble(sw, hw2).active_vm_wf(),
     ensures
         MachineState::assemble(sw, hw2).wf(),
 {
-    let m1 = MachineState::assemble(sw, hw1);
-    let m2 = MachineState::assemble(sw, hw2);
     lemma_sw_machine_wf_equiv(sw, hw1);
-    assert(sw.wf());
-    assert(m1.sync());
-    assert(hw2.s2map == sw.s2_map);
-    assert(m2.sync());
-    assert(m1.iommu_sync());
-    assert(hw2.iommu_s2map == sw.iommu_s2_map);
-    assert(m2.iommu_sync());
     lemma_assembled_wf_from_parts(sw, hw2);
 }
 
@@ -258,9 +202,6 @@ pub proof fn refine_hv_map(
         SoftwareView::map_step(sw1, sw2, vm, gpa, entry),
         HardwareView::map_step(hw1, hw2, vm, gpa, entry),
         MachineState::assemble(sw1, hw1).wf(),
-        // Kept explicit for SoftwareView-level callers; MachineState `wf` now also
-        // carries this IOMMU/DMA separation invariant.
-        sw1.iommu_wf(),
     ensures
         MachineState::hv_map_step(
             MachineState::assemble(sw1, hw1),
@@ -278,56 +219,28 @@ pub proof fn refine_hv_map(
     // SW side: wf + the `s2_map` insert.
     lemma_sw_machine_wf_equiv(sw1, hw1);
     lemma_machine_hw_wf(sw1, hw1);
-    assert(sw1.wf());
     lemma_map_step_preserves_wf(sw1, sw2, vm, gpa, entry);
     lemma_sw_machine_wf_equiv(sw2, hw2);
-    assert(sw2.wf());
-
-    // Field deltas: `s2_map` (SW) and `hw_s2map` (HW) both grow by `key`; the rest fixed.
-    assert(s2.s2_map == s1.s2_map.insert(key, entry));
-    assert(s2.hw_s2map == s1.hw_s2map.insert(key, entry));
-    assert(s2.iommu_s2_map == s1.iommu_s2_map);
-    assert(s2.iommu_hw_s2map == s1.iommu_hw_s2map);
-    assert(s2.iommu_tlb == s1.iommu_tlb);
-    assert(s2.all_vms == s1.all_vms);
-    assert(s2.vm_owned == s1.vm_owned);
-    assert(s2.hypervisor_owned == s1.hypervisor_owned);
-    assert(s2.shared_pages == s1.shared_pages);
-    assert(s2.active_vm == s1.active_vm);
-    assert(s2.memory == s1.memory);
 
     // The flush is vacuous: the page was unreachable (`map_step` freshness), so by
     // `tlb_safe` no cached entry names `(vm, gpa)`, hence `remove_keys(targets)` is id.
     assert(s1.tlb_safe());
     assert(!hw1.s2map.contains_key(key));
-    assert forall|k: TlbKey| s1.tlb.contains_key(k) implies !targets.contains(k) by {
+    assert forall|k: TlbKey| #[trigger] s1.tlb.contains_key(k) implies !targets.contains(k) by {
         if targets.contains(k) {
             assert(s1.hw_s2map.contains_key(VmPageKey::new(k.vm, k.gpa)));
         }
     }
     assert(s2.tlb =~= s1.tlb.remove_keys(targets));
 
-    // sync(s2): both maps grew by the same `key => entry` from a synced `s1`.
-    assert(s1.sync());
-    assert(s2.hw_s2map =~= s2.s2_map);
-    assert(s1.iommu_sync());
-    assert(s2.iommu_hw_s2map =~= s2.iommu_s2_map);
-    assert(s2.iommu_sync());
-
-    // tlb_safe(s2): MachineState `tlb_safe` is exactly the HW one over `hw_s2map`.
     lemma_map_preserves_wf(hw1, hw2, vm, gpa, entry);
-    assert(s2.tlb_safe()) by {
-        assert forall|k: TlbKey| #[trigger] s2.tlb.contains_key(k) implies {
-            let sk = VmPageKey::new(k.vm, k.gpa);
-            &&& s2.hw_s2map.contains_key(sk)
-            &&& s2.tlb[k].as_s2_entry() == s2.hw_s2map[sk]
-        } by {
-            assert(hw2.tlb.contains_key(k));
+    assert(s2.active_vm_wf()) by {
+        assert forall|cpu: CpuId| #[trigger]
+            s2.active_vm.contains_key(cpu) implies s2.all_vms.contains(s2.active_vm[cpu]) by {
+            assert(s1.active_vm.contains_key(cpu));
         }
     }
-    assert(s2.execution_wf());
     lemma_assembled_wf_from_parts(sw2, hw2);
-    assert(s2.wf());
 }
 
 /// A SW unmap step composed with the atomic hardware
@@ -346,7 +259,6 @@ pub proof fn refine_hv_unmap(
         SoftwareView::unmap_step(sw1, sw2, vm, gpa),
         HardwareView::unmap_invalidate_step(hw1, hw2, vm, gpa),
         MachineState::assemble(sw1, hw1).wf(),
-        sw1.iommu_wf(),
     ensures
         MachineState::hv_unmap_step(
             MachineState::assemble(sw1, hw1),
@@ -363,48 +275,20 @@ pub proof fn refine_hv_unmap(
     // SW side: wf + the `s2_map` remove.
     lemma_sw_machine_wf_equiv(sw1, hw1);
     lemma_machine_hw_wf(sw1, hw1);
-    assert(sw1.wf());
     lemma_unmap_step_preserves_wf(sw1, sw2, vm, gpa);
     lemma_sw_machine_wf_equiv(sw2, hw2);
-    assert(sw2.wf());
-
-    // Field deltas: `s2_map` (SW) and `hw_s2map` (HW) both lose `key`.
-    assert(s2.s2_map == s1.s2_map.remove(key));
-    assert(s2.hw_s2map == s1.hw_s2map.remove(key));
-    assert(s2.iommu_s2_map == s1.iommu_s2_map);
-    assert(s2.iommu_hw_s2map == s1.iommu_hw_s2map);
-    assert(s2.iommu_tlb == s1.iommu_tlb);
-    assert(s2.all_vms == s1.all_vms);
-    assert(s2.vm_owned == s1.vm_owned);
-    assert(s2.hypervisor_owned == s1.hypervisor_owned);
-    assert(s2.shared_pages == s1.shared_pages);
-    assert(s2.active_vm == s1.active_vm);
-    assert(s2.memory == s1.memory);
 
     // The atomic step's unguarded flush set coincides with `invalidation_targets`.
     assert(s2.tlb =~= s1.tlb.remove_keys(targets));
 
-    // sync(s2): both maps lost the same `key` from a synced `s1`.
-    assert(s1.sync());
-    assert(s2.hw_s2map =~= s2.s2_map);
-    assert(s1.iommu_sync());
-    assert(s2.iommu_hw_s2map =~= s2.iommu_s2_map);
-    assert(s2.iommu_sync());
-
-    // tlb_safe(s2) via the HW lemma (MachineState `tlb_safe` == HW one over `hw_s2map`).
     lemma_unmap_invalidate_preserves_wf(hw1, hw2, vm, gpa);
-    assert(s2.tlb_safe()) by {
-        assert forall|k: TlbKey| #[trigger] s2.tlb.contains_key(k) implies {
-            let sk = VmPageKey::new(k.vm, k.gpa);
-            &&& s2.hw_s2map.contains_key(sk)
-            &&& s2.tlb[k].as_s2_entry() == s2.hw_s2map[sk]
-        } by {
-            assert(hw2.tlb.contains_key(k));
+    assert(s2.active_vm_wf()) by {
+        assert forall|cpu: CpuId| #[trigger]
+            s2.active_vm.contains_key(cpu) implies s2.all_vms.contains(s2.active_vm[cpu]) by {
+            assert(s1.active_vm.contains_key(cpu));
         }
     }
-    assert(s2.execution_wf());
     lemma_assembled_wf_from_parts(sw2, hw2);
-    assert(s2.wf());
 }
 
 /// IOMMU map refinement: software installs the DMA map entry while the SMMU instance
@@ -438,46 +322,28 @@ pub proof fn refine_hv_iommu_map(
 
     lemma_sw_machine_wf_equiv(sw1, hw1);
     lemma_machine_hw_wf(sw1, hw1);
-    assert(sw1.wf());
     lemma_iommu_map_step_preserves_iommu_wf(sw1, sw2, vm, gpa, entry);
-    assert(sw2.ownership_wf());
-    assert(sw2.sharing_wf());
-    assert(sw2.translation_wf());
-    assert(sw2.wf());
     lemma_sw_machine_wf_equiv(sw2, hw2);
-
-    assert(s2.iommu_s2_map == s1.iommu_s2_map.insert(key, entry));
-    assert(s2.iommu_hw_s2map == s1.iommu_hw_s2map.insert(key, entry));
-    assert(s2.s2_map == s1.s2_map);
-    assert(s2.hw_s2map == s1.hw_s2map);
-    assert(s2.tlb == s1.tlb);
-    assert(s2.all_vms == s1.all_vms);
-    assert(s2.vm_owned == s1.vm_owned);
-    assert(s2.hypervisor_owned == s1.hypervisor_owned);
-    assert(s2.shared_pages == s1.shared_pages);
-    assert(s2.active_vm == s1.active_vm);
-    assert(s2.memory == s1.memory);
 
     assert(s1.iommu_tlb_safe());
     assert(!hw1.iommu_s2map.contains_key(key));
-    assert forall|k: TlbKey| s1.iommu_tlb.contains_key(k) implies !targets.contains(k) by {
+    assert forall|k: TlbKey| #[trigger] s1.iommu_tlb.contains_key(k) implies !targets.contains(
+        k,
+    ) by {
         if targets.contains(k) {
             assert(s1.iommu_hw_s2map.contains_key(VmPageKey::new(k.vm, k.gpa)));
         }
     }
     assert(s2.iommu_tlb =~= s1.iommu_tlb.remove_keys(targets));
 
-    assert(s1.sync());
-    assert(s2.hw_s2map == s2.s2_map);
-    assert(s2.sync());
-    assert(s1.iommu_sync());
-    assert(s2.iommu_hw_s2map =~= s2.iommu_s2_map);
-    assert(s2.iommu_sync());
-
     lemma_iommu_map_preserves_wf(hw1, hw2, vm, gpa, entry);
-    assert(s2.execution_wf());
+    assert(s2.active_vm_wf()) by {
+        assert forall|cpu: CpuId| #[trigger]
+            s2.active_vm.contains_key(cpu) implies s2.all_vms.contains(s2.active_vm[cpu]) by {
+            assert(s1.active_vm.contains_key(cpu));
+        }
+    }
     lemma_assembled_wf_from_parts(sw2, hw2);
-    assert(s2.wf());
 }
 
 /// IOMMU unmap refinement: software removes the DMA map entry while the SMMU instance
@@ -509,39 +375,19 @@ pub proof fn refine_hv_iommu_unmap(
 
     lemma_sw_machine_wf_equiv(sw1, hw1);
     lemma_machine_hw_wf(sw1, hw1);
-    assert(sw1.wf());
     lemma_iommu_unmap_step_preserves_iommu_wf(sw1, sw2, vm, gpa);
-    assert(sw2.ownership_wf());
-    assert(sw2.sharing_wf());
-    assert(sw2.translation_wf());
-    assert(sw2.wf());
     lemma_sw_machine_wf_equiv(sw2, hw2);
-
-    assert(s2.iommu_s2_map == s1.iommu_s2_map.remove(key));
-    assert(s2.iommu_hw_s2map == s1.iommu_hw_s2map.remove(key));
-    assert(s2.s2_map == s1.s2_map);
-    assert(s2.hw_s2map == s1.hw_s2map);
-    assert(s2.tlb == s1.tlb);
-    assert(s2.all_vms == s1.all_vms);
-    assert(s2.vm_owned == s1.vm_owned);
-    assert(s2.hypervisor_owned == s1.hypervisor_owned);
-    assert(s2.shared_pages == s1.shared_pages);
-    assert(s2.active_vm == s1.active_vm);
-    assert(s2.memory == s1.memory);
 
     assert(s2.iommu_tlb =~= s1.iommu_tlb.remove_keys(targets));
 
-    assert(s1.sync());
-    assert(s2.hw_s2map == s2.s2_map);
-    assert(s2.sync());
-    assert(s1.iommu_sync());
-    assert(s2.iommu_hw_s2map =~= s2.iommu_s2_map);
-    assert(s2.iommu_sync());
-
     lemma_iommu_unmap_invalidate_preserves_wf(hw1, hw2, vm, gpa);
-    assert(s2.execution_wf());
+    assert(s2.active_vm_wf()) by {
+        assert forall|cpu: CpuId| #[trigger]
+            s2.active_vm.contains_key(cpu) implies s2.all_vms.contains(s2.active_vm[cpu]) by {
+            assert(s1.active_vm.contains_key(cpu));
+        }
+    }
     lemma_assembled_wf_from_parts(sw2, hw2);
-    assert(s2.wf());
 }
 
 // ── ownership management (pure SW — HW unchanged) ───────────────────────────
@@ -555,7 +401,6 @@ pub proof fn refine_hv_assign_page(
     requires
         SoftwareView::assign_page_step(sw1, sw2, vm, page),
         MachineState::assemble(sw1, hw).wf(),
-        sw1.iommu_wf(),
     ensures
         MachineState::hv_assign_page_step(
             MachineState::assemble(sw1, hw),
@@ -568,22 +413,19 @@ pub proof fn refine_hv_assign_page(
     let s2 = MachineState::assemble(sw2, hw);
     // Pure-SW: HW state (tlb, active_vm, memory) is unchanged.
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_assign_page_step_preserves_wf(sw1, sw2, vm, page);
     lemma_sw_machine_wf_equiv(sw2, hw);
-    assert(sw2.wf());
-    // execution_wf (active_vm, all_vms unchanged) and tlb_safe (tlb, s2_map unchanged)
+    // active_vm_wf (active_vm, all_vms unchanged) and tlb_safe (tlb, s2_map unchanged)
     // carry over from `s1`.
     assert(s2.all_vms == s1.all_vms);
     assert(s2.active_vm == s1.active_vm);
     assert(s2.tlb == s1.tlb);
     assert(s2.s2_map == s1.s2_map);
-    assert(s2.execution_wf());
+    assert(s2.active_vm_wf());
     assert(s1.tlb_safe());
     assert(sw2.s2_map == sw1.s2_map);
     assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
     lemma_pure_sw_assembled_wf(sw1, sw2, hw);
-    assert(s2.wf());
 }
 
 pub proof fn refine_hv_reclaim_page(
@@ -596,7 +438,6 @@ pub proof fn refine_hv_reclaim_page(
     requires
         SoftwareView::reclaim_page_step(sw1, sw2, vm, page),
         MachineState::assemble(sw1, hw).wf(),
-        sw1.iommu_wf(),
         MachineState::assemble(sw1, hw).page_is_quiescent(page),
     ensures
         MachineState::hv_reclaim_page_step(
@@ -609,7 +450,6 @@ pub proof fn refine_hv_reclaim_page(
     let s1 = MachineState::assemble(sw1, hw);
     let s2 = MachineState::assemble(sw2, hw);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     // The machine-level `page_is_quiescent` supplies the SoftwareView reclaim lemma's
     // premises (no surviving mapping or sharing edge targets `page`); `sw1` shares
     // `s1`'s `s2_map`/`shared_pages`.
@@ -622,17 +462,15 @@ pub proof fn refine_hv_reclaim_page(
     }
     lemma_reclaim_page_step_preserves_wf(sw1, sw2, vm, page);
     lemma_sw_machine_wf_equiv(sw2, hw);
-    assert(sw2.wf());
     assert(s2.all_vms == s1.all_vms);
     assert(s2.active_vm == s1.active_vm);
     assert(s2.tlb == s1.tlb);
     assert(s2.s2_map == s1.s2_map);
-    assert(s2.execution_wf());
+    assert(s2.active_vm_wf());
     assert(s1.tlb_safe());
     assert(sw2.s2_map == sw1.s2_map);
     assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
     lemma_pure_sw_assembled_wf(sw1, sw2, hw);
-    assert(s2.wf());
 }
 
 // ── page sharing (pure SW — HW unchanged) ───────────────────────────────────
@@ -647,7 +485,6 @@ pub proof fn refine_hv_share_page(
     requires
         SoftwareView::share_page_step(sw1, sw2, left, right, page),
         MachineState::assemble(sw1, hw).wf(),
-        sw1.iommu_wf(),
     ensures
         MachineState::hv_share_page_step(
             MachineState::assemble(sw1, hw),
@@ -660,22 +497,19 @@ pub proof fn refine_hv_share_page(
     let s1 = MachineState::assemble(sw1, hw);
     let s2 = MachineState::assemble(sw2, hw);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_share_page_step_preserves_wf(sw1, sw2, left, right, page);
     lemma_sw_machine_wf_equiv(sw2, hw);
-    assert(sw2.wf());
     // Translation state (s2_map, tlb, active_vm) unchanged ⇒ cross-cutting clauses
     // carry over.
     assert(s2.all_vms == s1.all_vms);
     assert(s2.active_vm == s1.active_vm);
     assert(s2.tlb == s1.tlb);
     assert(s2.s2_map == s1.s2_map);
-    assert(s2.execution_wf());
+    assert(s2.active_vm_wf());
     assert(s1.tlb_safe());
     assert(sw2.s2_map == sw1.s2_map);
     assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
     lemma_pure_sw_assembled_wf(sw1, sw2, hw);
-    assert(s2.wf());
 }
 
 pub proof fn refine_hv_unshare_page(
@@ -689,7 +523,6 @@ pub proof fn refine_hv_unshare_page(
     requires
         SoftwareView::unshare_page_step(sw1, sw2, left, right, page),
         MachineState::assemble(sw1, hw).wf(),
-        sw1.iommu_wf(),
         // No-dangling guard (cf. `hv_unshare_page_step`): an endpoint that maps
         // `page` must own it, so dropping the share strands no translation.
         forall|k: VmPageKey| #[trigger]
@@ -708,7 +541,6 @@ pub proof fn refine_hv_unshare_page(
     let s1 = MachineState::assemble(sw1, hw);
     let s2 = MachineState::assemble(sw2, hw);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     // The guard transfers to `sw1` (same `s2_map`/`vm_owned` as `s1`).
     assert forall|k: VmPageKey| #[trigger]
         sw1.s2_map.contains_key(k) && (k.vm == left || k.vm == right) && sw1.s2_map[k].page
@@ -717,17 +549,15 @@ pub proof fn refine_hv_unshare_page(
     }
     lemma_unshare_page_step_preserves_wf(sw1, sw2, left, right, page);
     lemma_sw_machine_wf_equiv(sw2, hw);
-    assert(sw2.wf());
     assert(s2.all_vms == s1.all_vms);
     assert(s2.active_vm == s1.active_vm);
     assert(s2.tlb == s1.tlb);
     assert(s2.s2_map == s1.s2_map);
-    assert(s2.execution_wf());
+    assert(s2.active_vm_wf());
     assert(s1.tlb_safe());
     assert(sw2.s2_map == sw1.s2_map);
     assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
     lemma_pure_sw_assembled_wf(sw1, sw2, hw);
-    assert(s2.wf());
 }
 
 // ── scheduling (pure HW — SW unchanged) ─────────────────────────────────────
@@ -758,10 +588,7 @@ pub proof fn refine_hv_context_switch(
     lemma_sw_machine_wf_equiv(sw, hw2);
     lemma_machine_hw_wf(sw, hw1);
     lemma_context_switch_preserves_wf(hw1, hw2, cpu, vm);
-    assert(s2.ownership_wf());
-    assert(s2.sharing_wf());
-    assert(s2.translation_wf());
-    // execution_wf: `active_vm` is extended by `cpu ↦ vm` with `vm ∈ all_vms`.
+    // active_vm_wf: `active_vm` is extended by `cpu ↦ vm` with `vm ∈ all_vms`.
     assert(s2.all_vms == s1.all_vms);
     assert(s2.active_vm == s1.active_vm.insert(cpu, vm));
     assert(s1.all_vms.contains(vm));
@@ -772,19 +599,12 @@ pub proof fn refine_hv_context_switch(
             assert(s1.active_vm.contains_key(c) && s2.active_vm[c] == s1.active_vm[c]);
         }
     }
-    // tlb_safe: `tlb` and `s2_map` are unchanged.
-    assert(s2.tlb == s1.tlb);
-    assert(s2.s2_map == s1.s2_map);
-    assert(s1.tlb_safe());
-    assert(hw2.s2map == hw1.s2map);
-    assert(hw2.iommu_s2map == hw1.iommu_s2map);
     lemma_pure_hw_assembled_wf(sw, hw1, hw2);
-    assert(s2.wf());
 }
 
 // ── VM lifecycle (pure SW — HW unchanged) ───────────────────────────────────
 /// Registering a fresh VM refines `hv_add_vm_step`.  The new VM owns and maps
-/// nothing, so the only machine-only clause to re-establish is `execution_wf`
+/// nothing, so the only machine-only clause to re-establish is `active_vm_wf`
 /// (which survives a growing `all_vms`); the SW clauses come via the bridge and
 /// `tlb_safe` carries over unchanged.
 pub proof fn refine_hv_add_vm(sw1: SoftwareView, sw2: SoftwareView, hw: HardwareView, vm: VmId)
@@ -792,7 +612,6 @@ pub proof fn refine_hv_add_vm(sw1: SoftwareView, sw2: SoftwareView, hw: Hardware
         SoftwareView::add_vm_enabled(sw1, vm),
         SoftwareView::add_vm_step(sw1, sw2, vm),
         MachineState::assemble(sw1, hw).wf(),
-        sw1.iommu_wf(),
     ensures
         MachineState::hv_add_vm_step(
             MachineState::assemble(sw1, hw),
@@ -803,11 +622,9 @@ pub proof fn refine_hv_add_vm(sw1: SoftwareView, sw2: SoftwareView, hw: Hardware
     let s1 = MachineState::assemble(sw1, hw);
     let s2 = MachineState::assemble(sw2, hw);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_add_vm_step_preserves_wf(sw1, sw2, vm);
     lemma_sw_machine_wf_equiv(sw2, hw);
-    assert(sw2.wf());
-    // execution_wf: `active_vm` is unchanged and `all_vms` only grows (insert `vm`),
+    // active_vm_wf: `active_vm` is unchanged and `all_vms` only grows (insert `vm`),
     // so every scheduled VM is still present.
     assert(s2.active_vm == s1.active_vm);
     assert(s2.all_vms == s1.all_vms.insert(vm));
@@ -816,14 +633,7 @@ pub proof fn refine_hv_add_vm(sw1: SoftwareView, sw2: SoftwareView, hw: Hardware
     ) by {
         assert(s1.active_vm.contains_key(c) && s1.all_vms.contains(s1.active_vm[c]));
     }
-    // tlb_safe: `tlb` and `s2_map` are unchanged.
-    assert(s2.tlb == s1.tlb);
-    assert(s2.s2_map == s1.s2_map);
-    assert(s1.tlb_safe());
-    assert(sw2.s2_map == sw1.s2_map);
-    assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
     lemma_pure_sw_assembled_wf(sw1, sw2, hw);
-    assert(s2.wf());
 }
 
 /// Deregistering an empty VM refines `hv_remove_vm_step`.  Beyond the SW
@@ -836,7 +646,6 @@ pub proof fn refine_hv_remove_vm(sw1: SoftwareView, sw2: SoftwareView, hw: Hardw
         SoftwareView::remove_vm_enabled(sw1, vm),
         SoftwareView::remove_vm_step(sw1, sw2, vm),
         MachineState::assemble(sw1, hw).wf(),
-        sw1.iommu_wf(),
         forall|k: TlbKey| #[trigger]
             MachineState::assemble(sw1, hw).tlb.contains_key(k) ==> k.vm != vm,
         forall|cpu: CpuId| #[trigger]
@@ -854,11 +663,9 @@ pub proof fn refine_hv_remove_vm(sw1: SoftwareView, sw2: SoftwareView, hw: Hardw
     let s1 = MachineState::assemble(sw1, hw);
     let s2 = MachineState::assemble(sw2, hw);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_remove_vm_step_preserves_wf(sw1, sw2, vm);
     lemma_sw_machine_wf_equiv(sw2, hw);
-    assert(sw2.wf());
-    // execution_wf: `active_vm` unchanged; `all_vms` shrinks by `vm`, and the HW
+    // active_vm_wf: `active_vm` unchanged; `all_vms` shrinks by `vm`, and the HW
     // guard says no CPU ran `vm`, so every scheduled VM remains in `all_vms`.
     assert(s2.active_vm == s1.active_vm);
     assert(s2.all_vms == s1.all_vms.remove(vm));
@@ -868,14 +675,7 @@ pub proof fn refine_hv_remove_vm(sw1: SoftwareView, sw2: SoftwareView, hw: Hardw
         assert(s1.active_vm.contains_key(c) && s1.all_vms.contains(s1.active_vm[c]));
         assert(s1.active_vm[c] != vm);
     }
-    // tlb_safe: `tlb` and `s2_map` are unchanged.
-    assert(s2.tlb == s1.tlb);
-    assert(s2.s2_map == s1.s2_map);
-    assert(s1.tlb_safe());
-    assert(sw2.s2_map == sw1.s2_map);
-    assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
     lemma_pure_sw_assembled_wf(sw1, sw2, hw);
-    assert(s2.wf());
 }
 
 // ---------------------------------------------------------------------------
@@ -911,9 +711,6 @@ pub proof fn lemma_phys_prefix_succ(region: Region, k: nat)
         !phys_prefix(region, k).contains(region.phys_page(k)),
         phys_prefix(region, (k + 1) as nat) == phys_prefix(region, k).insert(region.phys_page(k)),
 {
-    assert(phys_prefix(region, (k + 1) as nat) =~= phys_prefix(region, k).insert(
-        region.phys_page(k),
-    ));
 }
 
 /// `entry_prefix` gains exactly the entry for region page `k` when extended by one.
@@ -925,9 +722,6 @@ pub proof fn lemma_entry_prefix_succ(region: Region, k: nat)
             S2Entry { page: region.phys_page(k), access: region.access, generation: 0 },
         ),
 {
-    let key = VmPageKey::new(region.vm, region.guest_page(k));
-    let entry = S2Entry { page: region.phys_page(k), access: region.access, generation: 0 };
-    assert(entry_prefix(region, (k + 1) as nat) =~= entry_prefix(region, k).insert(key, entry));
 }
 
 /// Index arithmetic shared by every trace edge/`wf` loop: `i = j/2` splits even/odd.
@@ -939,11 +733,6 @@ pub proof fn lemma_half_index(j: int)
         j % 2 == 1 ==> j == 2 * (j / 2) + 1 && (j + 1) / 2 == j / 2 + 1 && (j + 2) / 2 == j / 2 + 1,
         j / 2 <= (j + 1) / 2,
 {
-    assert(j == 2 * (j / 2) + j % 2 && 0 <= j % 2 < 2 && j / 2 <= (j + 1) / 2 && (j + 2) / 2 == j
-        / 2 + 1 && (j + 1) / 2 == j / 2 + j % 2) by (nonlinear_arith)
-        requires
-            0 <= j,
-    ;
 }
 
 /// `hw` with its reachable map forced to `sw.s2_map` — the hardware state at a
@@ -962,7 +751,6 @@ pub proof fn lemma_synced_hw_id(sw: SoftwareView, hw: HardwareView)
     ensures
         MachineState::assemble(sw, synced_hw(sw, hw)) == MachineState::assemble(sw, hw),
 {
-    assert(MachineState::assemble(sw, synced_hw(sw, hw)) =~= MachineState::assemble(sw, hw));
 }
 
 /// TLB keys naming one of the first `u` region guest pages.
@@ -1009,13 +797,6 @@ proof fn lemma_prefix_pages_free(s1: SoftwareView, region: Region, a: nat, p: Ph
         s1.hypervisor_owned.contains(p),
         forall|w: VmId| #[trigger] s1.all_vms.contains(w) ==> !s1.vm_owned[w].contains(p),
 {
-    assert(region.pages().contains(p));  // [phys_base, phys_base+a) ⊆ [phys_base, phys_base+count)
-    assert(s1.hypervisor_owned.contains(p));  // enabled: region pages are free
-    assert forall|w: VmId| #[trigger] s1.all_vms.contains(w) implies !s1.vm_owned[w].contains(
-        p,
-    ) by {
-        // ownership_wf: a VM-owned page is not hypervisor-owned (contrapositive).
-    }
 }
 
 /// Every partial-insert state is `wf` (`m <= a <= count`).
@@ -1069,13 +850,6 @@ pub proof fn lemma_insert_partial_wf(s1: SoftwareView, region: Region, a: nat, m
             }
         }
     }
-    // sharing_wf: shared_pages / all_vms unchanged.
-    assert forall|e: SharedPage| #[trigger] sp.shared_pages.contains(e) implies (e.left != e.right
-        && sp.all_vms.contains(e.left) && sp.all_vms.contains(e.right) && sp.shared_pages.contains(
-        e.reverse(),
-    )) by {
-        assert(s1.shared_pages.contains(e));
-    }
     // translation_wf
     assert forall|k: VmPageKey| #[trigger] sp.s2_map.contains_key(k) implies (sp.all_vms.contains(
         k.vm,
@@ -1102,7 +876,8 @@ pub proof fn lemma_insert_partial_wf(s1: SoftwareView, region: Region, a: nat, m
     assert forall|v1: VmId, v2: VmId| #[trigger]
         sp.all_vms.contains(v1) && #[trigger] sp.all_vms.contains(v2) && v1 != v2 implies (forall|
         p: PhysPage,
-    | #[trigger] sp.iommu_owned[v1].contains(p) ==> !sp.vm_owned[v2].contains(p)) by {
+    | #[trigger]
+        sp.iommu_owned[v1].contains(p) ==> !sp.vm_owned[v2].contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             sp.iommu_owned[v1].contains(p) implies !sp.vm_owned[v2].contains(p) by {
             if v2 == vm && pp.contains(p) {
@@ -1120,9 +895,9 @@ pub proof fn lemma_insert_partial_wf(s1: SoftwareView, region: Region, a: nat, m
     }
     // clause (4): the grown CPU ownership stays disjoint from `iommu_shared` — prefix pages
     // are region pages, which the enabled guard keeps out of `iommu_shared`.
-    assert forall|v: VmId| #[trigger]
-        sp.all_vms.contains(v) implies (forall|p: PhysPage| #[trigger] sp.vm_owned[v].contains(p)
-        ==> !sp.iommu_shared.contains(p)) by {
+    assert forall|v: VmId| #[trigger] sp.all_vms.contains(v) implies (forall|p: PhysPage|
+     #[trigger]
+        sp.vm_owned[v].contains(p) ==> !sp.iommu_shared.contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             sp.vm_owned[v].contains(p) implies !sp.iommu_shared.contains(p) by {
             if v == vm && pp.contains(p) {
@@ -1132,9 +907,6 @@ pub proof fn lemma_insert_partial_wf(s1: SoftwareView, region: Region, a: nat, m
             }
         }
     }
-    assert(sp.iommu_ownership_wf());
-    assert(sp.iommu_translation_wf());
-    assert(sp.wf());
 }
 
 /// Even edge `2*i`: assigning region page `i` advances `(i, i) → (i+1, i)`.
@@ -1157,9 +929,6 @@ pub proof fn lemma_insert_assign_edge(s1: SoftwareView, region: Region, i: nat)
     let pp_i = phys_prefix(region, i);
     let pp_i1 = phys_prefix(region, (i + 1) as nat);
     lemma_phys_prefix_succ(region, i);  // pp_i1 == pp_i.insert(page); page ∉ pp_i
-    // `page` is free in `s1` and not in the first-`i` prefix, so it is held by `from`.
-    assert(region.pages().contains(page));
-    assert(s1.hypervisor_owned.contains(page));
     // hypervisor_owned: difference(prefix(i+1)) == difference(prefix(i)).remove(page)
     assert(s1.hypervisor_owned.difference(pp_i1) =~= s1.hypervisor_owned.difference(pp_i).remove(
         page,
@@ -1174,8 +943,8 @@ pub proof fn lemma_insert_assign_edge(s1: SoftwareView, region: Region, i: nat)
     ).vm_owned);
     // IOMMU assign guard: `page` is a region page, so by the enabled IOMMU guard it is not
     // any *other* VM's private DMA page (`from.iommu_owned == s1.iommu_owned`).
-    assert forall|v1: VmId| #[trigger] from.all_vms.contains(v1) && v1 != vm implies
-        !from.iommu_owned[v1].contains(page) by {
+    assert forall|v1: VmId| #[trigger]
+        from.all_vms.contains(v1) && v1 != vm implies !from.iommu_owned[v1].contains(page) by {
         assert(region.pages().contains(page));
         assert(s1.all_vms.contains(v1));
     }
@@ -1197,14 +966,11 @@ pub proof fn lemma_insert_map_edge(s1: SoftwareView, region: Region, i: nat)
         ),
 {
     let vm = region.vm;
-    let from = insert_partial(s1, region, (i + 1) as nat, i);
     let key = VmPageKey::new(vm, region.guest_page(i));
     let entry = S2Entry { page: region.phys_page(i), access: region.access, generation: 0 };
     let ep_i = entry_prefix(region, i);
     let ep_i1 = entry_prefix(region, (i + 1) as nat);
     lemma_entry_prefix_succ(region, i);  // ep_i1 == ep_i.insert(key, entry); key ∉ ep_i
-    // owned_or_shared(vm, phys_page(i)): it is in `from`'s prefix of vm-owned pages.
-    assert(phys_prefix(region, (i + 1) as nat).contains(region.phys_page(i)));
     // s2_map: union(entry_prefix(i+1)) == union(entry_prefix(i)).insert(key, entry)
     assert(s1.s2_map.union_prefer_right(ep_i1) =~= s1.s2_map.union_prefer_right(ep_i).insert(
         key,
@@ -1240,7 +1006,6 @@ pub proof fn lemma_insert_partial_machine_wf(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::insert_region_enabled(sw1, region),
-        sw1.iommu_wf(),
         m <= a,
         a <= region.count,
     ensures
@@ -1251,16 +1016,13 @@ pub proof fn lemma_insert_partial_machine_wf(
     let m2 = MachineState::assemble(sp, synced_hw(sp, hw));
     // SW clauses via the bridge + the SoftwareView partial-`wf` proof.
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_insert_partial_wf(sw1, region, a, m);
     lemma_sw_machine_wf_equiv(sp, synced_hw(sp, hw));
-    // execution_wf: `active_vm` and `all_vms` are unchanged.
+    // active_vm_wf: `active_vm` and `all_vms` are unchanged.
     assert(m2.all_vms == m1.all_vms);
     assert(m2.active_vm == m1.active_vm);
-    assert(m1.execution_wf());
-    assert(m2.execution_wf());
-    // sync holds by construction (`synced_hw` forces `hw_s2map == s2_map`).
-    assert(m2.hw_s2map == m2.s2_map);
+    assert(m1.active_vm_wf());
+    assert(m2.active_vm_wf());
     // tlb_safe (over `hw_s2map == s2_map`): `tlb == hw.tlb` unchanged; `s2_map` grew
     // only by fresh region entries (keys unmapped in `sw1`), so each cached key's
     // lookup keeps the value `m1.tlb_safe` provided.
@@ -1284,8 +1046,6 @@ pub proof fn lemma_insert_partial_machine_wf(
         assert(m2.hw_s2map[sk] == sw1.s2_map[sk]);
     }
     assert(m2.tlb_safe());
-    assert(sp.wf());
-    assert(m2.sync());
     assert(sp.iommu_s2_map == sw1.iommu_s2_map);
     assert(m1.iommu_sync());
     assert(m2.iommu_hw_s2map == sp.iommu_s2_map);
@@ -1305,7 +1065,6 @@ pub proof fn lemma_insert_partial_machine_wf(
                 == m1.iommu_hw_s2map[sk]);
         }
     }
-    assert(m2.wf());
 }
 
 /// Odd edge `2*i+1` at the machine level: mapping region entry `i` is an
@@ -1320,7 +1079,6 @@ pub proof fn lemma_insert_map_machine_edge(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::insert_region_enabled(sw1, region),
-        sw1.iommu_wf(),
         i < region.count,
     ensures
         MachineState::hv_map_step(
@@ -1340,7 +1098,6 @@ pub proof fn lemma_insert_map_machine_edge(
     let hw2 = synced_hw(to_sw, hw);
     let key = VmPageKey::new(vm, gpa);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     // SW map step between the two partials (gives `to_sw.s2_map == from_sw.s2_map.insert`).
     lemma_insert_map_edge(sw1, region, i);
     // `wf` of the source endpoint (the synced partial).
@@ -1351,8 +1108,6 @@ pub proof fn lemma_insert_map_machine_edge(
         assert(!sw1.s2_map.contains_key(key));
         assert(!entry_prefix(region, i).dom().contains(key));  // index i not < i
     }
-    // The hardware side is exactly `map_step`: reachable map grows by `key`, TLB fixed.
-    assert(HardwareView::map_step(hw1, hw2, vm, gpa, entry));
     // Establish `from_sw`'s explicit IOMMU precondition for `refine_hv_map`.
     lemma_insert_partial_wf(sw1, region, (i + 1) as nat, i);
     refine_hv_map(from_sw, to_sw, hw1, hw2, vm, gpa, entry);
@@ -1386,7 +1141,6 @@ pub proof fn lemma_insert_region_machine_trace(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::insert_region_enabled(sw1, region),
-        sw1.iommu_wf(),
         SoftwareView::insert_region_step(sw1, sw2, region),
     ensures
         exists|trace: Seq<MachineState>|
@@ -1407,7 +1161,6 @@ pub proof fn lemma_insert_region_machine_trace(
 {
     let n = region.count;
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     let trace = Seq::new(
         (2 * n + 1) as nat,
         |j: int| insert_machine_partial(sw1, hw, region, ((j + 1) / 2) as nat, (j / 2) as nat),
@@ -1476,7 +1229,6 @@ pub proof fn lemma_insert_region_machine_trace(
         ;
         lemma_insert_partial_machine_wf(sw1, hw, region, ((j + 1) / 2) as nat, (j / 2) as nat);
     }
-    assert(trace.len() == 2 * region.count + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1523,12 +1275,6 @@ proof fn lemma_remove_prefix_owned(s1: SoftwareView, region: Region, r: nat, p: 
         forall|w: VmId| #[trigger]
             s1.all_vms.contains(w) && w != region.vm ==> !s1.vm_owned[w].contains(p),
 {
-    assert(region.pages().contains(p));  // [phys_base, phys_base+r) ⊆ [phys_base, phys_base+count)
-    assert(s1.vm_owned[region.vm].contains(p));  // enabled: region pages owned by vm
-    assert forall|w: VmId| #[trigger]
-        s1.all_vms.contains(w) && w != region.vm implies !s1.vm_owned[w].contains(p) by {
-        // ownership_wf pairwise disjointness vs. `vm` (who owns `p`).
-    }
 }
 
 /// A surviving stage-2 entry targets no reclaimed page (`r <= u <= count`).
@@ -1601,13 +1347,6 @@ pub proof fn lemma_remove_partial_wf(s1: SoftwareView, region: Region, u: nat, r
             }
         }
     }
-    // sharing_wf: shared_pages / all_vms unchanged.
-    assert forall|e: SharedPage| #[trigger] sp.shared_pages.contains(e) implies (e.left != e.right
-        && sp.all_vms.contains(e.left) && sp.all_vms.contains(e.right) && sp.shared_pages.contains(
-        e.reverse(),
-    )) by {
-        assert(s1.shared_pages.contains(e));
-    }
     // translation_wf: a surviving key targets an unreclaimed page, so ownership/sharing
     // (which only shrank by the reclaimed prefix) still covers it.
     assert forall|k: VmPageKey| #[trigger] sp.s2_map.contains_key(k) implies (sp.all_vms.contains(
@@ -1629,7 +1368,8 @@ pub proof fn lemma_remove_partial_wf(s1: SoftwareView, region: Region, u: nat, r
     assert forall|v1: VmId, v2: VmId| #[trigger]
         sp.all_vms.contains(v1) && #[trigger] sp.all_vms.contains(v2) && v1 != v2 implies (forall|
         p: PhysPage,
-    | #[trigger] sp.iommu_owned[v1].contains(p) ==> !sp.vm_owned[v2].contains(p)) by {
+    | #[trigger]
+        sp.iommu_owned[v1].contains(p) ==> !sp.vm_owned[v2].contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             sp.iommu_owned[v1].contains(p) implies !sp.vm_owned[v2].contains(p) by {
             if sp.vm_owned[v2].contains(p) {
@@ -1638,9 +1378,6 @@ pub proof fn lemma_remove_partial_wf(s1: SoftwareView, region: Region, u: nat, r
             }
         }
     }
-    assert(sp.iommu_ownership_wf());
-    assert(sp.iommu_translation_wf());
-    assert(sp.wf());
 }
 
 /// Even edge `2*i`: unmapping region entry `i` advances `(i, i) → (i+1, i)`.
@@ -1747,7 +1484,6 @@ pub proof fn lemma_remove_partial_machine_wf(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::remove_region_enabled(sw1, region),
-        sw1.iommu_wf(),
         r <= u,
         u <= region.count,
     ensures
@@ -1757,16 +1493,13 @@ pub proof fn lemma_remove_partial_machine_wf(
     let mp = remove_machine_partial(sw1, hw, region, u, r);
     let m1 = MachineState::assemble(sw1, hw);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_remove_partial_wf(sw1, region, u, r);
     lemma_sw_machine_wf_equiv(sp, synced_hw(sp, hw_unmapped(hw, region, u)));
-    // execution_wf: active_vm / all_vms unchanged.
+    // active_vm_wf: active_vm / all_vms unchanged.
     assert(mp.all_vms == m1.all_vms);
     assert(mp.active_vm == m1.active_vm);
-    assert(m1.execution_wf());
-    assert(mp.execution_wf());
-    // sync holds by construction.
-    assert(mp.hw_s2map == mp.s2_map);
+    assert(m1.active_vm_wf());
+    assert(mp.active_vm_wf());
     // tlb_safe (over `hw_s2map == s2_map`): a surviving cached key `k` (∉
     // tlb_prefix_keys(u)) has `sk ∉ entry_prefix(u).dom()`, so the s2_map removal
     // keeps `sw1`'s value, matching `m1.tlb_safe`.
@@ -1790,8 +1523,6 @@ pub proof fn lemma_remove_partial_machine_wf(
         assert(mp.hw_s2map[sk] == sw1.s2_map[sk]);
     }
     assert(mp.tlb_safe());
-    assert(sp.wf());
-    assert(mp.sync());
     assert(sp.iommu_s2_map == sw1.iommu_s2_map);
     assert(m1.iommu_sync());
     assert(mp.iommu_hw_s2map == sp.iommu_s2_map);
@@ -1811,7 +1542,6 @@ pub proof fn lemma_remove_partial_machine_wf(
                 == m1.iommu_hw_s2map[sk]);
         }
     }
-    assert(mp.wf());
 }
 
 /// Even edge `2*i` at the machine level: unmapping region entry `i` is an
@@ -1825,7 +1555,6 @@ pub proof fn lemma_remove_unmap_machine_edge(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::remove_region_enabled(sw1, region),
-        sw1.iommu_wf(),
         i < region.count,
     ensures
         MachineState::hv_unmap_step(
@@ -1841,15 +1570,9 @@ pub proof fn lemma_remove_unmap_machine_edge(
     let s1 = remove_machine_partial(sw1, hw, region, i, i);
     let s2 = remove_machine_partial(sw1, hw, region, (i + 1) as nat, i);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_remove_unmap_edge(sw1, region, i);
     lemma_remove_partial_machine_wf(sw1, hw, region, i, i);
     lemma_remove_partial_machine_wf(sw1, hw, region, (i + 1) as nat, i);
-    // `key` is region entry `i`: mapped in `sw1`, not yet unmapped, so present in `s1`.
-    assert(region.entries().contains_key(key));
-    assert(sw1.s2_map.contains_key(key));
-    assert(!entry_prefix(region, i).dom().contains(key));
-    assert(s1.s2_map.contains_key(key));
     // tlb: s2.tlb == s1.tlb.remove_keys(invalidation_targets(vm, gpa)).  The extra
     // flushed keys are exactly the cached `(vm, gpa_i)` ones, i.e. tlb_prefix grows.
     assert(s2.tlb =~= s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))) by {
@@ -1874,7 +1597,6 @@ pub proof fn lemma_remove_reclaim_machine_edge(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::remove_region_enabled(sw1, region),
-        sw1.iommu_wf(),
         i < region.count,
     ensures
         MachineState::hv_reclaim_page_step(
@@ -1888,12 +1610,9 @@ pub proof fn lemma_remove_reclaim_machine_edge(
     let page = region.phys_page(i);
     let s1 = remove_machine_partial(sw1, hw, region, (i + 1) as nat, i);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_remove_reclaim_edge(sw1, region, i);
     lemma_remove_partial_machine_wf(sw1, hw, region, (i + 1) as nat, i);
     lemma_remove_partial_machine_wf(sw1, hw, region, (i + 1) as nat, (i + 1) as nat);
-    assert(phys_prefix(region, (i + 1) as nat).contains(page));  // page index i < i+1
-    assert(region.pages().contains(page));  // i < count
     assert(s1.page_is_quiescent(page)) by {
         // (1) no surviving s2_map entry targets `page` (it is in the first-(i+1) prefix).
         assert forall|k: VmPageKey| #[trigger] s1.s2_map.contains_key(k) implies s1.s2_map[k].page
@@ -1943,7 +1662,6 @@ pub proof fn lemma_remove_region_machine_trace(
     requires
         MachineState::assemble(sw1, hw).wf(),
         SoftwareView::remove_region_enabled(sw1, region),
-        sw1.iommu_wf(),
         SoftwareView::remove_region_step(sw1, sw2, region),
     ensures
         exists|trace: Seq<MachineState>|
@@ -1967,7 +1685,6 @@ pub proof fn lemma_remove_region_machine_trace(
 {
     let n = region.count;
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     let trace = Seq::new(
         (2 * n + 1) as nat,
         |j: int| remove_machine_partial(sw1, hw, region, ((j + 1) / 2) as nat, (j / 2) as nat),
@@ -2027,7 +1744,6 @@ pub proof fn lemma_remove_region_machine_trace(
         ;
         lemma_remove_partial_machine_wf(sw1, hw, region, ((j + 1) / 2) as nat, (j / 2) as nat);
     }
-    assert(trace.len() == 2 * region.count + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -2107,7 +1823,8 @@ pub proof fn lemma_iommu_insert_partial_wf(s1: SoftwareView, region: Region, a: 
     assert forall|v1: VmId, v2: VmId| #[trigger]
         sp.all_vms.contains(v1) && #[trigger] sp.all_vms.contains(v2) && v1 != v2 implies (forall|
         p: PhysPage,
-    | #[trigger] sp.iommu_owned[v1].contains(p) ==> !sp.iommu_owned[v2].contains(p)) by {
+    | #[trigger]
+        sp.iommu_owned[v1].contains(p) ==> !sp.iommu_owned[v2].contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             sp.iommu_owned[v1].contains(p) implies !sp.iommu_owned[v2].contains(p) by {
             if v1 == vm {
@@ -2132,7 +1849,8 @@ pub proof fn lemma_iommu_insert_partial_wf(s1: SoftwareView, region: Region, a: 
     assert forall|v1: VmId, v2: VmId| #[trigger]
         sp.all_vms.contains(v1) && #[trigger] sp.all_vms.contains(v2) && v1 != v2 implies (forall|
         p: PhysPage,
-    | #[trigger] sp.iommu_owned[v1].contains(p) ==> !sp.vm_owned[v2].contains(p)) by {
+    | #[trigger]
+        sp.iommu_owned[v1].contains(p) ==> !sp.vm_owned[v2].contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             sp.iommu_owned[v1].contains(p) implies !sp.vm_owned[v2].contains(p) by {
             if v1 == vm && pp.contains(p) {
@@ -2143,7 +1861,8 @@ pub proof fn lemma_iommu_insert_partial_wf(s1: SoftwareView, region: Region, a: 
         }
     }
     assert forall|w: VmId| #[trigger] sp.all_vms.contains(w) implies (forall|p: PhysPage|
-     #[trigger] sp.iommu_owned[w].contains(p) ==> !sp.iommu_shared.contains(p)) by {
+     #[trigger]
+        sp.iommu_owned[w].contains(p) ==> !sp.iommu_shared.contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             sp.iommu_owned[w].contains(p) implies !sp.iommu_shared.contains(p) by {
             if w == vm && pp.contains(p) {
@@ -2154,7 +1873,8 @@ pub proof fn lemma_iommu_insert_partial_wf(s1: SoftwareView, region: Region, a: 
         }
     }
     assert forall|w: VmId| #[trigger] sp.all_vms.contains(w) implies (forall|p: PhysPage|
-     #[trigger] sp.vm_owned[w].contains(p) ==> !sp.iommu_shared.contains(p)) by {
+     #[trigger]
+        sp.vm_owned[w].contains(p) ==> !sp.iommu_shared.contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             sp.vm_owned[w].contains(p) implies !sp.iommu_shared.contains(p) by {
             assert(s1.vm_owned[w].contains(p));
@@ -2177,7 +1897,6 @@ pub proof fn lemma_iommu_insert_partial_wf(s1: SoftwareView, region: Region, a: 
         }
     }
     assert(sp.iommu_translation_wf());
-    assert(sp.wf());
 }
 
 /// Odd edge `2*i+1`: IOMMU-mapping region entry `i` advances `(i+1, i) → (i+1, i+1)`.
@@ -2196,18 +1915,15 @@ pub proof fn lemma_iommu_insert_map_edge(s1: SoftwareView, region: Region, i: na
         ),
 {
     let vm = region.vm;
-    let from = iommu_insert_partial(s1, region, (i + 1) as nat, i);
     let key = VmPageKey::new(vm, region.guest_page(i));
     let entry = S2Entry { page: region.phys_page(i), access: region.access, generation: 0 };
     let ep_i = entry_prefix(region, i);
     let ep_i1 = entry_prefix(region, (i + 1) as nat);
     lemma_entry_prefix_succ(region, i);  // ep_i1 == ep_i.insert(key, entry); key ∉ ep_i
-    // the target page is DMA-granted in `from` (a prefix page).
-    assert(phys_prefix(region, (i + 1) as nat).contains(region.phys_page(i)));
-    assert(from.iommu_owned[vm].contains(entry.page));
     // iommu_s2_map: union(entry_prefix(i+1)) == union(entry_prefix(i)).insert(key, entry)
-    assert(s1.iommu_s2_map.union_prefer_right(ep_i1)
-        =~= s1.iommu_s2_map.union_prefer_right(ep_i).insert(key, entry)) by {
+    assert(s1.iommu_s2_map.union_prefer_right(ep_i1) =~= s1.iommu_s2_map.union_prefer_right(
+        ep_i,
+    ).insert(key, entry)) by {
         assert(!s1.iommu_s2_map.contains_key(key)) by {
             assert(region.entries().contains_key(key));
         }
@@ -2250,17 +1966,14 @@ pub proof fn lemma_iommu_insert_partial_machine_wf(
     let m1 = MachineState::assemble(sw1, hw);
     let m2 = MachineState::assemble(sp, synced_hw(sp, hw));
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_iommu_insert_partial_wf(sw1, region, a, m);
     lemma_sw_machine_wf_equiv(sp, synced_hw(sp, hw));
-    // execution_wf: `active_vm` and `all_vms` are unchanged.
+    // active_vm_wf: `active_vm` and `all_vms` are unchanged.
     assert(m2.all_vms == m1.all_vms);
     assert(m2.active_vm == m1.active_vm);
-    assert(m1.execution_wf());
-    assert(m2.execution_wf());
-    // CPU sync/tlb_safe: the CPU maps and TLB are all framed.
-    assert(m2.hw_s2map == m2.s2_map);
-    assert(m2.sync());
+    assert(m1.active_vm_wf());
+    assert(m2.active_vm_wf());
+    // CPU tlb_safe: the CPU maps and TLB are all framed.
     assert(m1.tlb_safe());
     assert(m1.sync());
     assert forall|k: TlbKey| #[trigger] m2.tlb.contains_key(k) implies {
@@ -2273,9 +1986,6 @@ pub proof fn lemma_iommu_insert_partial_machine_wf(
         assert(m1.hw_s2map.contains_key(sk) && m1.tlb[k].as_s2_entry() == m1.hw_s2map[sk]);
     }
     assert(m2.tlb_safe());
-    // iommu_sync holds by construction (`synced_hw` forces `iommu_hw_s2map == iommu_s2_map`).
-    assert(m2.iommu_hw_s2map == m2.iommu_s2_map);
-    assert(m2.iommu_sync());
     // iommu_tlb_safe: SMMU TLB fixed at `hw.iommu_tlb`; `iommu_s2_map` grew only by fresh
     // region entries (keys IOMMU-unmapped in `sw1`), so each cached key keeps its value.
     assert(m1.iommu_tlb_safe());
@@ -2299,8 +2009,6 @@ pub proof fn lemma_iommu_insert_partial_machine_wf(
         assert(m2.iommu_hw_s2map[sk] == sw1.iommu_s2_map[sk]);
     }
     assert(m2.iommu_tlb_safe());
-    assert(sp.wf());
-    assert(m2.wf());
 }
 
 /// Even edge `2*i` at the machine level: DMA-granting region page `i` is an
@@ -2334,7 +2042,6 @@ pub proof fn lemma_iommu_insert_assign_machine_edge(
     let pp_i = phys_prefix(region, i);
     let pp_i1 = phys_prefix(region, (i + 1) as nat);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_phys_prefix_succ(region, i);  // pp_i1 == pp_i.insert(page); page ∉ pp_i
     lemma_iommu_insert_partial_machine_wf(sw1, hw, region, i, i);
     lemma_iommu_insert_partial_machine_wf(sw1, hw, region, (i + 1) as nat, i);
@@ -2359,7 +2066,6 @@ pub proof fn lemma_iommu_insert_assign_machine_edge(
     assert(s2.same_identity_as(&s1));
     assert(s2.same_translation_as(&s1));
     assert(s2.same_memory_as(&s1));
-    assert(MachineState::hv_iommu_assign_page_step(s1, s2, vm, page));
 }
 
 /// Odd edge `2*i+1` at the machine level: IOMMU-mapping region entry `i` is an
@@ -2392,7 +2098,6 @@ pub proof fn lemma_iommu_insert_map_machine_edge(
     let hw2 = synced_hw(to_sw, hw);
     let key = VmPageKey::new(vm, gpa);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     // SW IOMMU map step between the two partials.
     lemma_iommu_insert_map_edge(sw1, region, i);
     // `wf` of the source endpoint.
@@ -2403,8 +2108,6 @@ pub proof fn lemma_iommu_insert_map_machine_edge(
         assert(!sw1.iommu_s2_map.contains_key(key));
         assert(!entry_prefix(region, i).dom().contains(key));  // index i not < i
     }
-    // The hardware side is exactly `iommu_map_step`: SMMU map grows by `key`, TLB fixed.
-    assert(HardwareView::iommu_map_step(hw1, hw2, vm, gpa, entry));
     refine_hv_iommu_map(from_sw, to_sw, hw1, hw2, vm, gpa, entry);
 }
 
@@ -2463,11 +2166,10 @@ pub proof fn lemma_iommu_insert_region_machine_trace(
     let n = region.count;
     let vm = region.vm;
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     let trace = Seq::new(
         (2 * n + 1) as nat,
-        |j: int| iommu_insert_machine_partial(sw1, hw, region, ((j + 1) / 2) as nat, (
-        j / 2) as nat),
+        |j: int|
+            iommu_insert_machine_partial(sw1, hw, region, ((j + 1) / 2) as nat, (j / 2) as nat),
     );
     // Endpoints: the SW partials collapse to `sw1` / `sw2`.
     assert(phys_prefix(region, 0) =~= Set::<PhysPage>::empty());
@@ -2478,8 +2180,7 @@ pub proof fn lemma_iommu_insert_region_machine_trace(
     assert(iommu_insert_partial(sw1, region, 0, 0) == sw1) by {
         assert(sw1.iommu_owned[vm].union(phys_prefix(region, 0)) =~= sw1.iommu_owned[vm]);
         assert(sw1.iommu_owned.insert(vm, sw1.iommu_owned[vm]) =~= sw1.iommu_owned);
-        assert(sw1.iommu_s2_map.union_prefer_right(entry_prefix(region, 0))
-            =~= sw1.iommu_s2_map);
+        assert(sw1.iommu_s2_map.union_prefer_right(entry_prefix(region, 0)) =~= sw1.iommu_s2_map);
     }
     // trace[0]: `synced_hw(sw1, hw) == hw` since `sw1` is synced (wf precondition).
     assert(trace[0] == MachineState::assemble(sw1, hw)) by {
@@ -2518,10 +2219,14 @@ pub proof fn lemma_iommu_insert_region_machine_trace(
             requires
                 0 <= j < 2 * n + 1,
         ;
-        lemma_iommu_insert_partial_machine_wf(sw1, hw, region, ((j + 1) / 2) as nat, (
-        j / 2) as nat);
+        lemma_iommu_insert_partial_machine_wf(
+            sw1,
+            hw,
+            region,
+            ((j + 1) / 2) as nat,
+            (j / 2) as nat,
+        );
     }
-    assert(trace.len() == 2 * region.count + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -2624,7 +2329,8 @@ pub proof fn lemma_iommu_remove_partial_wf(s1: SoftwareView, region: Region, u: 
     assert forall|v1: VmId, v2: VmId| #[trigger]
         sp.all_vms.contains(v1) && #[trigger] sp.all_vms.contains(v2) && v1 != v2 implies (forall|
         p: PhysPage,
-    | #[trigger] sp.iommu_owned[v1].contains(p) ==> !sp.iommu_owned[v2].contains(p)) by {
+    | #[trigger]
+        sp.iommu_owned[v1].contains(p) ==> !sp.iommu_owned[v2].contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             sp.iommu_owned[v1].contains(p) implies !sp.iommu_owned[v2].contains(p) by {
             assert(s1.iommu_owned[v1].contains(p));
@@ -2636,21 +2342,24 @@ pub proof fn lemma_iommu_remove_partial_wf(s1: SoftwareView, region: Region, u: 
     assert forall|v1: VmId, v2: VmId| #[trigger]
         sp.all_vms.contains(v1) && #[trigger] sp.all_vms.contains(v2) && v1 != v2 implies (forall|
         p: PhysPage,
-    | #[trigger] sp.iommu_owned[v1].contains(p) ==> !sp.vm_owned[v2].contains(p)) by {
+    | #[trigger]
+        sp.iommu_owned[v1].contains(p) ==> !sp.vm_owned[v2].contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             sp.iommu_owned[v1].contains(p) implies !sp.vm_owned[v2].contains(p) by {
             assert(s1.iommu_owned[v1].contains(p));
         }
     }
     assert forall|w: VmId| #[trigger] sp.all_vms.contains(w) implies (forall|p: PhysPage|
-     #[trigger] sp.iommu_owned[w].contains(p) ==> !sp.iommu_shared.contains(p)) by {
+     #[trigger]
+        sp.iommu_owned[w].contains(p) ==> !sp.iommu_shared.contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             sp.iommu_owned[w].contains(p) implies !sp.iommu_shared.contains(p) by {
             assert(s1.iommu_owned[w].contains(p));
         }
     }
     assert forall|w: VmId| #[trigger] sp.all_vms.contains(w) implies (forall|p: PhysPage|
-     #[trigger] sp.vm_owned[w].contains(p) ==> !sp.iommu_shared.contains(p)) by {
+     #[trigger]
+        sp.vm_owned[w].contains(p) ==> !sp.iommu_shared.contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
             sp.vm_owned[w].contains(p) implies !sp.iommu_shared.contains(p) by {
             assert(s1.vm_owned[w].contains(p));
@@ -2670,7 +2379,6 @@ pub proof fn lemma_iommu_remove_partial_wf(s1: SoftwareView, region: Region, u: 
         lemma_iommu_remove_survivor_unreclaimed(s1, region, u, r, k);
     }
     assert(sp.iommu_translation_wf());
-    assert(sp.wf());
 }
 
 /// Even edge `2*i`: IOMMU-unmapping region entry `i` advances `(i, i) → (i+1, i)`.
@@ -2743,17 +2451,14 @@ pub proof fn lemma_iommu_remove_partial_machine_wf(
     let mp = iommu_remove_machine_partial(sw1, hw, region, u, r);
     let m1 = MachineState::assemble(sw1, hw);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_iommu_remove_partial_wf(sw1, region, u, r);
     lemma_sw_machine_wf_equiv(sp, synced_hw(sp, iommu_hw_unmapped(hw, region, u)));
-    // execution_wf: active_vm / all_vms unchanged.
+    // active_vm_wf: active_vm / all_vms unchanged.
     assert(mp.all_vms == m1.all_vms);
     assert(mp.active_vm == m1.active_vm);
-    assert(m1.execution_wf());
-    assert(mp.execution_wf());
-    // CPU sync/tlb_safe: CPU maps and TLB framed.
-    assert(mp.hw_s2map == mp.s2_map);
-    assert(mp.sync());
+    assert(m1.active_vm_wf());
+    assert(mp.active_vm_wf());
+    // CPU tlb_safe: CPU maps and TLB framed.
     assert(m1.tlb_safe());
     assert(m1.sync());
     assert forall|k: TlbKey| #[trigger] mp.tlb.contains_key(k) implies {
@@ -2766,9 +2471,6 @@ pub proof fn lemma_iommu_remove_partial_machine_wf(
         assert(m1.hw_s2map.contains_key(sk) && m1.tlb[k].as_s2_entry() == m1.hw_s2map[sk]);
     }
     assert(mp.tlb_safe());
-    // iommu_sync holds by construction.
-    assert(mp.iommu_hw_s2map == mp.iommu_s2_map);
-    assert(mp.iommu_sync());
     // iommu_tlb_safe: a surviving cached key `k` (∉ tlb_prefix_keys(u)) has
     // `sk ∉ entry_prefix(u).dom()`, so the removal keeps `sw1`'s value.
     assert(m1.iommu_tlb_safe());
@@ -2792,8 +2494,6 @@ pub proof fn lemma_iommu_remove_partial_machine_wf(
         assert(mp.iommu_hw_s2map[sk] == sw1.iommu_s2_map[sk]);
     }
     assert(mp.iommu_tlb_safe());
-    assert(sp.wf());
-    assert(mp.wf());
 }
 
 /// Even edge `2*i` at the machine level: IOMMU-unmapping region entry `i` is an
@@ -2825,7 +2525,6 @@ pub proof fn lemma_iommu_remove_unmap_machine_edge(
     let hw2 = synced_hw(to_sw, iommu_hw_unmapped(hw, region, (i + 1) as nat));
     let targets = Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_iommu_remove_unmap_edge(sw1, region, i);
     lemma_iommu_remove_partial_machine_wf(sw1, hw, region, i, i);
     // SMMU TLB: flushing the `(vm, gpa_i)` keys is exactly the prefix growing by one.
@@ -2837,7 +2536,6 @@ pub proof fn lemma_iommu_remove_unmap_machine_edge(
                 i,
             ).contains(k) || (k.vm == vm && k.gpa == gpa)) by {}
     }
-    assert(HardwareView::iommu_unmap_invalidate_step(hw1, hw2, vm, gpa));
     refine_hv_iommu_unmap(from_sw, to_sw, hw1, hw2, vm, gpa);
 }
 
@@ -2871,7 +2569,6 @@ pub proof fn lemma_iommu_remove_reclaim_machine_edge(
     let pp_i = phys_prefix(region, i);
     let pp_i1 = phys_prefix(region, (i + 1) as nat);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_phys_prefix_succ(region, i);  // pp_i1 == pp_i.insert(page); page ∉ pp_i
     lemma_iommu_remove_partial_machine_wf(sw1, hw, region, (i + 1) as nat, i);
     lemma_iommu_remove_partial_machine_wf(sw1, hw, region, (i + 1) as nat, (i + 1) as nat);
@@ -2880,7 +2577,6 @@ pub proof fn lemma_iommu_remove_reclaim_machine_edge(
     assert(sw1.iommu_owned[vm].contains(page));  // enabled: region pages DMA-owned
     assert(s1.iommu_owned[vm].contains(page));
     // quiescence: no surviving IOMMU entry and no cached SMMU entry targets `page`.
-    assert(phys_prefix(region, (i + 1) as nat).contains(page));  // page index i < i+1
     assert(s1.iommu_page_is_quiescent(page)) by {
         // (1) no surviving iommu_s2_map entry targets `page` (in the first-(i+1) prefix).
         assert forall|k: VmPageKey| #[trigger]
@@ -2890,13 +2586,7 @@ pub proof fn lemma_iommu_remove_reclaim_machine_edge(
                 (i + 1) as nat,
             ).dom().contains(k));
             assert(s1.iommu_s2_map[k] == sw1.iommu_s2_map[k]);
-            lemma_iommu_remove_survivor_unreclaimed(
-                sw1,
-                region,
-                (i + 1) as nat,
-                (i + 1) as nat,
-                k,
-            );
+            lemma_iommu_remove_survivor_unreclaimed(sw1, region, (i + 1) as nat, (i + 1) as nat, k);
         }
         // (2) no cached SMMU-TLB entry targets `page` (iommu_tlb_safe routes it
         // through iommu_s2_map).
@@ -2909,8 +2599,9 @@ pub proof fn lemma_iommu_remove_reclaim_machine_edge(
         }
     }
     // delta: `iommu_owned` shrinks by exactly `page`.
-    assert(sw1.iommu_owned[vm].difference(pp_i).remove(page)
-        =~= sw1.iommu_owned[vm].difference(pp_i1));
+    assert(sw1.iommu_owned[vm].difference(pp_i).remove(page) =~= sw1.iommu_owned[vm].difference(
+        pp_i1,
+    ));
     assert(from_sw.iommu_owned.insert(vm, from_sw.iommu_owned[vm].remove(page))
         =~= to_sw.iommu_owned);
     assert(s2.iommu_owned == s1.iommu_owned.insert(vm, s1.iommu_owned[vm].remove(page)));
@@ -2918,7 +2609,6 @@ pub proof fn lemma_iommu_remove_reclaim_machine_edge(
     assert(s2.same_identity_as(&s1));
     assert(s2.same_translation_as(&s1));
     assert(s2.same_memory_as(&s1));
-    assert(MachineState::hv_iommu_reclaim_page_step(s1, s2, vm, page));
 }
 
 /// Edge `j` of the machine IOMMU-remove trace: IOMMU-unmap region entry `i = j/2`
@@ -2974,11 +2664,10 @@ pub proof fn lemma_iommu_remove_region_machine_trace(
     let n = region.count;
     let vm = region.vm;
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     let trace = Seq::new(
         (2 * n + 1) as nat,
-        |j: int| iommu_remove_machine_partial(sw1, hw, region, ((j + 1) / 2) as nat, (
-        j / 2) as nat),
+        |j: int|
+            iommu_remove_machine_partial(sw1, hw, region, ((j + 1) / 2) as nat, (j / 2) as nat),
     );
     assert(phys_prefix(region, 0) =~= Set::<PhysPage>::empty());
     assert(tlb_prefix_keys(region, 0) =~= Set::<TlbKey>::empty());
@@ -2990,8 +2679,7 @@ pub proof fn lemma_iommu_remove_region_machine_trace(
     assert(trace[0] == MachineState::assemble(sw1, hw)) by {
         assert(sw1.iommu_owned[vm].difference(phys_prefix(region, 0)) =~= sw1.iommu_owned[vm]);
         assert(sw1.iommu_owned.insert(vm, sw1.iommu_owned[vm]) =~= sw1.iommu_owned);
-        assert(sw1.iommu_s2_map.remove_keys(entry_prefix(region, 0).dom())
-            =~= sw1.iommu_s2_map);
+        assert(sw1.iommu_s2_map.remove_keys(entry_prefix(region, 0).dom()) =~= sw1.iommu_s2_map);
         assert(hw.iommu_tlb.remove_keys(tlb_prefix_keys(region, 0)) =~= hw.iommu_tlb);
         assert(MachineState::assemble(sw1, hw).sync());
         assert(MachineState::assemble(sw1, hw).iommu_sync());
@@ -3031,10 +2719,14 @@ pub proof fn lemma_iommu_remove_region_machine_trace(
             requires
                 0 <= j < 2 * n + 1,
         ;
-        lemma_iommu_remove_partial_machine_wf(sw1, hw, region, ((j + 1) / 2) as nat, (
-        j / 2) as nat);
+        lemma_iommu_remove_partial_machine_wf(
+            sw1,
+            hw,
+            region,
+            ((j + 1) / 2) as nat,
+            (j / 2) as nat,
+        );
     }
-    assert(trace.len() == 2 * region.count + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -3064,12 +2756,10 @@ pub proof fn lemma_iommu_remove_region_machine_trace(
 // 5. The *dead-slice* clauses of [`impl_synced`] (a vm absent from `zone_ids`
 //    has an empty `s2map` slice): `MmuSpec::add_vm` mints every slice empty and
 //    is fired only by `HvMem::add_zone`, in lockstep with `BudgetSpec::add_zone`.
-//    CAVEAT: `HvMem::remove_zone` currently destroys a zone *without* requiring
-//    its memory sets to be empty — `MmuSpec` has no `remove_vm`, so a zone
-//    removed while mappings remain leaves a non-empty orphan slice and **exits
-//    the synced regime** (this predicate goes false, and the security bridge
-//    below no longer applies).  Guarding `remove_zone` on empty memory sets
-//    (or region-removing first) keeps the system inside `impl_synced`.
+//    `HvMem::remove_zone` rejects zones whose CPU or IOMMU memory set is non-empty,
+//    so removing a zone leaves only empty hardware slices and stays inside the
+//    synced regime. `MmuSpec` still has no `remove_vm`, so the VM ID remains
+//    registered and cannot be reused after removal.
 // 6. `sw.invariants()` / `hw.invariants()`: every state of a tokenized
 //    state machine instance satisfies its invariants.
 //
@@ -3097,14 +2787,8 @@ pub proof fn lemma_specs_synced_implies_wf_machine(hw: HardwareSpec, sw: Softwar
     ensures
         MachineState::assemble(sw.view(), hw.view()).wf(),
 {
-    // Each view is internally well-formed (from its own state machine's invariant).
     sw.inv_implies_wf();
     hw.inv_implies_wf();
-    // view-sync: the projected stage-2 maps coincide (the `specs_synced` hyp).
-    assert(hw.view().s2map == sw.view().s2_map);
-    assert(hw.view().iommu_s2map == sw.view().iommu_s2_map);
-    // The MMU view schedules no vm, so the scheduler clause is vacuous.
-    assert(hw.view().active_vm == Map::<CpuId, VmId>::empty());
     lemma_synced_views_wf(sw.view(), hw.view());
 }
 
@@ -3122,32 +2806,23 @@ pub open spec fn zone_synced(hw: HardwareSpec, sw: SoftwareSpec, zid: nat) -> bo
 /// [`zone_synced`], and vms without a live zone contribute nothing to either
 /// hardware map (their slices, if any, are empty).
 pub open spec fn impl_synced(hw: HardwareSpec, sw: SoftwareSpec) -> bool {
-    &&& forall|zid: nat| #[trigger]
-        sw.budget.zone_ids.contains(zid) ==> zone_synced(hw, sw, zid)
-    &&& forall|vm: VmId|
-        #[trigger] hw.mmu.s2map.contains_key(vm) && !sw.budget.zone_ids.contains(vm.0)
-            ==> hw.mmu.s2map[vm] == Map::<GuestPage, S2Entry>::empty()
-    &&& forall|vm: VmId|
-        #[trigger] hw.smmu.s2map.contains_key(vm) && !sw.budget.zone_ids.contains(vm.0)
-            ==> hw.smmu.s2map[vm] == Map::<GuestPage, S2Entry>::empty()
+    &&& forall|zid: nat| #[trigger] sw.budget.zone_ids.contains(zid) ==> zone_synced(hw, sw, zid)
+    &&& forall|vm: VmId| #[trigger]
+        hw.mmu.s2map.contains_key(vm) && !sw.budget.zone_ids.contains(vm.0) ==> hw.mmu.s2map[vm]
+            == Map::<GuestPage, S2Entry>::empty()
+    &&& forall|vm: VmId| #[trigger]
+        hw.smmu.s2map.contains_key(vm) && !sw.budget.zone_ids.contains(vm.0) ==> hw.smmu.s2map[vm]
+            == Map::<GuestPage, S2Entry>::empty()
 }
 
-/// **Per-zone extraction.** A zone lock's invariant, together with the shard
-/// identities of its three resident tokens (chain steps 1 + 2 above), yields
-/// that zone's [`zone_synced`] clause.  Purely mechanical equality chasing:
-/// `ZonePred::inv` pins each slice token's value to `pt_s2map_inner` of the
-/// exec memory set, and pins the ghost zone to the same memory set's view.
+/// A zone lock's invariant and its resident shard identities directly yield
+/// that zone's [`zone_synced`] clause.
 pub proof fn lemma_zone_pred_synced<PT, M, A, I>(
     k: ZoneKey,
     v: ZoneRwContent<M, BudgetProtocol>,
     hw: HardwareSpec,
     sw: SoftwareSpec,
-) where
-    PT: PageTable<A>,
-    M: MemorySet<PT, A, I>,
-    A: BitmapAllocator,
-    I: HardwareInstr,
-
+) where PT: PageTable<A>, M: MemorySet<PT, A, I>, A: BitmapAllocator, I: HardwareInstr
     requires
         ZonePred::<PT, M, A, BudgetProtocol, I>::inv(k, v),
         // Shard identities (tokenized-SM guarantee): each lock-resident token's
@@ -3160,111 +2835,18 @@ pub proof fn lemma_zone_pred_synced<PT, M, A, I>(
     ensures
         zone_synced(hw, sw, k.zone_id as nat),
 {
-    let zid = k.zone_id as nat;
-    // CPU chain: slice token = pt_s2map_inner(exec cpu mappings) = pt_s2map_inner(ghost cpu mappings).
-    assert(v.zone_state.ghost_zone().cpu_mem_set == v.cpu_mem_set_perm@.mem_contents->Init_0@);
-    assert(hw.mmu.s2map[VmId(zid)] == pt_s2map_inner(
-        sw.budget.zones[zid].cpu_mem_set.mappings,
-    ));
-    // IOMMU chain, identically.
-    assert(v.zone_state.ghost_zone().iommu_mem_set == v.iommu_mem_set_perm@.mem_contents->Init_0@);
-    assert(hw.smmu.s2map[VmId(zid)] == pt_s2map_inner(
-        sw.budget.zones[zid].iommu_mem_set.mappings,
-    ));
 }
 
-/// **The aggregation.** Per-zone sync plus empty dead slices pin both flattened
-/// hardware maps to the budget projections — the global [`specs_synced`].
-/// Pointwise: a flat key `(vm, gpa)` is in `flatten_s2map` iff `vm`'s slice
-/// maps `gpa`; for a live zone the slice *is* `pt_s2map_inner` of that zone's
-/// mappings, which is exactly `state_s2_map`'s entry; for a dead vm both sides
-/// are empty.
+/// Per-zone sync plus empty dead slices pin both flattened hardware maps to the
+/// budget projections.
 pub proof fn lemma_impl_synced_specs_synced(hw: HardwareSpec, sw: SoftwareSpec)
     requires
         impl_synced(hw, sw),
     ensures
         specs_synced(hw, sw),
 {
-    // CPU side.
-    assert(flatten_s2map(hw.mmu.s2map) =~= state_s2_map(sw.budget)) by {
-        assert forall|k: VmPageKey|
-            #![auto]
-            {
-                &&& flatten_s2map(hw.mmu.s2map).contains_key(k) == state_s2_map(
-                    sw.budget,
-                ).contains_key(k)
-                &&& flatten_s2map(hw.mmu.s2map).contains_key(k) ==> flatten_s2map(hw.mmu.s2map)[k]
-                    == state_s2_map(sw.budget)[k]
-            } by {
-            let zid = k.vm.0;
-            assert(VmId(zid) == k.vm);
-            if sw.budget.zone_ids.contains(zid) {
-                assert(zone_synced(hw, sw, zid));
-                let mp = sw.budget.zones[zid].cpu_mem_set.mappings;
-                assert(hw.mmu.s2map[k.vm] == pt_s2map_inner(mp));
-                assert(pt_s2map_inner(mp).contains_key(k.gpa) == mp.contains_key(
-                    vaddr_of_gpa(k.gpa),
-                ));
-                assert(zone_s2_entries(zid, sw.budget.zones[zid]).contains_key(k) == mp.contains_key(
-                    vaddr_of_gpa(k.gpa),
-                ));
-                if mp.contains_key(vaddr_of_gpa(k.gpa)) {
-                    assert(flatten_s2map(hw.mmu.s2map)[k] == frame_to_s2(
-                        mp[vaddr_of_gpa(k.gpa)],
-                    ));
-                    assert(state_s2_map(sw.budget)[k] == frame_to_s2(mp[vaddr_of_gpa(k.gpa)]));
-                }
-            } else {
-                assert(!state_s2_map(sw.budget).contains_key(k));
-                if hw.mmu.s2map.contains_key(k.vm) {
-                    assert(hw.mmu.s2map[k.vm] == Map::<GuestPage, S2Entry>::empty());
-                    assert(!hw.mmu.s2map[k.vm].contains_key(k.gpa));
-                }
-                assert(!flatten_s2map(hw.mmu.s2map).contains_key(k));
-            }
-        }
-    };
-    // IOMMU side, mirrored.
-    assert(flatten_s2map(hw.smmu.s2map) =~= state_iommu_s2_map(sw.budget)) by {
-        assert forall|k: VmPageKey|
-            #![auto]
-            {
-                &&& flatten_s2map(hw.smmu.s2map).contains_key(k) == state_iommu_s2_map(
-                    sw.budget,
-                ).contains_key(k)
-                &&& flatten_s2map(hw.smmu.s2map).contains_key(k) ==> flatten_s2map(
-                    hw.smmu.s2map,
-                )[k] == state_iommu_s2_map(sw.budget)[k]
-            } by {
-            let zid = k.vm.0;
-            assert(VmId(zid) == k.vm);
-            if sw.budget.zone_ids.contains(zid) {
-                assert(zone_synced(hw, sw, zid));
-                let mp = sw.budget.zones[zid].iommu_mem_set.mappings;
-                assert(hw.smmu.s2map[k.vm] == pt_s2map_inner(mp));
-                assert(pt_s2map_inner(mp).contains_key(k.gpa) == mp.contains_key(
-                    vaddr_of_gpa(k.gpa),
-                ));
-                assert(zone_iommu_s2_entries(zid, sw.budget.zones[zid]).contains_key(k)
-                    == mp.contains_key(vaddr_of_gpa(k.gpa)));
-                if mp.contains_key(vaddr_of_gpa(k.gpa)) {
-                    assert(flatten_s2map(hw.smmu.s2map)[k] == frame_to_s2(
-                        mp[vaddr_of_gpa(k.gpa)],
-                    ));
-                    assert(state_iommu_s2_map(sw.budget)[k] == frame_to_s2(
-                        mp[vaddr_of_gpa(k.gpa)],
-                    ));
-                }
-            } else {
-                assert(!state_iommu_s2_map(sw.budget).contains_key(k));
-                if hw.smmu.s2map.contains_key(k.vm) {
-                    assert(hw.smmu.s2map[k.vm] == Map::<GuestPage, S2Entry>::empty());
-                    assert(!hw.smmu.s2map[k.vm].contains_key(k.gpa));
-                }
-                assert(!flatten_s2map(hw.smmu.s2map).contains_key(k));
-            }
-        }
-    };
+    assert(flatten_s2map(hw.mmu.s2map) =~= state_s2_map(sw.budget)) by {};
+    assert(flatten_s2map(hw.smmu.s2map) =~= state_iommu_s2_map(sw.budget)) by {};
 }
 
 /// **Implementation states refine a `wf` machine.** The endpoint of the chain:
@@ -3284,13 +2866,12 @@ pub proof fn lemma_impl_synced_implies_wf_machine(hw: HardwareSpec, sw: Software
     lemma_specs_synced_implies_wf_machine(hw, sw);
 }
 
-/// **DMA isolation for the implementation — the gap-E payoff.** In any
-/// implementation state whose zones are lock-synced ([`impl_synced`]), a device
-/// operating for `vm` cannot resolve an SMMU translation onto a page privately
-/// owned (CPU- or DMA-) by a *different* VM `subject` — with the shared GIC
-/// present.  Instantiates the machine-model DMA isolation at the projected
-/// state, so the guarantee now reads on the running system rather than on an
-/// abstractly synced spec pair.
+/// **DMA isolation for the implementation** In any implementation state whose zones
+/// are lock-synced ([`impl_synced`]), a device operating for `vm` cannot resolve an
+/// SMMU translation onto a page privately owned (CPU- or DMA-) by a *different* VM
+/// `subject` — with the shared GIC present. Instantiates the machine-model DMA
+/// isolation at the projected state, so the guarantee now reads on the running system
+/// rather than on an abstractly synced spec pair.
 pub proof fn lemma_impl_synced_dma_isolation(
     hw: HardwareSpec,
     sw: SoftwareSpec,
@@ -3308,8 +2889,7 @@ pub proof fn lemma_impl_synced_dma_isolation(
         vm != subject,
         MachineState::assemble(sw.view(), hw.view()).vm_owned[subject].contains(page)
             || MachineState::assemble(sw.view(), hw.view()).iommu_owned[subject].contains(page),
-        MachineState::assemble(sw.view(), hw.view()).iommu_effective_entry(stream, vm, gpa)
-            is Some,
+        MachineState::assemble(sw.view(), hw.view()).iommu_effective_entry(stream, vm, gpa) is Some,
     ensures
         MachineState::assemble(sw.view(), hw.view()).iommu_effective_entry(
             stream,

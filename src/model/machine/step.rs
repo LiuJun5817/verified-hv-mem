@@ -1,7 +1,10 @@
 use vstd::prelude::*;
 
 use super::state::MachineState;
-use crate::model::types::*;
+use crate::model::types::{
+    CpuId, DataWord, GuestPage, GuestWordAddr, HyperCallReq, HypervisorOp, MachineAction, PhysPage,
+    S2Entry, SharedPage, TlbEntry, TlbKey, VmId, VmMemOp, VmPageKey,
+};
 
 verus! {
 
@@ -159,7 +162,9 @@ impl MachineState {
             entry,
         )
         // synchronous TLB invalidation of the edited mapping
-        &&& s2.tlb == s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))
+        &&& s2.tlb == s1.tlb.remove_keys(
+            s1.invalidation_targets(vm, gpa),
+        )
         // CPU stage-2 maintenance leaves IOMMU translation state untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_hw_s2map == s1.iommu_hw_s2map
@@ -197,7 +202,9 @@ impl MachineState {
         &&& s2.active_vm == s1.active_vm
         &&& s2.s2_map == s1.s2_map.remove(key)
         &&& s2.hw_s2map == s1.hw_s2map.remove(key)
-        &&& s2.tlb == s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))
+        &&& s2.tlb == s1.tlb.remove_keys(
+            s1.invalidation_targets(vm, gpa),
+        )
         // CPU stage-2 maintenance leaves IOMMU translation state untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_hw_s2map == s1.iommu_hw_s2map

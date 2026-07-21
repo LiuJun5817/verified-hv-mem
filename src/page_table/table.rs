@@ -69,7 +69,11 @@ pub type Table512 = Table<512>;
 /// Permission for a 4K byte page table, which points to a `Table512`.
 pub type Table512Perm = PointsTo<Table512>;
 
-/// Convert a `Frame4KPerm` referenceto a `Table512Perm` reference. Assume safety.
+/// Convert a `Frame4KPerm` reference to a `Table512Perm` reference.
+///
+/// Trusted seam: this permission conversion reinterprets the same 4K allocation
+/// as either `[u8; 4096]` or `Table512` (`[u64; 512]`). This is safe only because
+/// both views have the same size and represent the same initialized memory.
 #[verifier::external_body]
 pub(super) proof fn frame4k_perm_ref_to_table512_perm_ref(
     tracked frame_perm: &Frame4KPerm,
@@ -83,7 +87,11 @@ pub(super) proof fn frame4k_perm_ref_to_table512_perm_ref(
     table_perm@
 }
 
-/// Convert a `Table512Perm` to a `Frame4KPerm`. Assume safety.
+/// Convert a `Frame4KPerm` to a `Table512Perm`.
+///
+/// Trusted seam: this transfers ownership of the same 4K allocation from the raw
+/// frame view to the page-table view. The conversion relies on `Frame4KPerm` and
+/// `Table512Perm` having the same allocation size.
 #[verifier::external_body]
 pub(super) proof fn frame4k_perm_to_table512_perm(
     tracked frame_perm: Frame4KPerm,
@@ -97,7 +105,11 @@ pub(super) proof fn frame4k_perm_to_table512_perm(
     table_perm@
 }
 
-/// Convert a `Table512Perm` to a `Frame4KPerm`. Assume safety.
+/// Convert a `Table512Perm` to a `Frame4KPerm`.
+///
+/// Trusted seam: this is the inverse ownership conversion for the same 4K
+/// allocation, relying on the same-size representation of `Table512` and
+/// `[u8; 4096]`.
 #[verifier::external_body]
 pub(super) proof fn table512_perm_to_frame4k_perm(
     tracked table_perm: Table512Perm,
