@@ -147,7 +147,7 @@ pub struct MmuHardware<I> where I: HardwareInstr {
     /// PRIVATE — the instance handle.  Never handed out (see module docs): this
     /// is what keeps transitions un-fireable by ordinary token-holding code.
     instance: Tracked<MmuInstance>,
-    /// PRIVATE — the live-vm mirror token, consumed/produced by `add_vm`.
+    /// PRIVATE — the live-vm mirror token, updated by `add_vm` and `remove_vm`.
     vm_ids: Tracked<MmuVmIdsToken>,
     /// PRIVATE — the single global TLB token (variable-sharded).
     tlb: Tracked<MmuTlbToken>,
@@ -207,6 +207,27 @@ impl<I: HardwareInstr> MmuHardware<I> {
     {
         let tracked new_tok = self.instance.borrow().add_vm(vm@, self.vm_ids.borrow_mut());
         Tracked(new_tok)
+    }
+
+    /// Deregister a vm after all of its walker-reachable mappings have been removed.
+    /// The empty slice has no coherent TLB entries, so no hardware invalidation is
+    /// needed at this lifecycle boundary.
+    pub fn remove_vm(&mut self, vm: Ghost<VmId>, s2_tok: Tracked<MmuS2MapToken>)
+        requires
+            old(self).wf(),
+            old(self).live_vms().contains(vm@),
+            s2_tok@.instance_id() == old(self).inst_id(),
+            s2_tok@.key() == vm@,
+            s2_tok@.value() == Map::<GuestPage, S2Entry>::empty(),
+        ensures
+            self.wf(),
+            self.inst_id() == old(self).inst_id(),
+            self.live_vms() == old(self).live_vms().remove(vm@),
+    {
+        let tracked s2 = s2_tok.get();
+        proof {
+            self.instance.borrow().remove_vm(vm@, s2, self.vm_ids.borrow_mut());
+        }
     }
 
     // ── CPU MMU stage-2 maintenance ─────────────────────────────────────────────

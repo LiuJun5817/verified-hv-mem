@@ -66,8 +66,8 @@ tokenized_state_machine! {
             #[sharding(map)]
             pub s2map: Map<VmId, Map<GuestPage, S2Entry>>,
 
-            /// Mirror of `s2map.dom()` (the live vms), so `add_vm` can discharge the
-            /// fresh-key obligation — the budget/global-allocator pattern.
+            /// Mirror of `s2map.dom()` (the live vms), used to enforce fresh
+            /// registration and track deregistration.
             #[sharding(variable)]
             pub vm_ids: Set<VmId>,
 
@@ -116,6 +116,15 @@ tokenized_state_machine! {
                 require !pre.vm_ids.contains(vm);
                 update vm_ids = pre.vm_ids.insert(vm);
                 add s2map += [vm => Map::empty()];
+            }
+        }
+
+        /// Deregister a vm after its walker-reachable mapping slice is empty.
+        transition! {
+            remove_vm(vm: VmId) {
+                remove s2map -= [vm => let inner];
+                require inner == Map::<GuestPage, S2Entry>::empty();
+                update vm_ids = pre.vm_ids.remove(vm);
             }
         }
 
@@ -178,6 +187,24 @@ tokenized_state_machine! {
             };
         }
 
+        #[inductive(remove_vm)]
+        fn remove_vm_inductive(pre: Self, post: Self, vm: VmId) {
+            assert(post.s2map.dom() =~= post.vm_ids);
+            assert forall|key: TlbKey| #[trigger] post.tlb.contains_key(key) implies {
+                &&& post.s2map.contains_key(key.vm)
+                &&& post.s2map[key.vm].contains_key(key.gpa)
+                &&& post.tlb[key].as_s2_entry() == post.s2map[key.vm][key.gpa]
+            } by {
+                assert(pre.tlb.contains_key(key));
+                assert(pre.s2map.contains_key(key.vm));
+                assert(key.vm != vm) by {
+                    if key.vm == vm {
+                        assert(pre.s2map[vm].contains_key(key.gpa));
+                    }
+                }
+            };
+        }
+
         #[inductive(fill)]
         fn fill_inductive(pre: Self, post: Self, cpu: CpuId, vm: VmId, gpa: GuestPage) {
             let inner = pre.s2map[vm];
@@ -237,7 +264,7 @@ pub type MmuInstance = MmuSpec::Instance;
 /// One vm's MMU-reachable stage-2 slice token (map-sharded; held in that zone's lock).
 pub type MmuS2MapToken = MmuSpec::s2map;
 
-/// The live-vm mirror token (variable-sharded; held by `MmuHardware` for `add_vm`).
+/// The live-vm mirror token (variable-sharded; held by `MmuHardware` for VM lifecycle).
 pub type MmuVmIdsToken = MmuSpec::vm_ids;
 
 /// The global TLB token (variable-sharded; held by `MmuHardware`).

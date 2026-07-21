@@ -21,8 +21,11 @@ pub mod zone;
 extern crate alloc;
 
 use crate::{
-    address::frame::FrameSize,
-    address::region::MemoryRegion,
+    address::{
+        addr::SpecVAddr,
+        frame::{FrameSize, SpecFrame},
+        region::MemoryRegion,
+    },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
     hardware::{HardwareInstr, MmuHardware},
@@ -400,18 +403,40 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     /// 2. Find the zone by `zone_id` field.
     /// 3. Acquire the zone write lock and reject removal unless both its CPU and
     ///    IOMMU memory sets are empty.
-    /// 4. Drop both memory sets, restoring their implementation-owned resources.
-    /// 5. Swap-remove the empty zone from the list.
-    /// 6. Advance the protocol's `remove_zone` transition to drop the zone token.
-    /// 7. Restore the zone list and release the HvMem write lock.
+    /// 4. Deregister the VM from both hardware translation regimes.
+    /// 5. Drop both memory sets, restoring their implementation-owned resources.
+    /// 6. Swap-remove the empty zone from the list.
+    /// 7. Advance the protocol's `remove_zone` transition to drop the zone token.
+    /// 8. Restore the zone list and release the HvMem write lock.
     ///
     /// Returns `Err(())` if no zone with the given `zid` is found or either of
     /// its memory sets is non-empty.
-    pub fn remove_zone(&self, zid: usize) -> (res: Result<(), ()>)
+    pub fn remove_zone(
+        &self,
+        zid: usize,
+        mmu: &mut MmuHardware<I>,
+        iommu_mmu: &mut MmuHardware<I>,
+    ) -> (res: Result<(), ()>)
         requires
             self.invariants(),
+            old(mmu).wf(),
+            old(mmu).inst_id() == self.lock.k@.mmu_inst_id,
+            old(mmu).live_vms().contains(VmId(zid as nat)),
+            old(iommu_mmu).wf(),
+            old(iommu_mmu).inst_id() == self.lock.k@.iommu_mmu_inst_id,
+            old(iommu_mmu).live_vms().contains(VmId(zid as nat)),
         ensures
             res is Ok ==> self.invariants(),
+            mmu.wf(),
+            mmu.inst_id() == old(mmu).inst_id(),
+            res is Ok ==> mmu.live_vms() == old(mmu).live_vms().remove(VmId(zid as nat)),
+            res is Err ==> mmu.live_vms() == old(mmu).live_vms(),
+            iommu_mmu.wf(),
+            iommu_mmu.inst_id() == old(iommu_mmu).inst_id(),
+            res is Ok ==> iommu_mmu.live_vms() == old(iommu_mmu).live_vms().remove(
+                VmId(zid as nat),
+            ),
+            res is Err ==> iommu_mmu.live_vms() == old(iommu_mmu).live_vms(),
     {
         // ── Step 1: acquire HvMem write lock ─────────────────────────────────
         let guard = self.lock.lock_write();
@@ -452,33 +477,42 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
-        // ── Step 4: restore resources owned by both memory sets ──────────────
+        // ── Step 4: deregister the VM from both hardware regimes ─────────────
+
+        proof {
+            assert(cpu_mem_set@.mappings == Map::<SpecVAddr, SpecFrame>::empty());
+            assert(iommu_mem_set@.mappings == Map::<SpecVAddr, SpecFrame>::empty());
+            assert(pt_s2map_inner(cpu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
+            assert(pt_s2map_inner(iommu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
+        }
+        let tracked ZoneRwContent::<M, P> {
+            cpu_mem_set_perm: _,
+            iommu_mem_set_perm: _,
+            zone_state,
+            s2map_tok,
+            iommu_s2map_tok,
+        } = zone_content;
+        mmu.remove_vm(Ghost(VmId(zid as nat)), Tracked(s2map_tok));
+        iommu_mmu.remove_vm(Ghost(VmId(zid as nat)), Tracked(iommu_s2map_tok));
+
+        // ── Step 5: restore resources owned by both memory sets ──────────────
 
         cpu_mem_set.drop(&self.allocator);
         iommu_mem_set.drop(&self.allocator);
 
-        // ── Step 5: remove the empty zone from the list ────────────────────────
+        // ── Step 6: remove the empty zone from the list ────────────────────────
 
         let ghost old_zones = zones@;
         let _zone = zones.swap_remove(i);
 
-        // ── Step 6: advance protocol ghost state ───────────────────────────────
+        // ── Step 7: advance protocol ghost state ───────────────────────────────
         proof {
-            // Both retained hardware slices are empty, so dropping the zone keeps
-            // the dead-slice clauses of `impl_synced` true.
-            let tracked ZoneRwContent::<M, P> {
-                cpu_mem_set_perm: _,
-                iommu_mem_set_perm: _,
-                zone_state,
-                s2map_tok: _,
-                iommu_s2map_tok: _,
-            } = zone_content;
             P::remove_zone(&mut content.global_state, zone_state);
-            // The writer token and the empty exec memory sets are dropped with the
-            // destroyed zone; there is no lock to release afterwards.
+            // The writer token and empty exec memory sets are destroyed with the zone;
+            // there is no zone lock to release afterwards.
         }
 
-        // ── Step 7: restore zone list and release HvMem write lock ───────────
+        // ── Step 8: restore zone list and release HvMem write lock ───────────
         self.zone_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
             let zone_list = content.zone_list_perm@.mem_contents->Init_0;

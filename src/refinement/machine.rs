@@ -2606,13 +2606,12 @@ pub proof fn lemma_iommu_remove_region_machine_trace(
 //    `mem_inst_id` / `mmu_inst_id` / `iommu_mmu_inst_id` clauses) — so step 3
 //    applies at every live `zid` of the *same* three instances, giving the
 //    first clause of [`impl_synced`].
-// 5. The *dead-slice* clauses of [`impl_synced`] (a vm absent from `zone_ids`
-//    has an empty `s2map` slice): `MmuSpec::add_vm` mints every slice empty and
-//    is fired only by `HvMem::add_zone`, in lockstep with `BudgetSpec::add_zone`.
-//    `HvMem::remove_zone` rejects zones whose CPU or IOMMU memory set is non-empty,
-//    so removing a zone leaves only empty hardware slices and stays inside the
-//    synced regime. `MmuSpec` still has no `remove_vm`, so the VM ID remains
-//    registered and cannot be reused after removal.
+// 5. The *absent-slice* clauses of [`impl_synced`]: `MmuSpec::add_vm` mints an
+//    empty slice in each hardware regime when `HvMem::add_zone` adds the matching
+//    budget zone. `HvMem::remove_zone` first rejects non-empty CPU or IOMMU memory
+//    sets, then `MmuSpec::remove_vm` consumes both empty hardware slices before
+//    `BudgetSpec::remove_zone` removes the zone. Thus hardware registration stays
+//    in lockstep with `zone_ids`, and a removed VM ID can be reused.
 // 6. `sw.invariants()` / `hw.invariants()`: every state of a tokenized
 //    state machine instance satisfies its invariants.
 //
@@ -2656,16 +2655,14 @@ pub open spec fn zone_synced(hw: HardwareSpec, sw: SoftwareSpec, zid: nat) -> bo
 }
 
 /// The system-level sync the implementation maintains: every live zone is
-/// [`zone_synced`], and vms without a live zone contribute nothing to either
-/// hardware map (their slices, if any, are empty).
+/// [`zone_synced`], and a vm without a live zone has no slice in either hardware
+/// map.
 pub open spec fn impl_synced(hw: HardwareSpec, sw: SoftwareSpec) -> bool {
     &&& forall|zid: nat| #[trigger] sw.budget.zone_ids.contains(zid) ==> zone_synced(hw, sw, zid)
     &&& forall|vm: VmId| #[trigger]
-        hw.mmu.s2map.contains_key(vm) && !sw.budget.zone_ids.contains(vm.0) ==> hw.mmu.s2map[vm]
-            == Map::<GuestPage, S2Entry>::empty()
+        hw.mmu.s2map.contains_key(vm) ==> sw.budget.zone_ids.contains(vm.0)
     &&& forall|vm: VmId| #[trigger]
-        hw.smmu.s2map.contains_key(vm) && !sw.budget.zone_ids.contains(vm.0) ==> hw.smmu.s2map[vm]
-            == Map::<GuestPage, S2Entry>::empty()
+        hw.smmu.s2map.contains_key(vm) ==> sw.budget.zone_ids.contains(vm.0)
 }
 
 /// A zone lock's invariant and its resident shard identities directly yield
@@ -2690,7 +2687,7 @@ pub proof fn lemma_zone_pred_synced<PT, M, A, I>(
 {
 }
 
-/// Per-zone sync plus empty dead slices pin both flattened hardware maps to the
+/// Per-zone sync plus absent dead slices pin both flattened hardware maps to the
 /// budget projections.
 pub proof fn lemma_impl_synced_specs_synced(hw: HardwareSpec, sw: SoftwareSpec)
     requires
