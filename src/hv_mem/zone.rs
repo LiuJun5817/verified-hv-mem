@@ -15,9 +15,9 @@ use crate::{
     global_allocator::GlobalAllocator,
     hardware::spec::MmuS2MapToken,
     hardware::{HardwareInstr, MmuHardware},
+    memory_set::MemorySet,
     model::convert::pt_s2map_inner,
     model::types::VmId,
-    memory_set::MemorySet,
     page_table::{PageTable, SpecPTConstants},
     sync::rwlock::{RwLock, RwReadGuard, RwWriteGuard},
 };
@@ -283,13 +283,6 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             },
         );
 
-        // ZonePred::inv holds at birth: the PointsTo clauses come from `PCell::new`,
-        // and every remaining clause (mem-set invariants, ghost-zone mirror, synced
-        // slice tokens) is a `Zone::new` precondition.
-        proof {
-            assert(ZonePred::<PT, M, A, P, I>::inv(zone_key@, zone_rw_content));
-        }
-
         let zone_lock = RwLock::new(zone_key, Tracked(zone_rw_content));
         Zone {
             cpu_mem_set: cpu_mem_set_cell,
@@ -433,43 +426,6 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, P> = token.get();
         self.cpu_mem_set.put(Tracked(&mut content.cpu_mem_set_perm), mem_set);
-        proof {
-            assert(ZonePred::<PT, M, A, P, I>::inv(self.lock.k@, content)) by {
-                assert(content.cpu_mem_set_perm.is_init());
-                assert(content.cpu_mem_set_perm@.pcell === self.lock.k@.cpu_cell_id);
-                assert(content.cpu_mem_set_perm@.mem_contents->Init_0.invariants());
-                assert(content.cpu_mem_set_perm@.mem_contents->Init_0.inst_id()
-                    == self.lock.k@.alloc_inst_id);
-                assert(content.cpu_mem_set_perm@.mem_contents->Init_0.pt_constants()
-                    == self.lock.k@.pt_constants);
-                assert(content.iommu_mem_set_perm.is_init());
-                assert(content.iommu_mem_set_perm@.pcell === self.lock.k@.iommu_cell_id);
-                assert(content.iommu_mem_set_perm@.mem_contents->Init_0.invariants());
-                assert(content.iommu_mem_set_perm@.mem_contents->Init_0.inst_id()
-                    == self.lock.k@.alloc_inst_id);
-                assert(content.iommu_mem_set_perm@.mem_contents->Init_0.pt_constants()
-                    == self.lock.k@.pt_constants);
-                assert(content.zone_state.zone_id() == self.lock.k@.zone_id);
-                assert(content.zone_state.wf(self.lock.k@.mem_inst_id));
-                assert(content.zone_state.ghost_zone().cpu_mem_set
-                    == content.cpu_mem_set_perm@.mem_contents->Init_0@);
-                assert(content.zone_state.ghost_zone().iommu_mem_set
-                    == content.iommu_mem_set_perm@.mem_contents->Init_0@);
-                // MMU sync clause: the slice token (unchanged by put) still projects
-                // the CPU mem_set just stored back.
-                assert(content.s2map_tok.instance_id() == self.lock.k@.mmu_inst_id);
-                assert(content.s2map_tok.key() == VmId(self.lock.k@.zone_id as nat));
-                assert(content.s2map_tok.value() == pt_s2map_inner(
-                    content.cpu_mem_set_perm@.mem_contents->Init_0@.mappings,
-                ));
-                // IOMMU sync clause: untouched by the CPU path.
-                assert(content.iommu_s2map_tok.instance_id() == self.lock.k@.iommu_mmu_inst_id);
-                assert(content.iommu_s2map_tok.key() == VmId(self.lock.k@.zone_id as nat));
-                assert(content.iommu_s2map_tok.value() == pt_s2map_inner(
-                    content.iommu_mem_set_perm@.mem_contents->Init_0@.mappings,
-                ));
-            };
-        }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
     }
 
@@ -514,41 +470,6 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, P> = token.get();
         self.iommu_mem_set.put(Tracked(&mut content.iommu_mem_set_perm), mem_set);
-        proof {
-            assert(ZonePred::<PT, M, A, P, I>::inv(self.lock.k@, content)) by {
-                assert(content.cpu_mem_set_perm.is_init());
-                assert(content.cpu_mem_set_perm@.pcell === self.lock.k@.cpu_cell_id);
-                assert(content.cpu_mem_set_perm@.mem_contents->Init_0.invariants());
-                assert(content.cpu_mem_set_perm@.mem_contents->Init_0.inst_id()
-                    == self.lock.k@.alloc_inst_id);
-                assert(content.cpu_mem_set_perm@.mem_contents->Init_0.pt_constants()
-                    == self.lock.k@.pt_constants);
-                assert(content.iommu_mem_set_perm.is_init());
-                assert(content.iommu_mem_set_perm@.pcell === self.lock.k@.iommu_cell_id);
-                assert(content.iommu_mem_set_perm@.mem_contents->Init_0.invariants());
-                assert(content.iommu_mem_set_perm@.mem_contents->Init_0.inst_id()
-                    == self.lock.k@.alloc_inst_id);
-                assert(content.iommu_mem_set_perm@.mem_contents->Init_0.pt_constants()
-                    == self.lock.k@.pt_constants);
-                assert(content.zone_state.zone_id() == self.lock.k@.zone_id);
-                assert(content.zone_state.wf(self.lock.k@.mem_inst_id));
-                assert(content.zone_state.ghost_zone().cpu_mem_set
-                    == content.cpu_mem_set_perm@.mem_contents->Init_0@);
-                assert(content.zone_state.ghost_zone().iommu_mem_set
-                    == content.iommu_mem_set_perm@.mem_contents->Init_0@);
-                assert(content.s2map_tok.instance_id() == self.lock.k@.mmu_inst_id);
-                assert(content.s2map_tok.key() == VmId(self.lock.k@.zone_id as nat));
-                assert(content.s2map_tok.value() == pt_s2map_inner(
-                    content.cpu_mem_set_perm@.mem_contents->Init_0@.mappings,
-                ));
-                // IOMMU sync clause: the slice token projects the IOMMU mem_set put back.
-                assert(content.iommu_s2map_tok.instance_id() == self.lock.k@.iommu_mmu_inst_id);
-                assert(content.iommu_s2map_tok.key() == VmId(self.lock.k@.zone_id as nat));
-                assert(content.iommu_s2map_tok.value() == pt_s2map_inner(
-                    content.iommu_mem_set_perm@.mem_contents->Init_0@.mappings,
-                ));
-            };
-        }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
     }
 
@@ -626,9 +547,9 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
-        let ghost old_mem_set = mem_set@;
         // Pull this zone's CPU MMU slice token out of the lock content so it can be
         // threaded through `mem_set.insert` (which fires `map`/`map_dsb` per page).
+
         let tracked ZoneRwContent::<M, BudgetProtocol> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
@@ -647,11 +568,6 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         let tracked new_s2map_tok = s2_out.get();
 
         proof {
-            // Targeted facts for BudgetProtocol::cpu_insert_region preconditions.
-            assert(zone_state.wf(gs.mem_inst_id()));
-            assert(zone_state.ghost_zone().cpu_mem_set == old_mem_set);
-            assert(!zone_state.ghost_zone().cpu_mem_set.regions.contains(region));
-            assert(!zone_state.ghost_zone().cpu_mem_set.overlaps_vmem(region));
             let tracked new_zone_state = BudgetProtocol::cpu_insert_region(gs, zone_state, region);
             content =
             ZoneRwContent::<M, BudgetProtocol> {
@@ -661,10 +577,6 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
                 s2map_tok: new_s2map_tok,
                 iommu_s2map_tok,
             };
-            // Linking invariant: new ghost_zone mirrors the updated exec mem_set.
-            assert(content.zone_state.ghost_zone().cpu_mem_set == mem_set@);
-            // MMU sync clause restored: `mem_set.insert` returned the slice token driven
-            // to `pt_s2map_inner(mem_set@.mappings)` (one `map_dsb` per inserted page).
         }
 
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -727,18 +639,8 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         let tracked new_s2map_tok = s2_out.get();
 
         proof {
-            assert(zone_state.wf(gs.mem_inst_id()));
-            // The linking invariant connects the ghost zone's CPU region set to the
-            // exec mem_set at the point the lock was acquired.
-            assert(zone_state.ghost_zone().cpu_mem_set == old_mem_set);
-            // The exec check guarantees a region starts at region.vstart, so the ghost
-            // zone also has one — they are in sync by the linking invariant.
-            assert(zone_state.ghost_zone().cpu_mem_set.has_region_starting_at(region.vstart@));
-            // Derive the ghost region over `old_mem_set` so it is the *same* witness
-            // that `M::remove`'s `remove_region(region.vstart@)` chooses internally.
             let ghost ghost_region = choose|r: MemoryRegion| #[trigger]
                 old_mem_set.regions.contains(r) && r.vstart@ == region.vstart@;
-            assert(zone_state.ghost_zone().cpu_mem_set.regions.contains(ghost_region));
             let tracked new_zone_state = BudgetProtocol::cpu_remove_region(
                 gs,
                 zone_state,
@@ -752,10 +654,6 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
                 s2map_tok: new_s2map_tok,
                 iommu_s2map_tok,
             };
-            // Linking invariant: new ghost_zone mirrors the updated exec mem_set.
-            // `M::remove` ensures mem_set@ == old_mem_set.remove_region(region.vstart@),
-            // which equals old_mem_set.remove_region_exact(ghost_region).
-            assert(content.zone_state.ghost_zone().cpu_mem_set == mem_set@);
         }
 
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -796,9 +694,9 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
             self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
-        let ghost old_mem_set = mem_set@;
         // Pull the IOMMU slice token out and thread it through `mem_set.insert` with
         // `iommu = true`, which fires the SMMU `iommu_map_sync` per inserted page.
+
         let tracked ZoneRwContent::<M, BudgetProtocol> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
@@ -817,15 +715,6 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         let tracked new_iommu_s2map_tok = s2_out.get();
 
         proof {
-            // Targeted facts for BudgetProtocol::iommu_insert_region preconditions.
-            assert(zone_state.wf(gs.mem_inst_id()));
-            assert(zone_state.ghost_zone().iommu_mem_set == old_mem_set);
-            assert(!zone_state.ghost_zone().iommu_mem_set.overlaps_vmem(region));
-            assert(!zone_state.ghost_zone().iommu_mem_set.regions.contains(region)) by {
-                if zone_state.ghost_zone().iommu_mem_set.regions.contains(region) {
-                    assert(old_mem_set.has_region_starting_at(region.vstart@));
-                }
-            }
             let tracked new_zone_state = BudgetProtocol::iommu_insert_region(
                 gs,
                 zone_state,
@@ -839,9 +728,6 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
                 s2map_tok,
                 iommu_s2map_tok: new_iommu_s2map_tok,
             };
-            // Linking invariant: new ghost_zone mirrors the updated exec IOMMU mem_set;
-            // the IOMMU slice token was driven to `pt_s2map_inner(mem_set@.mappings)`.
-            assert(content.zone_state.ghost_zone().iommu_mem_set == mem_set@);
         }
 
         self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -899,12 +785,8 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         let tracked new_iommu_s2map_tok = s2_out.get();
 
         proof {
-            assert(zone_state.wf(gs.mem_inst_id()));
-            assert(zone_state.ghost_zone().iommu_mem_set == old_mem_set);
-            assert(zone_state.ghost_zone().iommu_mem_set.has_region_starting_at(region.vstart@));
             let ghost ghost_region = choose|r: MemoryRegion| #[trigger]
                 old_mem_set.regions.contains(r) && r.vstart@ == region.vstart@;
-            assert(zone_state.ghost_zone().iommu_mem_set.regions.contains(ghost_region));
             let tracked new_zone_state = BudgetProtocol::iommu_remove_region(
                 gs,
                 zone_state,
@@ -918,7 +800,6 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
                 s2map_tok,
                 iommu_s2map_tok: new_iommu_s2map_tok,
             };
-            assert(content.zone_state.ghost_zone().iommu_mem_set == mem_set@);
         }
 
         self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });

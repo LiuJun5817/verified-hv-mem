@@ -1,9 +1,9 @@
 //! A memory set is a collection of memory areas that can be mapped into the virtual address
 //! space of a zone (process). It manages the page table for the zone, and provides methods to
 //! insert, remove, and find memory areas.
-use crate::model::convert::pt_s2map_inner;
-use crate::hardware::{HardwareInstr, MmuHardware};
 use crate::hardware::spec::MmuS2MapToken;
+use crate::hardware::{HardwareInstr, MmuHardware};
+use crate::model::convert::pt_s2map_inner;
 use crate::model::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 use crate::{
     address::{
@@ -139,17 +139,8 @@ impl SpecMemorySet {
         let new = self.insert_region(region);
         let old_maps = self.mappings;
         let region_maps = region.spec_mappings();
-        assert(new.regions =~= self.regions.insert(region));
-        assert(new.mappings == old_maps.union_prefer_right(region_maps));
 
-        // 1. regions valid
-        assert forall|r: MemoryRegion| #[trigger]
-            new.regions.contains(r) implies r.spec_valid() by {
-            if r != region {
-                assert(self.regions.contains(r));
-            }
-        }
-        // 2. regions non-overlapping (the new region vs each old one, both directions)
+        // Regions remain non-overlapping, including the new region in either position.
         assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
             new.regions.contains(r1) && #[trigger] new.regions.contains(r2) && r1
                 != r2 implies !r1.spec_overlaps_vmem(r2) by {
@@ -162,11 +153,10 @@ impl SpecMemorySet {
                 assert(self.regions.contains(r1) && self.regions.contains(r2));
             }
         }
-        // 3. completeness: every region page is mapped to its frame
+        // Every region page is mapped to its frame.
         assert forall|r: MemoryRegion, i: nat|
             #![trigger new.regions.contains(r), r.spec_page_vaddr(i)]
-            new.regions.contains(r) && 0 <= i
-                < r.pages implies new.mappings.contains_pair(
+            new.regions.contains(r) && 0 <= i < r.pages implies new.mappings.contains_pair(
             r.spec_page_vaddr(i),
             r.spec_frame(i),
         ) by {
@@ -185,7 +175,7 @@ impl SpecMemorySet {
                 }
             }
         }
-        // 4. soundness: every mapping is some region page's frame
+        // Every mapping is some region page's frame.
         assert forall|v: SpecVAddr, f: SpecFrame| #[trigger]
             new.mappings.contains_pair(v, f) implies exists|r: MemoryRegion, i: nat|
             #![trigger new.regions.contains(r), r.spec_page_vaddr(i)]
@@ -215,25 +205,11 @@ impl SpecMemorySet {
     {
         let new = self.remove_region_exact(region);
         let region_maps = region.spec_mappings();
-        assert(new.regions =~= self.regions.remove(region));
-        assert(new.mappings == self.mappings.remove_keys(region_maps.dom()));
-        assert(region.spec_valid());  // region ∈ regions, self.wf() ⇒ valid
 
-        // 1 & 2: regions are a subset of the old ones.
-        assert forall|r: MemoryRegion| #[trigger]
-            new.regions.contains(r) implies r.spec_valid() by {
-            assert(self.regions.contains(r));
-        }
-        assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
-            new.regions.contains(r1) && #[trigger] new.regions.contains(r2) && r1
-                != r2 implies !r1.spec_overlaps_vmem(r2) by {
-            assert(self.regions.contains(r1) && self.regions.contains(r2));
-        }
-        // 3. completeness: remaining region pages are not `region`'s pages, so they survive.
+        // Remaining region pages are not `region`'s pages, so they survive.
         assert forall|r: MemoryRegion, i: nat|
             #![trigger new.regions.contains(r), r.spec_page_vaddr(i)]
-            new.regions.contains(r) && 0 <= i
-                < r.pages implies new.mappings.contains_pair(
+            new.regions.contains(r) && 0 <= i < r.pages implies new.mappings.contains_pair(
             r.spec_page_vaddr(i),
             r.spec_frame(i),
         ) by {
@@ -246,7 +222,7 @@ impl SpecMemorySet {
                 }
             }
         }
-        // 4. soundness: surviving mappings come from a remaining region (not `region`).
+        // Surviving mappings come from a remaining region (not `region`).
         assert forall|v: SpecVAddr, f: SpecFrame| #[trigger]
             new.mappings.contains_pair(v, f) implies exists|r: MemoryRegion, i: nat|
             #![trigger new.regions.contains(r), r.spec_page_vaddr(i)]

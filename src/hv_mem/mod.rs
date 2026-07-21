@@ -24,9 +24,9 @@ use crate::{
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
     hardware::{HardwareInstr, MmuHardware},
+    memory_set::{MemorySet, SpecMemorySet},
     model::convert::pt_s2map_inner,
     model::types::{GuestPage, S2Entry, VmId},
-    memory_set::{MemorySet, SpecMemorySet},
     page_table::{PTConstants, PageTable, SpecPTConstants},
     sync::rwlock::{RwLock, RwReadGuard, RwReaderToken, RwWriteGuard, RwWriterToken},
 };
@@ -39,7 +39,7 @@ use vstd::{
     prelude::*,
     tokens::InstanceId,
 };
-use zone::{Zone, ZoneKey, ZonePred, ZoneRwContent};
+use zone::{Zone, ZoneKey, ZoneRwContent};
 
 verus! {
 
@@ -149,7 +149,8 @@ impl<PT, M, A, P, I> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P, I>
             // Each exec zone uses the same page-table architecture.
             &&& forall|i: int|
                 #![trigger zone_list[i]]
-                0 <= i < zone_list.len() ==> zone_list[i].pt_constants() == k.pt_constants
+                0 <= i < zone_list.len() ==> zone_list[i].pt_constants()
+                    == k.pt_constants
             // Each zone in the list is well-formed.
             &&& forall|i: int| #![auto] 0 <= i < zone_list.len() ==> zone_list[i].wf()
         }
@@ -234,7 +235,6 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             decreases zones.len() - i,
         {
             if zones[i].zone_id == zid {
-                assert(zones@[i as int].wf());
                 return Some(i);
             }
             i += 1;
@@ -294,7 +294,6 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         match Self::find_zone_index(&zones, zid) {
             Some(_) => {
                 self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
-                assert(HvMemPred::<PT, M, A, P, I>::inv(self.lock.k@, content));
                 self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
                 return Err(());
             },
@@ -309,10 +308,6 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         proof {
             pre_add_zone_ids = P::zone_ids(&content.global_state);
             mem_inst_id = P::mem_inst_id(&content.global_state);
-            assert(forall|j: int| 0 <= j < zones.len() ==> #[trigger] zones[j].zone_id != zid);
-            // From the bijection invariant: zone_ids.contains(zid as nat) iff
-            // some exec zone has zone_id == zid — but `find_zone_index` found none.
-            assert(!P::zone_ids(&content.global_state).contains(zid as nat));
             zone_state = P::add_zone(&mut content.global_state, zid as nat);
             // Postcondition: zone_ids(new_gs) = pre_add_zone_ids.insert(zid as nat)
             //                mem_inst_id(new_gs)  = mem_inst_id  (unchanged)
@@ -331,13 +326,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         proof {
             assert(pt_s2map_inner(cpu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
             assert(pt_s2map_inner(iommu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
-            // Both fresh mem_sets equal the literal empty SpecMemorySet that
-            // `P::add_zone` put in the ghost zone token — this discharges
-            // `Zone::new`'s ghost/exec mirror preconditions.
-            assert(cpu_mem_set@ == SpecMemorySet {
-                regions: Set::empty(),
-                mappings: Map::empty(),
-            });
+            assert(cpu_mem_set@ == SpecMemorySet { regions: Set::empty(), mappings: Map::empty() });
             assert(iommu_mem_set@ == SpecMemorySet {
                 regions: Set::empty(),
                 mappings: Map::empty(),
@@ -369,13 +358,11 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             assert(new_zones =~= old_zones.push(new_zone));
             assert(forall|k: int| 0 <= k < old_len ==> new_zones[k] == old_zones[k]);
             assert(new_zones[old_len] == new_zone);
-            // From P::add_zone postconditions:
             assert(P::zone_ids(&content.global_state) =~= pre_add_zone_ids.insert(zid as nat));
             assert(P::mem_inst_id(&content.global_state) == mem_inst_id);
             assert(HvMemPred::<PT, M, A, P, I>::inv(self.lock.k@, content)) by {
                 // 1. zone_list_perm.is_init() — from put.
                 // 2. pcell matches — from loop invariant.
-                assert(content.zone_list_perm@.pcell === self.lock.k@.cell_id);
                 // 3. global_wf — from P::add_zone postcondition.
                 // 4. Bijection: zone_ids(new_gs) <-> new_zones.
                 assert forall|z: nat|
@@ -396,71 +383,6 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                             0 <= k < old_len && #[trigger] old_zones[k].zone_id as nat == z));
                     }
                 };
-                // 5. Spec-instance consistency for all new zones.
-                assert forall|k: int|
-                    #![trigger new_zones[k]]
-                    0 <= k < new_zones.len() implies new_zones[k].mem_inst_id()
-                    == self.lock.k@.mem_inst_id by {
-                    if k < old_len {
-                        // From loop invariant: old_zones[k].mem_inst_id() == mem_inst_id.
-                        assert(old_zones[k].mem_inst_id() == mem_inst_id);
-                    }
-                };
-                // 5b. MMU-instance consistency for all new zones.
-                assert forall|k: int|
-                    #![trigger new_zones[k]]
-                    0 <= k < new_zones.len() implies new_zones[k].mmu_inst_id()
-                    == self.lock.k@.mmu_inst_id by {
-                    if k < old_len {
-                        // From loop invariant: old_zones[k].mmu_inst_id() == k.mmu_inst_id.
-                        assert(old_zones[k].mmu_inst_id() == self.lock.k@.mmu_inst_id);
-                    } else {
-                        // new_zone.mmu_inst_id() == mmu.inst_id() (Zone::new) ==
-                        // k.mmu_inst_id (loop invariant, preserved by add_vm's stable inst_id).
-                        assert(new_zones[k] == new_zone);
-                    }
-                };
-                // 5c. IOMMU-instance consistency for all new zones.
-                assert forall|k: int|
-                    #![trigger new_zones[k]]
-                    0 <= k < new_zones.len() implies new_zones[k].iommu_mmu_inst_id()
-                    == self.lock.k@.iommu_mmu_inst_id by {
-                    if k < old_len {
-                        assert(old_zones[k].iommu_mmu_inst_id() == self.lock.k@.iommu_mmu_inst_id);
-                    } else {
-                        assert(new_zones[k] == new_zone);
-                    }
-                };
-                // 5d. Page-table architecture consistency for all new zones.
-                assert forall|k: int|
-                    #![trigger new_zones[k]]
-                    0 <= k < new_zones.len() implies new_zones[k].pt_constants()
-                    == self.lock.k@.pt_constants by {
-                    if k < old_len {
-                        assert(old_zones[k].pt_constants() == self.lock.k@.pt_constants);
-                    } else {
-                        assert(new_zones[k] == new_zone);
-                    }
-                };
-                // 6. Pairwise distinct IDs.
-                assert forall|k: int, l: int|
-                    #![auto]
-                    0 <= k < new_zones.len() && 0 <= l < new_zones.len() && k
-                        != l implies new_zones[k].zone_id != new_zones[l].zone_id by {
-                    if k < old_len && l < old_len {
-                        // From loop invariant.
-                    } else if k == old_len {
-                        // new_zone.zone_id == zid; old_zones[l].zone_id != zid
-                        // (from `find_zone_index`).
-                        assert(old_zones[l].zone_id != zid);
-                    } else {
-                        // l == old_len; old_zones[k].zone_id != zid
-                        // (from `find_zone_index`).
-                        assert(old_zones[k].zone_id != zid);
-                    }
-                };
-                // 7. All zones well-formed.
-                assert(forall|k: int| #![auto] 0 <= k < new_zones.len() ==> new_zones[k].wf());
             };
         }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
@@ -496,9 +418,8 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         let i = match Self::find_zone_index(&zones, zid) {
             Some(i) => i,
             None => {
-            // Zone not found — restore and return error.
+                // Zone not found — restore and return error.
                 self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
-                assert(HvMemPred::<PT, M, A, P, I>::inv(self.lock.k@, content));
                 self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
                 return Err(());
             },
@@ -507,9 +428,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         let zone_guard = zones[i].lock.lock_write();
         let RwWriteGuard { handle: zone_handle, token: zone_token } = zone_guard;
         let tracked mut zone_content: ZoneRwContent<M, P> = zone_token.get();
-        let cpu_mem_set: M = zones[i].cpu_mem_set.take(
-            Tracked(&mut zone_content.cpu_mem_set_perm),
-        );
+        let cpu_mem_set: M = zones[i].cpu_mem_set.take(Tracked(&mut zone_content.cpu_mem_set_perm));
         let iommu_mem_set: M = zones[i].iommu_mem_set.take(
             Tracked(&mut zone_content.iommu_mem_set_perm),
         );
@@ -521,25 +440,15 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                 Tracked(&mut zone_content.iommu_mem_set_perm),
                 iommu_mem_set,
             );
-            assert(ZonePred::<PT, M, A, P, I>::inv(zones[i as int].lock.k@, zone_content));
-            zones[i].lock.unlock_write(RwWriteGuard {
-                handle: zone_handle,
-                token: Tracked(zone_content),
-            });
+            zones[i].lock.unlock_write(
+                RwWriteGuard { handle: zone_handle, token: Tracked(zone_content) },
+            );
             self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
-            assert(HvMemPred::<PT, M, A, P, I>::inv(self.lock.k@, content));
             self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
-
-        proof {
-            assert(zone_content.zone_state.ghost_zone().cpu_mem_set == cpu_mem_set@);
-            assert(zone_content.zone_state.ghost_zone().iommu_mem_set == iommu_mem_set@);
-            assert(zone_content.zone_state.ghost_zone().cpu_mem_set.empty());
-            assert(zone_content.zone_state.ghost_zone().iommu_mem_set.empty());
-        }
-
         // ── Step 4: remove the empty zone from the list ────────────────────────
+
         let ghost old_zones = zones@;
         let _zone = zones.swap_remove(i);
 
@@ -563,34 +472,10 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         self.zone_mem_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
             let zone_list = content.zone_list_perm@.mem_contents->Init_0;
-            // After swap_remove+put: zone_list@ is old_zones with index `i`
-            // replaced by the previous last element.
             let new_zones = zone_list@;
             assert(forall|k: int|
                 0 <= k < new_zones.len() && k != i ==> new_zones[k] == old_zones[k]);
             assert(i < new_zones.len() ==> new_zones[i as int] == old_zones[old_zones.len() - 1]);
-            assert(HvMemPred::<PT, M, A, P, I>::inv(self.lock.k@, content)) by {
-                // 1. zone_list_perm.is_init() — from put.
-                // 2. pcell matches — from loop invariant.
-                assert(content.zone_list_perm@.pcell === self.lock.k@.cell_id);
-                // 3. global_wf — from P::remove_zone postcondition.
-                // 4. Bijection: zone_ids(new_gs) <-> new_zones.
-                assert(forall|z: nat|
-                    P::zone_ids(&content.global_state).contains(z) == (exists|k: int|
-                        0 <= k < new_zones.len() && #[trigger] new_zones[k].zone_id as nat == z));
-                // 5. Spec-instance consistency for all new zones.
-                assert(forall|k: int|
-                    #![trigger new_zones[k]]
-                    0 <= k < new_zones.len() ==> new_zones[k].mem_inst_id()
-                        == self.lock.k@.mem_inst_id);
-                // 6. Pairwise distinct IDs.
-                assert(forall|k: int, l: int|
-                    #![auto]
-                    0 <= k < new_zones.len() && 0 <= l < new_zones.len() && k != l
-                        ==> new_zones[k].zone_id != new_zones[l].zone_id);
-                // 7. All zones well-formed.
-                assert(forall|k: int| #![auto] 0 <= k < new_zones.len() ==> new_zones[k].wf());
-            };
         }
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
 
@@ -624,10 +509,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         // The borrow of the selected zone ends when `f` returns (R does not borrow from
         // the zone), so `unlock_read` can safely consume `guard` afterwards.
         let result = match Self::find_zone_index(zones, zid) {
-            Some(i) => {
-                assert(zones@[i as int].wf());
-                Some(f(&zones[i]))
-            },
+            Some(i) => { Some(f(&zones[i])) },
             None => None,
         };
 
@@ -697,14 +579,6 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         // and advances the BudgetSpec ghost state via a shared &BudgetGlobalState,
         // so the HvMem read lock is sufficient.
 
-        assert(zones[i as int].zone_id == zid);
-        proof {
-            // The `HvMemKey::mmu_inst_id` lock-invariant clause pins every zone's MMU
-            // instance, and the precondition pins `mmu.inst_id()` to it — so the handle
-            // passed here is the one whose `add_vm` minted this zone's slice token.
-            assert(zones[i as int].lock.k@.mmu_inst_id == mmu.inst_id());
-            assert(zones[i as int].pt_constants() == self.lock.k@.pt_constants);
-        }
         let res = zones[i].insert_region(&self.allocator, Tracked(&global_state), region, mmu);
 
         self.lock.unlock_read(guard);
@@ -751,10 +625,6 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         };
         // ── Step 4: delegate to Zone::remove_region ────────────────
 
-        proof {
-            // MMU instance-id bridge — see `insert_region`.
-            assert(zones[i as int].lock.k@.mmu_inst_id == mmu.inst_id());
-        }
         let res = zones[i].remove_region(&self.allocator, Tracked(&global_state), region, mmu);
 
         self.lock.unlock_read(guard);
@@ -795,12 +665,6 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
                 return Err(());
             },
         };
-        proof {
-            // IOMMU instance-id bridge: `HvMemPred` pins every zone's IOMMU instance,
-            // and the precondition pins `iommu_mmu.inst_id()` to it.
-            assert(zones[i as int].lock.k@.iommu_mmu_inst_id == iommu_mmu.inst_id());
-            assert(zones[i as int].pt_constants() == self.lock.k@.pt_constants);
-        }
         let res = zones[i].insert_iommu_region(
             &self.allocator,
             Tracked(&global_state),
@@ -843,9 +707,6 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
                 return Err(());
             },
         };
-        proof {
-            assert(zones[i as int].lock.k@.iommu_mmu_inst_id == iommu_mmu.inst_id());
-        }
         let res = zones[i].remove_iommu_region(
             &self.allocator,
             Tracked(&global_state),
