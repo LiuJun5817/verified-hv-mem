@@ -46,6 +46,10 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
         ExPageTable(pt)
     }
 
+    fn drop(self, allocator: &GlobalAllocator<A>) {
+        self.0.drop(allocator)
+    }
+
     fn map(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr, frame: Frame) -> (res: Result<
         (),
         (),

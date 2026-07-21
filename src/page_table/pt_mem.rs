@@ -705,6 +705,53 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
         }
     }
 
+    /// Deallocate the root table when destroying this page-table memory.
+    ///
+    /// This operation consumes `self` because removing the root invalidates the
+    /// page-table memory invariants. Higher layers only call it after proving the
+    /// page table has no mappings.
+    pub fn dealloc_root(self, allocator: &GlobalAllocator<A>)
+        requires
+            allocator.invariants(),
+            self.invariants(),
+            self.inst_id() == allocator.inst_id(),
+        ensures
+            allocator.invariants(),
+    {
+        broadcast use BitmapAllocator::lemma_view_len_is_cap;
+
+        let mut this = self;
+        let root = this.root;
+        let ghost fid = this.paddr_to_fid_spec(root@);
+        let tracked mut client = this.client.tracked_take();
+        assert(client.frame_perms.contains_key(fid));
+        let tracked frame_perm: Frame4KPerm = client.frame_perms.tracked_remove(fid);
+
+        let tracked table_perm: Table512Perm = frame4k_perm_to_table512_perm(frame_perm);
+        assert(table_perm.addr() == root.0);
+        assert(table_perm.is_init());
+
+        let pptr = PPtr::<Table512>::from_addr(root.0);
+        let mut table = pptr.read(Tracked(&table_perm));
+        table.clear();
+        pptr.write(Tracked(&mut table_perm), table);
+
+        let tracked frame_perm: Frame4KPerm = table512_perm_to_frame4k_perm(table_perm);
+        proof {
+            client.frame_perms.tracked_insert(fid, frame_perm);
+            lemma_frame4k_to_u64_seq(&frame_perm);
+            assert(frame4k_to_u64_seq(&frame_perm) == table_perm.mem_contents().value()@);
+            assert(table_perm.mem_contents().value().spec_is_empty());
+            assert forall|i: int| 0 <= i < 512 implies frame4k_to_u64_seq(&frame_perm)[i]
+                == 0u64 by {
+                assert(table_perm.mem_contents().value()@[i] == 0u64);
+            }
+            assert(frame_is_empty(&frame_perm));
+        }
+
+        let Tracked(_client) = allocator.dealloc(Tracked(client), root);
+    }
+
     /// Get the value at the given index in the given table.
     pub fn read(&self, base: PAddr, index: usize) -> (res: u64)
         requires

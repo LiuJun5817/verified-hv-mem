@@ -400,9 +400,10 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     /// 2. Find the zone by `zone_id` field.
     /// 3. Acquire the zone write lock and reject removal unless both its CPU and
     ///    IOMMU memory sets are empty.
-    /// 4. Swap-remove the empty zone from the list.
-    /// 5. Advance the protocol's `remove_zone` transition to drop the zone token.
-    /// 6. Restore the zone list and release the HvMem write lock.
+    /// 4. Drop both memory sets, restoring their implementation-owned resources.
+    /// 5. Swap-remove the empty zone from the list.
+    /// 6. Advance the protocol's `remove_zone` transition to drop the zone token.
+    /// 7. Restore the zone list and release the HvMem write lock.
     ///
     /// Returns `Err(())` if no zone with the given `zid` is found or either of
     /// its memory sets is non-empty.
@@ -451,12 +452,17 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
-        // ── Step 4: remove the empty zone from the list ────────────────────────
+        // ── Step 4: restore resources owned by both memory sets ──────────────
+
+        cpu_mem_set.drop(&self.allocator);
+        iommu_mem_set.drop(&self.allocator);
+
+        // ── Step 5: remove the empty zone from the list ────────────────────────
 
         let ghost old_zones = zones@;
         let _zone = zones.swap_remove(i);
 
-        // ── Step 5: advance protocol ghost state ───────────────────────────────
+        // ── Step 6: advance protocol ghost state ───────────────────────────────
         proof {
             // Both retained hardware slices are empty, so dropping the zone keeps
             // the dead-slice clauses of `impl_synced` true.
@@ -472,7 +478,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             // destroyed zone; there is no lock to release afterwards.
         }
 
-        // ── Step 6: restore zone list and release HvMem write lock ───────────
+        // ── Step 7: restore zone list and release HvMem write lock ───────────
         self.zone_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
             let zone_list = content.zone_list_perm@.mem_contents->Init_0;

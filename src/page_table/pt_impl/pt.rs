@@ -95,6 +95,22 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
         res
     }
 
+    /// Destroy this empty page table and restore its remaining allocated resources.
+    /// This implementation owns a persistent root frame, which `PageTableMem`
+    /// clears and returns to the allocator.
+    pub fn drop(self, allocator: &GlobalAllocator<A>)
+        requires
+            allocator.invariants(),
+            self.invariants(),
+            self.inst_id() == allocator.inst_id(),
+            self@@.mappings() == Map::<SpecVAddr, SpecFrame>::empty(),
+        ensures
+            allocator.invariants(),
+    {
+        let Self { pt_mem, constants: _, _phantom: _ } = self;
+        pt_mem.dealloc_root(allocator);
+    }
+
     /// If all pte in a table are invalid.
     pub fn is_table_empty(&self, base: PAddr, level: usize) -> (res: bool)
         requires

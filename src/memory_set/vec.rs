@@ -164,6 +164,11 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         VecMemorySet { regions: Vec::new(), pt, phantom: PhantomData }
     }
 
+    fn drop(self, allocator: &GlobalAllocator<A>) {
+        let VecMemorySet { regions: _, pt, phantom: _ } = self;
+        pt.drop(allocator);
+    }
+
     fn is_empty(&self) -> (res: bool) {
         if self.regions.len() == 0 {
             assert(self@.regions =~= Set::<MemoryRegion>::empty());

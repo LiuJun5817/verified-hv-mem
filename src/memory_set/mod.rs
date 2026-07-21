@@ -300,6 +300,17 @@ pub trait MemorySet<PT, A, I> where
             res.invariants(),
     ;
 
+    /// Destroy an empty memory set and restore all resources owned by its implementation.
+    fn drop(self, allocator: &GlobalAllocator<A>)
+        requires
+            allocator.invariants(),
+            self.invariants(),
+            self.inst_id() == allocator.inst_id(),
+            self@.empty(),
+        ensures
+            allocator.invariants(),
+    ;
+
     /// Insert a new memory region, **forcing a per-page `DSB` (`map`)** via the
     /// tokenized MMU so the vm's `s2map` slice token tracks the new mappings.  The
     /// slice token is threaded in/out and ends equal to `pt_s2map_inner(self@.mappings)`

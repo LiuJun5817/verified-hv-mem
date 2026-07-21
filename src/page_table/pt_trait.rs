@@ -355,6 +355,18 @@ pub trait PageTable<A> where Self: Sized, A: BitmapAllocator {
             pt.invariants(),
     ;
 
+    /// Destroy an empty page table and restore all resources owned by the implementation.
+    /// Implementations without persistent allocations may perform no allocator operation.
+    fn drop(self, allocator: &GlobalAllocator<A>)
+        requires
+            allocator.invariants(),
+            self.invariants(),
+            self.inst_id() == allocator.inst_id(),
+            self@.mappings == Map::<SpecVAddr, SpecFrame>::empty(),
+        ensures
+            allocator.invariants(),
+    ;
+
     /// Map a virtual address to a physical frame with given attributes.
     fn map(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr, frame: Frame) -> (res: Result<
         (),
