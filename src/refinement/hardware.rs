@@ -93,8 +93,8 @@ impl View for HardwareSpec {
     type V = HardwareView;
 
     /// R: project both hardware translation units into the abstract `HardwareView`.
-    /// `memory` and `active_vm` are still governed by the data plane and scheduler, so
-    /// they are empty in this token-state projection.
+    /// `memory` is governed by the data plane, so it is empty in this token-state
+    /// projection.
     open spec fn view(&self) -> HardwareView {
         HardwareView {
             tlb: self.mmu.tlb,
@@ -102,7 +102,6 @@ impl View for HardwareSpec {
             iommu_tlb: self.smmu.tlb,
             iommu_s2map: flatten_s2map(self.smmu.s2map),
             memory: Map::empty(),
-            active_vm: Map::empty(),
         }
     }
 }

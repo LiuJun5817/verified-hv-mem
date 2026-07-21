@@ -269,22 +269,6 @@ pub proof fn lemma_iommu_map_preserves_wf(
     lemma_iommu_map_preserves_iommu_tlb_safe(s1, s2, vm, gpa, entry);
 }
 
-pub proof fn lemma_context_switch_preserves_wf(
-    s1: HardwareView,
-    s2: HardwareView,
-    cpu: CpuId,
-    vm: VmId,
-)
-    requires
-        s1.wf(),
-        HardwareView::context_switch_step(s1, s2, cpu, vm),
-    ensures
-        s2.wf(),
-{
-    lemma_tlb_safe_unchanged(s1, s2);
-    lemma_iommu_tlb_safe_unchanged(s1, s2);
-}
-
 pub proof fn lemma_dsb_preserves_wf(s1: HardwareView, s2: HardwareView)
     requires
         s1.wf(),

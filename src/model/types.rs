@@ -94,7 +94,6 @@ pub enum HypervisorOp {
     ReclaimPage(VmId, PhysPage),
     SharePage(VmId, VmId, PhysPage),
     UnsharePage(VmId, VmId, PhysPage),
-    ContextSwitch(CpuId, VmId),
     AddVm(VmId),
     RemoveVm(VmId),
     /// SMMU/IOMMU stage-2 map maintenance (the DMA counterpart of `Map`).

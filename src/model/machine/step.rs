@@ -33,7 +33,6 @@ impl MachineState {
         gva: GuestWordAddr,
     ) -> bool {
         &&& s1.wf()
-        &&& s1.cpu_runs(cpu, vm)
         &&& s1.read_observation(cpu, vm, gva) is Some
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
@@ -52,7 +51,6 @@ impl MachineState {
     ) -> bool {
         let paddr = s1.translated_word(cpu, vm, gva);
         &&& s1.wf()
-        &&& s1.cpu_runs(cpu, vm)
         &&& paddr is Some
         &&& s1.can_write(cpu, vm, gva)
         &&& s2.wf()
@@ -72,7 +70,6 @@ impl MachineState {
         _req: HyperCallReq,
     ) -> bool {
         &&& s1.wf()
-        &&& s1.cpu_runs(cpu, vm)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_ownership_as(&s1)
@@ -151,7 +148,6 @@ impl MachineState {
         &&& s2.same_identity_as(&s1)
         &&& s2.same_ownership_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.active_vm == s1.active_vm
         &&& s2.s2_map == s1.s2_map.insert(
             key,
             entry,
@@ -199,7 +195,6 @@ impl MachineState {
         &&& s2.same_identity_as(&s1)
         &&& s2.same_ownership_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.active_vm == s1.active_vm
         &&& s2.s2_map == s1.s2_map.remove(key)
         &&& s2.hw_s2map == s1.hw_s2map.remove(key)
         &&& s2.tlb == s1.tlb.remove_keys(
@@ -229,7 +224,6 @@ impl MachineState {
         &&& s2.same_identity_as(&s1)
         &&& s2.same_ownership_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.active_vm == s1.active_vm
         &&& s2.s2_map == s1.s2_map
         &&& s2.hw_s2map == s1.hw_s2map
         &&& s2.tlb == s1.tlb
@@ -248,7 +242,6 @@ impl MachineState {
         &&& s2.same_identity_as(&s1)
         &&& s2.same_ownership_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.active_vm == s1.active_vm
         &&& s2.s2_map == s1.s2_map
         &&& s2.hw_s2map == s1.hw_s2map
         &&& s2.tlb == s1.tlb
@@ -399,22 +392,6 @@ impl MachineState {
         &&& s2.shared_pages == s1.shared_pages.remove(edge).remove(rev)
     }
 
-    pub open spec fn hv_context_switch_step(s1: Self, s2: Self, cpu: CpuId, vm: VmId) -> bool {
-        &&& s1.wf()
-        &&& s1.all_vms().contains(vm)
-        &&& s2.wf()
-        &&& s2.same_identity_as(&s1)
-        &&& s2.same_ownership_as(&s1)
-        &&& s2.same_memory_as(&s1)
-        &&& s2.s2_map == s1.s2_map
-        &&& s2.hw_s2map == s1.hw_s2map
-        &&& s2.tlb == s1.tlb
-        &&& s2.iommu_s2_map == s1.iommu_s2_map
-        &&& s2.iommu_hw_s2map == s1.iommu_hw_s2map
-        &&& s2.iommu_tlb == s1.iommu_tlb
-        &&& s2.active_vm == s1.active_vm.insert(cpu, vm)
-    }
-
     /// Register a fresh, empty VM (dynamic VM set).
     pub open spec fn hv_add_vm_step(s1: Self, s2: Self, vm: VmId) -> bool {
         &&& s1.wf()
@@ -430,8 +407,7 @@ impl MachineState {
         &&& s2.same_memory_as(&s1)
     }
 
-    /// Deregister a VM that owns nothing, maps nothing, shares nothing, and runs
-    /// on no CPU.
+    /// Deregister a VM that owns nothing, maps nothing, and shares nothing.
     pub open spec fn hv_remove_vm_step(s1: Self, s2: Self, vm: VmId) -> bool {
         &&& s1.wf()
         &&& s1.all_vms().contains(vm)
@@ -443,8 +419,6 @@ impl MachineState {
         &&& (forall|k: TlbKey| #[trigger] s1.iommu_tlb.contains_key(k) ==> k.vm != vm)
         &&& (forall|e: SharedPage| #[trigger]
             s1.shared_pages.contains(e) ==> e.left != vm && e.right != vm)
-        &&& (forall|cpu: CpuId| #[trigger]
-            s1.active_vm.contains_key(cpu) ==> s1.active_vm[cpu] != vm)
         &&& s2.wf()
         &&& s2.all_vms == s1.all_vms.remove(vm)
         &&& s2.hypervisor_owned == s1.hypervisor_owned
@@ -468,7 +442,6 @@ impl MachineState {
             HypervisorOp::UnsharePage(left, right, page) => {
                 Self::hv_unshare_page_step(s1, s2, left, right, page)
             },
-            HypervisorOp::ContextSwitch(cpu, vm) => Self::hv_context_switch_step(s1, s2, cpu, vm),
             HypervisorOp::AddVm(vm) => Self::hv_add_vm_step(s1, s2, vm),
             HypervisorOp::RemoveVm(vm) => Self::hv_remove_vm_step(s1, s2, vm),
             HypervisorOp::IommuMap(vm, gpa, entry) => {
@@ -492,7 +465,7 @@ impl MachineState {
     ///
     /// Unlike the `*_step` predicates this is *post-only*: it constrains a single
     /// state rather than a transition.  At boot no guest exists yet, so the VM
-    /// population, ownership map, sharing graph, stage-2 map, TLB and CPU schedule
+    /// population, ownership map, sharing graph, stage-2 map, and TLB
     /// are all empty; every `wf` clause is then a `forall` over an empty domain and
     /// holds vacuously (see `lemma_init_wf` in `security.rs`).  `hypervisor_owned`
     /// (the free pool) and `memory` (initial DRAM) are left unconstrained — they are
@@ -510,7 +483,6 @@ impl MachineState {
         &&& s.iommu_shared == Set::<PhysPage>::empty()
         &&& s.iommu_hw_s2map == Map::<VmPageKey, S2Entry>::empty()
         &&& s.iommu_tlb == Map::<TlbKey, TlbEntry>::empty()
-        &&& s.active_vm == Map::<CpuId, VmId>::empty()
     }
 
     // ------------------------------------------------------------------

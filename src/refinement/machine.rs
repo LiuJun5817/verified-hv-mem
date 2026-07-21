@@ -46,8 +46,8 @@ use crate::model::types::{CpuId, GuestPage, PhysPage, S2Entry, SharedPage, TlbKe
 // Decomposition of `MachineState::wf`: the ownership/sharing/translation (and
 // IOMMU) clauses are exactly `SoftwareView::wf` — `assemble` copies the SW
 // fields verbatim and both views define the predicates identically — so a
-// refinement only has to additionally re-establish the cross-cutting clauses
-// (`active_vm_wf`, `sync`, `tlb_safe` and their IOMMU twins).
+// refinement only has to additionally re-establish the cross-cutting sync and
+// TLB-coherence clauses for the CPU and IOMMU views.
 // ---------------------------------------------------------------------------
 /// Bridge: the assembled machine state's SW-side `wf` clauses *are* the software
 /// view's, because `assemble` copies the SW fields verbatim and both views define
@@ -119,8 +119,6 @@ pub proof fn lemma_synced_views_wf(sw: SoftwareView, hw: HardwareView)
         hw.wf(),
         hw.s2map == sw.s2_map,
         hw.iommu_s2map == sw.iommu_s2_map,
-        forall|cpu: CpuId| #[trigger]
-            hw.active_vm.contains_key(cpu) ==> sw.all_vms.contains(hw.active_vm[cpu]),
     ensures
         MachineState::assemble(sw, hw).wf(),
 {
@@ -133,16 +131,9 @@ proof fn lemma_assembled_wf_from_parts(sw: SoftwareView, hw: HardwareView)
         hw.wf(),
         MachineState::assemble(sw, hw).sync(),
         MachineState::assemble(sw, hw).iommu_sync(),
-        MachineState::assemble(sw, hw).active_vm_wf(),
     ensures
         MachineState::assemble(sw, hw).wf(),
 {
-    let m = MachineState::assemble(sw, hw);
-    assert forall|cpu: CpuId| #[trigger] hw.active_vm.contains_key(cpu) implies sw.all_vms.contains(
-        hw.active_vm[cpu],
-    ) by {
-        assert(m.active_vm.contains_key(cpu));
-    }
     lemma_synced_views_wf(sw, hw);
 }
 
@@ -152,26 +143,11 @@ proof fn lemma_pure_sw_assembled_wf(sw1: SoftwareView, sw2: SoftwareView, hw: Ha
         sw2.wf(),
         sw2.s2_map == sw1.s2_map,
         sw2.iommu_s2_map == sw1.iommu_s2_map,
-        MachineState::assemble(sw2, hw).active_vm_wf(),
     ensures
         MachineState::assemble(sw2, hw).wf(),
 {
     lemma_machine_hw_wf(sw1, hw);
     lemma_assembled_wf_from_parts(sw2, hw);
-}
-
-proof fn lemma_pure_hw_assembled_wf(sw: SoftwareView, hw1: HardwareView, hw2: HardwareView)
-    requires
-        MachineState::assemble(sw, hw1).wf(),
-        hw2.wf(),
-        hw2.s2map == hw1.s2map,
-        hw2.iommu_s2map == hw1.iommu_s2map,
-        MachineState::assemble(sw, hw2).active_vm_wf(),
-    ensures
-        MachineState::assemble(sw, hw2).wf(),
-{
-    lemma_sw_machine_wf_equiv(sw, hw1);
-    lemma_assembled_wf_from_parts(sw, hw2);
 }
 
 // ---------------------------------------------------------------------------
@@ -234,12 +210,6 @@ pub proof fn refine_hv_map(
     assert(s2.tlb =~= s1.tlb.remove_keys(targets));
 
     lemma_map_preserves_wf(hw1, hw2, vm, gpa, entry);
-    assert(s2.active_vm_wf()) by {
-        assert forall|cpu: CpuId| #[trigger]
-            s2.active_vm.contains_key(cpu) implies s2.all_vms.contains(s2.active_vm[cpu]) by {
-            assert(s1.active_vm.contains_key(cpu));
-        }
-    }
     lemma_assembled_wf_from_parts(sw2, hw2);
 }
 
@@ -282,12 +252,6 @@ pub proof fn refine_hv_unmap(
     assert(s2.tlb =~= s1.tlb.remove_keys(targets));
 
     lemma_unmap_invalidate_preserves_wf(hw1, hw2, vm, gpa);
-    assert(s2.active_vm_wf()) by {
-        assert forall|cpu: CpuId| #[trigger]
-            s2.active_vm.contains_key(cpu) implies s2.all_vms.contains(s2.active_vm[cpu]) by {
-            assert(s1.active_vm.contains_key(cpu));
-        }
-    }
     lemma_assembled_wf_from_parts(sw2, hw2);
 }
 
@@ -337,12 +301,6 @@ pub proof fn refine_hv_iommu_map(
     assert(s2.iommu_tlb =~= s1.iommu_tlb.remove_keys(targets));
 
     lemma_iommu_map_preserves_wf(hw1, hw2, vm, gpa, entry);
-    assert(s2.active_vm_wf()) by {
-        assert forall|cpu: CpuId| #[trigger]
-            s2.active_vm.contains_key(cpu) implies s2.all_vms.contains(s2.active_vm[cpu]) by {
-            assert(s1.active_vm.contains_key(cpu));
-        }
-    }
     lemma_assembled_wf_from_parts(sw2, hw2);
 }
 
@@ -381,12 +339,6 @@ pub proof fn refine_hv_iommu_unmap(
     assert(s2.iommu_tlb =~= s1.iommu_tlb.remove_keys(targets));
 
     lemma_iommu_unmap_invalidate_preserves_wf(hw1, hw2, vm, gpa);
-    assert(s2.active_vm_wf()) by {
-        assert forall|cpu: CpuId| #[trigger]
-            s2.active_vm.contains_key(cpu) implies s2.all_vms.contains(s2.active_vm[cpu]) by {
-            assert(s1.active_vm.contains_key(cpu));
-        }
-    }
     lemma_assembled_wf_from_parts(sw2, hw2);
 }
 
@@ -411,17 +363,14 @@ pub proof fn refine_hv_assign_page(
 {
     let s1 = MachineState::assemble(sw1, hw);
     let s2 = MachineState::assemble(sw2, hw);
-    // Pure-SW: HW state (tlb, active_vm, memory) is unchanged.
+    // Pure-SW: hardware translation state and memory are unchanged.
     lemma_sw_machine_wf_equiv(sw1, hw);
     lemma_assign_page_step_preserves_wf(sw1, sw2, vm, page);
     lemma_sw_machine_wf_equiv(sw2, hw);
-    // active_vm_wf (active_vm, all_vms unchanged) and tlb_safe (tlb, s2_map unchanged)
-    // carry over from `s1`.
+    // TLB coherence carries over because translation state is unchanged.
     assert(s2.all_vms == s1.all_vms);
-    assert(s2.active_vm == s1.active_vm);
     assert(s2.tlb == s1.tlb);
     assert(s2.s2_map == s1.s2_map);
-    assert(s2.active_vm_wf());
     assert(s1.tlb_safe());
     assert(sw2.s2_map == sw1.s2_map);
     assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
@@ -463,10 +412,8 @@ pub proof fn refine_hv_reclaim_page(
     lemma_reclaim_page_step_preserves_wf(sw1, sw2, vm, page);
     lemma_sw_machine_wf_equiv(sw2, hw);
     assert(s2.all_vms == s1.all_vms);
-    assert(s2.active_vm == s1.active_vm);
     assert(s2.tlb == s1.tlb);
     assert(s2.s2_map == s1.s2_map);
-    assert(s2.active_vm_wf());
     assert(s1.tlb_safe());
     assert(sw2.s2_map == sw1.s2_map);
     assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
@@ -499,13 +446,11 @@ pub proof fn refine_hv_share_page(
     lemma_sw_machine_wf_equiv(sw1, hw);
     lemma_share_page_step_preserves_wf(sw1, sw2, left, right, page);
     lemma_sw_machine_wf_equiv(sw2, hw);
-    // Translation state (s2_map, tlb, active_vm) unchanged ⇒ cross-cutting clauses
+    // Translation state is unchanged, so cross-cutting clauses
     // carry over.
     assert(s2.all_vms == s1.all_vms);
-    assert(s2.active_vm == s1.active_vm);
     assert(s2.tlb == s1.tlb);
     assert(s2.s2_map == s1.s2_map);
-    assert(s2.active_vm_wf());
     assert(s1.tlb_safe());
     assert(sw2.s2_map == sw1.s2_map);
     assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
@@ -550,63 +495,18 @@ pub proof fn refine_hv_unshare_page(
     lemma_unshare_page_step_preserves_wf(sw1, sw2, left, right, page);
     lemma_sw_machine_wf_equiv(sw2, hw);
     assert(s2.all_vms == s1.all_vms);
-    assert(s2.active_vm == s1.active_vm);
     assert(s2.tlb == s1.tlb);
     assert(s2.s2_map == s1.s2_map);
-    assert(s2.active_vm_wf());
     assert(s1.tlb_safe());
     assert(sw2.s2_map == sw1.s2_map);
     assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
     lemma_pure_sw_assembled_wf(sw1, sw2, hw);
 }
 
-// ── scheduling (pure HW — SW unchanged) ─────────────────────────────────────
-pub proof fn refine_hv_context_switch(
-    sw: SoftwareView,
-    hw1: HardwareView,
-    hw2: HardwareView,
-    cpu: CpuId,
-    vm: VmId,
-)
-    requires
-        HardwareView::context_switch_step(hw1, hw2, cpu, vm),
-        MachineState::assemble(sw, hw1).wf(),
-        MachineState::assemble(sw, hw1).all_vms().contains(vm),
-    ensures
-        MachineState::hv_context_switch_step(
-            MachineState::assemble(sw, hw1),
-            MachineState::assemble(sw, hw2),
-            cpu,
-            vm,
-        ),
-{
-    let s1 = MachineState::assemble(sw, hw1);
-    let s2 = MachineState::assemble(sw, hw2);
-    // Pure-HW: the SW view is shared, so via the bridge the three SW clauses equal
-    // `sw`'s on both states, hence hold for `s2` from `s1.wf()`.
-    lemma_sw_machine_wf_equiv(sw, hw1);
-    lemma_sw_machine_wf_equiv(sw, hw2);
-    lemma_machine_hw_wf(sw, hw1);
-    lemma_context_switch_preserves_wf(hw1, hw2, cpu, vm);
-    // active_vm_wf: `active_vm` is extended by `cpu ↦ vm` with `vm ∈ all_vms`.
-    assert(s2.all_vms == s1.all_vms);
-    assert(s2.active_vm == s1.active_vm.insert(cpu, vm));
-    assert(s1.all_vms.contains(vm));
-    assert forall|c: CpuId| #[trigger] s2.active_vm.contains_key(c) implies s2.all_vms.contains(
-        s2.active_vm[c],
-    ) by {
-        if c != cpu {
-            assert(s1.active_vm.contains_key(c) && s2.active_vm[c] == s1.active_vm[c]);
-        }
-    }
-    lemma_pure_hw_assembled_wf(sw, hw1, hw2);
-}
-
 // ── VM lifecycle (pure SW — HW unchanged) ───────────────────────────────────
 /// Registering a fresh VM refines `hv_add_vm_step`.  The new VM owns and maps
-/// nothing, so the only machine-only clause to re-establish is `active_vm_wf`
-/// (which survives a growing `all_vms`); the SW clauses come via the bridge and
-/// `tlb_safe` carries over unchanged.
+/// nothing; the SW clauses come via the bridge and hardware coherence carries
+/// over unchanged.
 pub proof fn refine_hv_add_vm(sw1: SoftwareView, sw2: SoftwareView, hw: HardwareView, vm: VmId)
     requires
         SoftwareView::add_vm_enabled(sw1, vm),
@@ -624,23 +524,12 @@ pub proof fn refine_hv_add_vm(sw1: SoftwareView, sw2: SoftwareView, hw: Hardware
     lemma_sw_machine_wf_equiv(sw1, hw);
     lemma_add_vm_step_preserves_wf(sw1, sw2, vm);
     lemma_sw_machine_wf_equiv(sw2, hw);
-    // active_vm_wf: `active_vm` is unchanged and `all_vms` only grows (insert `vm`),
-    // so every scheduled VM is still present.
-    assert(s2.active_vm == s1.active_vm);
-    assert(s2.all_vms == s1.all_vms.insert(vm));
-    assert forall|c: CpuId| #[trigger] s2.active_vm.contains_key(c) implies s2.all_vms.contains(
-        s2.active_vm[c],
-    ) by {
-        assert(s1.active_vm.contains_key(c) && s1.all_vms.contains(s1.active_vm[c]));
-    }
     lemma_pure_sw_assembled_wf(sw1, sw2, hw);
 }
 
 /// Deregistering an empty VM refines `hv_remove_vm_step`.  Beyond the SW
-/// `remove_vm_enabled` condition, the machine step also requires two HW-side
-/// guards — `vm` has no cached TLB entry and runs on no CPU — so that dropping it
-/// strands no hardware reference; both are taken as hypotheses (cf. the
-/// no-dangling guard of `refine_hv_unshare_page`).
+/// `remove_vm_enabled` condition, the machine step also requires that `vm` has no
+/// cached TLB entry, so dropping it strands no hardware translation reference.
 pub proof fn refine_hv_remove_vm(sw1: SoftwareView, sw2: SoftwareView, hw: HardwareView, vm: VmId)
     requires
         SoftwareView::remove_vm_enabled(sw1, vm),
@@ -648,11 +537,6 @@ pub proof fn refine_hv_remove_vm(sw1: SoftwareView, sw2: SoftwareView, hw: Hardw
         MachineState::assemble(sw1, hw).wf(),
         forall|k: TlbKey| #[trigger]
             MachineState::assemble(sw1, hw).tlb.contains_key(k) ==> k.vm != vm,
-        forall|cpu: CpuId| #[trigger]
-            MachineState::assemble(sw1, hw).active_vm.contains_key(cpu) ==> MachineState::assemble(
-                sw1,
-                hw,
-            ).active_vm[cpu] != vm,
     ensures
         MachineState::hv_remove_vm_step(
             MachineState::assemble(sw1, hw),
@@ -665,16 +549,6 @@ pub proof fn refine_hv_remove_vm(sw1: SoftwareView, sw2: SoftwareView, hw: Hardw
     lemma_sw_machine_wf_equiv(sw1, hw);
     lemma_remove_vm_step_preserves_wf(sw1, sw2, vm);
     lemma_sw_machine_wf_equiv(sw2, hw);
-    // active_vm_wf: `active_vm` unchanged; `all_vms` shrinks by `vm`, and the HW
-    // guard says no CPU ran `vm`, so every scheduled VM remains in `all_vms`.
-    assert(s2.active_vm == s1.active_vm);
-    assert(s2.all_vms == s1.all_vms.remove(vm));
-    assert forall|c: CpuId| #[trigger] s2.active_vm.contains_key(c) implies s2.all_vms.contains(
-        s2.active_vm[c],
-    ) by {
-        assert(s1.active_vm.contains_key(c) && s1.all_vms.contains(s1.active_vm[c]));
-        assert(s1.active_vm[c] != vm);
-    }
     lemma_pure_sw_assembled_wf(sw1, sw2, hw);
 }
 
@@ -1018,11 +892,6 @@ pub proof fn lemma_insert_partial_machine_wf(
     lemma_sw_machine_wf_equiv(sw1, hw);
     lemma_insert_partial_wf(sw1, region, a, m);
     lemma_sw_machine_wf_equiv(sp, synced_hw(sp, hw));
-    // active_vm_wf: `active_vm` and `all_vms` are unchanged.
-    assert(m2.all_vms == m1.all_vms);
-    assert(m2.active_vm == m1.active_vm);
-    assert(m1.active_vm_wf());
-    assert(m2.active_vm_wf());
     // tlb_safe (over `hw_s2map == s2_map`): `tlb == hw.tlb` unchanged; `s2_map` grew
     // only by fresh region entries (keys unmapped in `sw1`), so each cached key's
     // lookup keeps the value `m1.tlb_safe` provided.
@@ -1451,7 +1320,6 @@ pub open spec fn hw_unmapped(hw: HardwareView, region: Region, u: nat) -> Hardwa
         iommu_tlb: hw.iommu_tlb,
         iommu_s2map: hw.iommu_s2map,
         memory: hw.memory,
-        active_vm: hw.active_vm,
     }
 }
 
@@ -1495,11 +1363,6 @@ pub proof fn lemma_remove_partial_machine_wf(
     lemma_sw_machine_wf_equiv(sw1, hw);
     lemma_remove_partial_wf(sw1, region, u, r);
     lemma_sw_machine_wf_equiv(sp, synced_hw(sp, hw_unmapped(hw, region, u)));
-    // active_vm_wf: active_vm / all_vms unchanged.
-    assert(mp.all_vms == m1.all_vms);
-    assert(mp.active_vm == m1.active_vm);
-    assert(m1.active_vm_wf());
-    assert(mp.active_vm_wf());
     // tlb_safe (over `hw_s2map == s2_map`): a surviving cached key `k` (∉
     // tlb_prefix_keys(u)) has `sk ∉ entry_prefix(u).dom()`, so the s2_map removal
     // keeps `sw1`'s value, matching `m1.tlb_safe`.
@@ -1968,11 +1831,6 @@ pub proof fn lemma_iommu_insert_partial_machine_wf(
     lemma_sw_machine_wf_equiv(sw1, hw);
     lemma_iommu_insert_partial_wf(sw1, region, a, m);
     lemma_sw_machine_wf_equiv(sp, synced_hw(sp, hw));
-    // active_vm_wf: `active_vm` and `all_vms` are unchanged.
-    assert(m2.all_vms == m1.all_vms);
-    assert(m2.active_vm == m1.active_vm);
-    assert(m1.active_vm_wf());
-    assert(m2.active_vm_wf());
     // CPU tlb_safe: the CPU maps and TLB are all framed.
     assert(m1.tlb_safe());
     assert(m1.sync());
@@ -2453,11 +2311,6 @@ pub proof fn lemma_iommu_remove_partial_machine_wf(
     lemma_sw_machine_wf_equiv(sw1, hw);
     lemma_iommu_remove_partial_wf(sw1, region, u, r);
     lemma_sw_machine_wf_equiv(sp, synced_hw(sp, iommu_hw_unmapped(hw, region, u)));
-    // active_vm_wf: active_vm / all_vms unchanged.
-    assert(mp.all_vms == m1.all_vms);
-    assert(mp.active_vm == m1.active_vm);
-    assert(m1.active_vm_wf());
-    assert(mp.active_vm_wf());
     // CPU tlb_safe: CPU maps and TLB framed.
     assert(m1.tlb_safe());
     assert(m1.sync());
