@@ -47,7 +47,7 @@
 //! fire `unmap`/`invalidate` itself.  And `unmap_dsb_tlbi`'s postcondition is
 //! unprovable unless its real `DSB`+`TLBI` actually run, since only they advance
 //! the encapsulated tokens.
-use crate::hardware::spec::{MmuInstance, MmuS2MapToken, MmuTlbToken, MmuVmIdsToken};
+use crate::hardware::spec::{MmuInstance, MmuS2MapToken, MmuSpec, MmuTlbToken, MmuVmIdsToken};
 use crate::model::types::{GuestPage, S2Entry, VmId};
 use core::marker::PhantomData;
 use vstd::prelude::*;
@@ -173,6 +173,22 @@ impl<I: HardwareInstr> MmuHardware<I> {
     pub closed spec fn wf(&self) -> bool {
         &&& self.tlb@.instance_id() == self.instance@.id()
         &&& self.vm_ids@.instance_id() == self.instance@.id()
+    }
+
+    /// Create a new `MmuHardware`.
+    pub fn new() -> (res: Self)
+        ensures
+            res.live_vms() =~= Set::<VmId>::empty(),
+            res.wf(),
+    {
+        let tracked (Tracked(inst), Tracked(s2map_tok), Tracked(vm_ids_tok), Tracked(tlb_tok)) =
+            MmuSpec::Instance::initialize();
+        MmuHardware {
+            instance: Tracked(inst),
+            vm_ids: Tracked(vm_ids_tok),
+            tlb: Tracked(tlb_tok),
+            _phantom: PhantomData,
+        }
     }
 
     /// Register a fresh vm: fires `add_vm`, **minting** that zone's `s2map` slice
