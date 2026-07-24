@@ -270,6 +270,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         requires
             self.invariants(),
             pt_constants@.valid(),
+            pt_constants.hva_to_pa_offset_valid(self.allocator.base@),
             pt_constants@ == self.lock.k@.pt_constants,
             forall|level: nat|
                 level < pt_constants.arch@.level_count() ==> pt_constants.arch@.entry_count(level)

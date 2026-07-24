@@ -288,6 +288,7 @@ pub trait MemorySet<PT, A, I> where
         requires
             allocator.invariants(),
             pt_constants@.valid(),
+            pt_constants.hva_to_pa_offset_valid(allocator.base@),
             pt_constants@.arch.leaf_frame_size() == FrameSize::Size4K,
             forall|level: nat|
                 level < pt_constants.arch@.level_count() ==> pt_constants.arch@.entry_count(level)

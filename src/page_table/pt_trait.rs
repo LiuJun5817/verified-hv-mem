@@ -2,7 +2,7 @@
 use crate::address::addr::{SpecPAddr, SpecVAddr, VAddr};
 use crate::address::frame::{Frame, SpecFrame};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
-use crate::global_allocator::GlobalAllocator;
+use crate::global_allocator::{GlobalAllocator, SPEC_FRAME_SIZE};
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 use vstd::prelude::*;
 
@@ -28,14 +28,19 @@ impl SpecPTConstants {
 pub struct PTConstants {
     /// Page table architecture.
     pub arch: PTArch,
+    /// HVA to PA offset. Table frames allocated by allocator are in HVA (hypervisor virtual address),
+    /// but the page table entries need to store the PA. This offset is used to convert between HVA
+    /// and PA if host hypervisor uses a fixed offset mapping.
+    pub hva_to_pa_offset: usize,
 }
 
 impl Clone for PTConstants {
     fn clone(&self) -> (res: Self)
         ensures
             res@ == self@,
+            res.hva_to_pa_offset == self.hva_to_pa_offset,
     {
-        PTConstants { arch: self.arch.clone() }
+        PTConstants { arch: self.arch.clone(), hva_to_pa_offset: self.hva_to_pa_offset }
     }
 }
 
@@ -43,6 +48,13 @@ impl PTConstants {
     /// View as `PTConstants`
     pub open spec fn view(self) -> SpecPTConstants {
         SpecPTConstants { arch: self.arch@ }
+    }
+
+    /// Whether this direct-map offset can translate every frame returned by an
+    /// allocator with the given HVA base while preserving page alignment.
+    pub open spec fn hva_to_pa_offset_valid(self, allocator_base: SpecPAddr) -> bool {
+        &&& self.hva_to_pa_offset <= allocator_base.0
+        &&& SpecPAddr(self.hva_to_pa_offset as nat).aligned(SPEC_FRAME_SIZE)
     }
 }
 
@@ -346,6 +358,7 @@ pub trait PageTable<A> where Self: Sized, A: BitmapAllocator {
         requires
             allocator.invariants(),
             constants@.valid(),
+            constants.hva_to_pa_offset_valid(allocator.base@),
             forall|level: nat|
                 level < constants.arch@.level_count() ==> constants.arch@.entry_count(level) == 512,
         ensures
