@@ -6,6 +6,7 @@ use crate::address::{
 use vstd::prelude::*;
 
 mod aarch64;
+pub use aarch64::Aarch64PTE;
 
 verus! {
 
