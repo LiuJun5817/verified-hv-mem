@@ -338,7 +338,6 @@ impl PTTreePath {
         if path.len() <= pref.len() {
             // `pref` equals `path`
             path.lemma_prefix_eq_full(pref);
-            assert(path.to_vaddr(arch).0 == pref.to_vaddr(arch).0);
         } else {
             // `pref2` is the longest prefix of `path` and not equal to `path`
             let pref2 = path.trim((path.len() - 1) as nat);
@@ -381,7 +380,6 @@ impl PTTreePath {
         if path.len() <= pref.len() {
             // `pref` equals `path`
             path.lemma_prefix_eq_full(pref);
-            assert(path.to_vaddr(arch).0 == pref.to_vaddr(arch).0);
         } else {
             // `pref2` is the longest prefix of `path` and not equal to `path`
             let pref2 = path.trim((path.len() - 1) as nat);
@@ -810,9 +808,7 @@ impl PTTreePath {
         decreases end - level,
     {
         let remain = Self::from_vaddr(vbase, arch, level + 1, end);
-        if level == end {
-            assert(remain.0.len() == end + 1 - (level + 1));
-        } else {
+        if level != end {
             let f = arch.frame_size(level + 1).as_nat();
             let e = arch.entry_count(level + 1);
             let v = vbase.0;
@@ -869,9 +865,7 @@ impl PTTreePath {
             vbase.aligned(arch.frame_size(level).as_nat()),
         decreases end - level,
     {
-        if level == end {
-            assert(vbase.aligned(arch.frame_size(level).as_nat()));
-        } else {
+        if level != end {
             let f = arch.frame_size(level + 1).as_nat();
             let e = arch.entry_count(level + 1);
             let v = vbase.0;
@@ -919,9 +913,7 @@ pub proof fn lemma_zero_seq_sum_is_zero(s: Seq<nat>)
 {
     let f = |part: nat, sum: nat| part + sum;
     let sum = s.fold_right(f, 0nat);
-    if s.len() == 0 {
-        assert(sum == 0);
-    } else {
+    if s.len() > 0 {
         let sub = s.subrange(0, s.len() - 1);
         assert(sub == Seq::new(sub.len(), |_i| 0nat));
         assert(sum == sub.fold_right(f, s.last()));

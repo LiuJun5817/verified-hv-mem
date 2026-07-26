@@ -2,7 +2,9 @@
 use crate::address::addr::{SpecPAddr, SpecVAddr, VAddr};
 use crate::address::frame::{Frame, SpecFrame};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
-use crate::global_allocator::{GlobalAllocator, SPEC_FRAME_SIZE};
+use crate::global_allocator::GlobalAllocator;
+#[cfg(verus_keep_ghost)]
+use crate::global_allocator::SPEC_FRAME_SIZE;
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 use vstd::prelude::*;
 

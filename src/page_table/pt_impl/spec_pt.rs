@@ -407,12 +407,8 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 NodeEntry::Frame(frame) => {
                     assert(frame.base.aligned(frame.size.as_nat()));
                 },
-                NodeEntry::Node(subnode) => {
+                NodeEntry::Node(_) => {
                     let pte = E::spec_from_u64(self.pt_mem.read(base, i as nat));
-                    assert(self.pt_mem.accessible(base, i as nat));
-                    // wf ensures this
-                    assert(self.pt_mem.contains_table(pte.spec_addr()));
-                    assert(self.pt_mem.level(pte.spec_addr()) == level + 1);
                     self.construct_node_facts(pte.spec_addr(), level + 1);
                     self.lemma_construct_node_wf(pte.spec_addr(), level + 1);
                 },
@@ -768,16 +764,13 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         let path = PTTreePath::from_vaddr(vaddr, arch, level, end);
         // Precondition of `visit`: node.wf and path.valid
         self.lemma_construct_node_wf(base, level);
-        let visited = node.visit(path);
 
         let (idx, remain) = path.step();
         let entry = node.entries[idx as int];
         assert(self.pt_mem.accessible(base, idx));
 
-        if path.len() <= 1 {
-            assert(visited == Seq::new(1, |_i| entry));
-        } else {
-            if let NodeEntry::Node(subnode) = entry {
+        if path.len() > 1 {
+            if let NodeEntry::Node(_) = entry {
                 let pte2 = E::spec_from_u64(self.pt_mem.read(base, idx));
                 // `pte2` points to a subtable
                 let subtable_base = pte2.spec_addr();
@@ -1006,7 +999,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let s2 = Self::new(pt_mem, self.constants);
 
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
-                assert(s2.wf());
                 s2.lemma_insert_preserves_root(vbase, new_base, level + 1, target_level, new_pte)
             }
         }
@@ -1293,7 +1285,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         target_level,
                         new_pte,
                     );
-                    assert(inserted.all_nonempty_above(level + 1));
                     self.lemma_insert_preserves_old_tables(
                         vbase,
                         pte.spec_addr(),
@@ -1501,7 +1492,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         target_level,
                         new_pte,
                     );
-                    assert(inserted.all_nonempty_above(level + 1));
                     // For `inserted`, all tables at `level + 1` contain at least one valid entry
                     assert forall|base2: SpecPAddr| #[trigger]
                         inserted.pt_mem.contains_table_with_level(
@@ -1654,9 +1644,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             // `s2` is the state after allocating an intermediate table
             let s2 = Self::new(pt_mem, self.constants);
             self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
-            assert(s2.wf());
 
-            let (_, insert_res) = s2.insert(vbase, new_base, level + 1, target_level, new_pte);
             let idx = s2.constants.arch.pte_index(vbase, level + 1);
             let pte = E::spec_from_u64(s2.pt_mem.read(new_base, idx));
             // New table is empty
@@ -1718,7 +1706,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
 
                     assert(tables == Seq::new(1, |_i| base).add(tables2));
                     lemma_not_in_seq_implies_not_in_subseq(tables, tables2, base, base2);
-                    assert(!tables2.contains(base2));
                     self.lemma_insert_preserves_tables_outside_chain(
                         vbase,
                         pte.spec_addr(),
@@ -1739,7 +1726,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
-                assert(s2.wf());
 
                 let pte = E::spec_new(new_base, MemAttr::spec_default(), false);
                 let tables = s2.collect_table_chain(vbase, base, level);
@@ -1750,7 +1736,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
 
                 assert(tables == Seq::new(1, |_i| base).add(tables2));
                 lemma_not_in_seq_implies_not_in_subseq(tables, tables2, base, base2);
-                assert(!tables2.contains(base2));
                 s2.lemma_insert_preserves_tables_outside_chain(
                     vbase,
                     new_base,
@@ -1812,7 +1797,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             new_pte,
             base2,
         );
-        assert(self.pt_mem.contents[base2] == s2.pt_mem.contents[base2]);
 
         let node = self.construct_node(base2, level2);
         self.construct_node_facts(base2, level2);
@@ -1824,7 +1808,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             node.entries[i] == node2.entries[i]
         } by {
             let entry = node.entries[i];
-            let entry2 = node2.entries[i];
             let pte = E::spec_from_u64(self.pt_mem.read(base2, i as nat));
             E::lemma_from_u64_wf(self.pt_mem.read(base2, i as nat));
             assert(self.pt_mem.accessible(base2, i as nat));
@@ -1832,9 +1815,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             E::lemma_eq_by_u64(pte, pte2);
 
             match entry {
-                NodeEntry::Node(node) => {
-                    assert(self.pte_points_to_table(pte, level2));
-                    assert(self.pt_mem.contains_table(pte.spec_addr()));
+                NodeEntry::Node(_) => {
                     self.lemma_table_not_in_chain_implies_child_not_in_chain(
                         vbase,
                         base,
@@ -1852,12 +1833,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         level2 + 1,
                     );
                 },
-                NodeEntry::Frame(frame) => {
-                    assert(self.pte_points_to_frame(pte, level2));
-                },
-                NodeEntry::Empty => {
-                    assert(!pte.spec_valid());
-                },
+                _ => (),
             }
         }
         assert(node.entries == node2.entries);
@@ -1928,7 +1904,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                             let pte_i = E::spec_from_u64(self.pt_mem.read(base, i as nat));
                             assert(self.pt_mem.accessible(base, i as nat));
                             if self.pte_points_to_table(pte_i, level) {
-                                assert(self.pt_mem.contains_table(pte_i.spec_addr()));
                                 self.lemma_other_index_not_in_chain(vbase, base, level, i as nat);
                                 self.lemma_insert_preserves_unrelated_node(
                                     vbase,
@@ -1984,7 +1959,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         new_pte,
                         base,
                     );
-                    assert(s2.pt_mem.contents[base] == self.pt_mem.contents[base]);
 
                     assert forall|i| 0 <= i < node2.entries.len() implies node2.entries[i]
                         == right.entries[i] by {
@@ -2002,7 +1976,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                             let pte_i = E::spec_from_u64(self.pt_mem.read(base, i as nat));
                             assert(self.pt_mem.accessible(base, i as nat));
                             if self.pte_points_to_table(pte_i, level) {
-                                assert(self.pt_mem.contains_table(pte_i.spec_addr()));
                                 self.lemma_other_index_not_in_chain(vbase, base, level, i as nat);
                                 self.lemma_insert_preserves_unrelated_node(
                                     vbase,
@@ -2092,7 +2065,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                             let pte_i = E::spec_from_u64(self.pt_mem.read(base, i as nat));
                             assert(self.pt_mem.accessible(base, i as nat));
                             if self.pte_points_to_table(pte_i, level) {
-                                assert(self.pt_mem.contains_table(pte_i.spec_addr()));
                                 self.lemma_other_index_not_in_chain(vbase, base, level, i as nat);
                                 self.lemma_insert_preserves_unrelated_node(
                                     vbase,
@@ -2276,7 +2248,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             let tables2 = self.collect_table_chain(vbase, pte.spec_addr(), level + 1);
             assert(tables == Seq::new(1, |_i| base).add(tables2));
             lemma_not_in_seq_implies_not_in_subseq(tables, tables2, base, base2);
-            assert(!tables2.contains(base2));
             self.lemma_remove_preserves_tables_outside_chain(
                 vbase,
                 pte.spec_addr(),
@@ -2398,7 +2369,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 }
             };
             self.lemma_remove_preserves_tables_outside_chain(vbase, child, level + 1, base);
-            assert(removed.pt_mem.contents[base] == self.pt_mem.contents[base]);
             let pte_after = E::spec_from_u64(removed.pt_mem.read(base, idx));
             E::lemma_eq_by_u64(pte, pte_after);
             // Now chain for `removed` starting at `base` also follows child
@@ -2457,7 +2427,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         let s2 = self.remove(vbase, base, level).0;
         self.lemma_remove_preserves_wf(vbase, base, level);
         self.lemma_remove_preserves_tables_outside_chain(vbase, base, level, base2);
-        assert(self.pt_mem.contents[base2] == s2.pt_mem.contents[base2]);
 
         let node = self.construct_node(base2, level2);
         let node2 = s2.construct_node(base2, level2);
@@ -2469,7 +2438,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             node.entries[i] == node2.entries[i]
         } by {
             let entry = node.entries[i];
-            let entry2 = node2.entries[i];
             let pte = E::spec_from_u64(self.pt_mem.read(base2, i as nat));
             E::lemma_from_u64_wf(self.pt_mem.read(base2, i as nat));
             assert(self.pt_mem.accessible(base2, i as nat));
@@ -2477,9 +2445,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             E::lemma_eq_by_u64(pte, pte2);
 
             match entry {
-                NodeEntry::Node(node_) => {
-                    assert(self.pte_points_to_table(pte, level2));
-                    assert(self.pt_mem.contains_table(pte.spec_addr()));
+                NodeEntry::Node(_) => {
                     self.lemma_table_not_in_chain_implies_child_not_in_chain(
                         vbase,
                         base,
@@ -2495,12 +2461,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         level2 + 1,
                     );
                 },
-                NodeEntry::Frame(frame) => {
-                    assert(self.pte_points_to_frame(pte, level2));
-                },
-                NodeEntry::Empty => {
-                    assert(!pte.spec_valid());
-                },
+                _ => (),
             }
         }
         assert(node.entries == node2.entries);
@@ -2605,7 +2566,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                                     let pte_i = E::spec_from_u64(self.pt_mem.read(base, i as nat));
                                     assert(self.pt_mem.accessible(base, i as nat));
                                     if self.pte_points_to_table(pte_i, level) {
-                                        assert(self.pt_mem.contains_table(pte_i.spec_addr()));
                                         self.lemma_other_index_not_in_chain(
                                             vbase,
                                             base,
@@ -2665,7 +2625,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         level + 1,
                         base,
                     );
-                    assert(s2.pt_mem.contents[base] == self.pt_mem.contents[base]);
 
                     assert forall|i| 0 <= i < node2.entries.len() implies node2.entries[i]
                         == right.entries[i] by {
@@ -2683,7 +2642,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                             let pte_i = E::spec_from_u64(self.pt_mem.read(base, i as nat));
                             assert(self.pt_mem.accessible(base, i as nat));
                             if self.pte_points_to_table(pte_i, level) {
-                                assert(self.pt_mem.contains_table(pte_i.spec_addr()));
                                 self.lemma_other_index_not_in_chain(vbase, base, level, i as nat);
                                 self.lemma_remove_preserves_unrelated_node(
                                     vbase,
@@ -2934,7 +2892,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
 
             assert(tables == Seq::new(1, |_i| base).add(tables2));
             lemma_not_in_seq_implies_not_in_subseq(tables, tables2, base, base2);
-            assert(!tables2.contains(base2));
             self.lemma_prune_preserves_tables_outside_chain(
                 vaddr,
                 pte.spec_addr(),
@@ -2942,7 +2899,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 base2,
             );
 
-            assert(s2.pt_mem.contents[base2] == self.pt_mem.contents[base2]);
             if s2.is_table_empty(pte.spec_addr()) {
                 // Child table became empty after prune: deallocate it and update the parent PTE
                 s2.lemma_dealloc_intermediate_table_preserves_wf(base, level, idx);
@@ -2987,7 +2943,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         let s2 = self.prune(vaddr, base, level);
         self.lemma_prune_preserves_wf(vaddr, base, level);
         self.lemma_prune_preserves_tables_outside_chain(vaddr, base, level, base2);
-        assert(self.pt_mem.contents[base2] == s2.pt_mem.contents[base2]);
 
         let node = self.construct_node(base2, level2);
         self.construct_node_facts(base2, level2);
@@ -3006,9 +2961,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             E::lemma_eq_by_u64(pte, pte2);
 
             match entry {
-                NodeEntry::Node(node) => {
-                    assert(self.pte_points_to_table(pte, level2));
-                    assert(self.pt_mem.contains_table(pte.spec_addr()));
+                NodeEntry::Node(_) => {
                     self.lemma_table_not_in_chain_implies_child_not_in_chain(
                         vaddr,
                         base,
@@ -3024,12 +2977,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         level2 + 1,
                     );
                 },
-                NodeEntry::Frame(frame) => {
-                    assert(self.pte_points_to_frame(pte, level2));
-                },
-                NodeEntry::Empty => {
-                    assert(!pte.spec_valid());
-                },
+                _ => (),
             }
         }
         assert(node.entries == node2.entries);
@@ -3136,7 +3084,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         let pte_i = E::spec_from_u64(self.pt_mem.read(base, i as nat));
                         assert(self.pt_mem.accessible(base, i as nat));
                         if self.pte_points_to_table(pte_i, level) {
-                            assert(self.pt_mem.contains_table(pte_i.spec_addr()));
                             self.lemma_other_index_not_in_chain(vaddr, base, level, i as nat);
                             self.lemma_prune_preserves_unrelated_node(
                                 vaddr,
@@ -3293,7 +3240,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     idx,
                     E::spec_empty().spec_to_u64(),
                 ));
-                assert(pruned.all_nonempty_above(level));
             } else {
                 if pte.spec_huge() {
                     assert(vbase.aligned(self.constants.arch.frame_size(level).as_nat()));
@@ -3315,8 +3261,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                                 idx2,
                             ));
                     }
-                    assert(pruned == removed);
-                    assert(pruned.all_nonempty_above(level));
                 } else {
                     // Intermediate node
                     self.lemma_remove_preserves_old_tables(vbase, base, level, pte.spec_addr());
@@ -3339,7 +3283,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         level + 1,
                         base,
                     );
-                    assert(removed.pt_mem.contents[base] == self.pt_mem.contents[base]);
 
                     // `sub_pruned` is the result of pruning the child table
                     let sub_pruned = removed.prune(vbase, pte.spec_addr(), level + 1);
@@ -3363,7 +3306,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                         pte.spec_addr(),
                         level + 1,
                     );
-                    assert(sub_pruned.all_nonempty_above(level + 1));
 
                     if sub_pruned.is_table_empty(pte.spec_addr()) {
                         // If the child table becomes empty after prune, it will be deallocated
@@ -3416,7 +3358,6 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                             level + 1,
                             base2,
                         );
-                        assert(pruned.pt_mem.contents[base2] == removed.pt_mem.contents[base2]);
                         // base2 is in self (remove preserves tables outside chain)
                         assert(!self.collect_table_chain(
                             vbase,

@@ -273,7 +273,6 @@ impl SpecPageTableMem {
         ensures
             self.wf(),
     {
-        assert(!self.tables.is_empty());
     }
 
     /// Lemma. `alloc_table` preserves wf.
@@ -596,10 +595,8 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
         // The allocator returns `new_hva`; translate it to `new_base` (PA) before exposing it.
         let (new_hva, Tracked(client)) = allocator.alloc(Tracked(client));
         let new_base = self.hva_to_pa(new_hva);
-        assert(new_base@.aligned(self.arch.view().table_size(level as nat)));
 
         let ghost fid = self.paddr_to_fid_spec(new_base@);
-        assert(fid == allocator.paddr_to_fid_spec(new_hva@));
         let tracked frame_perm: &Frame4KPerm = client.frame_perms.tracked_borrow(fid);
         self.client = Tracked(Some(client));
         self.tables = Ghost(self.tables@.insert(new_base@, level as nat));
@@ -631,8 +628,6 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
                 assert(fid2 != fid);
                 assert(base != new_base@);
             }
-            // New table is added
-            assert(s2.tables == s1.tables.insert(new_base@, level as nat));
             // New table is empty
             assert(frame_is_empty(frame_perm));
             assert(s2.contents[new_base@] == Seq::new(
@@ -660,9 +655,6 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
                 new_base@,
                 Seq::new(s2.arch.entry_count(level as nat), |_i| 0u64),
             ));
-            // Consistent with model spec
-            assert(SpecPageTableMem::alloc_table_spec(s1, s2, level as nat, new_base@));
-
             // Invariants preserved
             SpecPageTableMem::lemma_alloc_table_preserves_wf(s1, s2, level as nat, new_base@);
             old(self).tables@.dom().lemma_set_map_insert_commute(
@@ -695,7 +687,6 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
 
         let hva = self.pa_to_hva(base);
         let ghost fid = self.paddr_to_fid_spec(base@);
-        assert(fid == allocator.paddr_to_fid_spec(hva@));
         // Clear the table contents before returning the frame to the free pool.
         let tracked mut client = self.client.tracked_take();
         assert(client.frame_perms.contains_key(fid));
@@ -763,8 +754,6 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
                 ).client@->Some_0.frame_perms[fid2]);
             }
             assert(s2.contents == s1.contents.remove(base@));
-            // Consistent with model spec
-            assert(SpecPageTableMem::dealloc_table_spec(s1, s2, base@));
 
             // Invariants preserved
             SpecPageTableMem::lemma_dealloc_table_preserves_wf(s1, s2, base@);
@@ -794,9 +783,7 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
         let root = this.root;
         let root_hva = this.pa_to_hva(root);
         let ghost fid = this.paddr_to_fid_spec(root@);
-        assert(fid == allocator.paddr_to_fid_spec(root_hva@));
         let tracked mut client = this.client.tracked_take();
-        assert(client.frame_perms.contains_key(fid));
         let tracked frame_perm: Frame4KPerm = client.frame_perms.tracked_remove(fid);
 
         let tracked table_perm: Table512Perm = frame4k_perm_to_table512_perm(frame_perm);

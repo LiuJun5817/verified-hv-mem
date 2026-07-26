@@ -6,7 +6,7 @@ use super::{path::PTTreePath, spec_pt::SpecPageTable};
 use crate::{
     address::{
         addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
-        frame::{Frame, FrameSize, MemAttr, SpecFrame},
+        frame::{Frame, MemAttr, SpecFrame},
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
@@ -138,7 +138,6 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
                     #![auto]
                     j < i ==> !E::spec_from_u64(self@.pt_mem.read(base@, j)).spec_valid(),
         {
-            assert(self@.pt_mem.accessible(base@, i as nat));
             let pte = E::from_u64(self.pt_mem.read(base, i));
             if pte.valid() {
                 return false;
@@ -253,7 +252,6 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
                 }
                 // Allocate intermediate table
                 let table_base = self.pt_mem.alloc_table(allocator, level + 1);
-                assert(table_base@.aligned(FrameSize::Size4K.as_nat()));
 
                 // Write entry
                 let pte = E::new(table_base, MemAttr::default(), false);
@@ -356,13 +354,10 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
                 );
             }
             self.prune(allocator, vaddr, pte.addr(), level + 1);
-            assert(self.pt_mem@.accessible(base@, idx as nat));
-            assert(self.pt_mem@.contains_table(pte.spec_addr()));
 
             if self.is_table_empty(pte.addr(), level + 1) {
                 // If subtable is empty, deallocate the table, and mark the entry as invalid
                 self.pt_mem.dealloc_table(allocator, pte.addr());
-                assert(self.pt_mem@.accessible(base@, idx as nat));
                 self.pt_mem.write(base, idx, E::empty().to_u64());
             }
         }
@@ -394,22 +389,6 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
                     (self.arch().level_count() - 1) as nat,
                 ),
             );
-            assert(level < self.arch().level_count());
-            // exec `query` consistent with model `query`
-            if pte.spec_valid() {
-                assert(self@@.query(vaddr@) == PagingResult::Ok(
-                    (
-                        self.arch().vbase(vaddr@, level as nat),
-                        SpecFrame {
-                            base: pte.spec_addr(),
-                            size: self.arch().frame_size(level as nat),
-                            attr: pte.spec_attr(),
-                        },
-                    ),
-                ));
-            } else {
-                assert(self@@.query(vaddr@) == PagingResult::<(SpecVAddr, SpecFrame)>::Err(()));
-            }
         }
         if pte.valid() {
             Ok(
@@ -464,7 +443,6 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
             ;
         }
         let new_pte = E::new(frame.base, frame.attr, huge);
-        assert(new_pte.wf());
 
         proof {
             let root = self.pt_mem@.root;
