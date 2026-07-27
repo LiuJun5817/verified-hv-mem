@@ -1,5 +1,5 @@
 //! Page table trait with formal specification.
-use crate::address::addr::{SpecPAddr, SpecVAddr, VAddr};
+use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 use crate::address::frame::{Frame, SpecFrame};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 use crate::global_allocator::GlobalAllocator;
@@ -196,7 +196,7 @@ impl PageTableState {
     }
 
     /// Lemma. `map` preserves well-formedness.
-    pub fn lemma_map_preserves_wf(
+    pub proof fn lemma_map_preserves_wf(
         s1: Self,
         s2: Self,
         vbase: SpecVAddr,
@@ -243,7 +243,7 @@ impl PageTableState {
     }
 
     /// Lemma. `unmap` preserves well-formedness.
-    pub fn lemma_unmap_preserves_wf(s1: Self, s2: Self, vbase: SpecVAddr, res: PagingResult)
+    pub proof fn lemma_unmap_preserves_wf(s1: Self, s2: Self, vbase: SpecVAddr, res: PagingResult)
         requires
             s1.wf(),
             s2.unmap_pre(vbase),
@@ -351,6 +351,17 @@ pub trait PageTable<A> where Self: Sized, A: BitmapAllocator {
 
     /// Instance id of the AllocSpec.
     spec fn inst_id(&self) -> InstanceId;
+
+    /// Physical address of the root page table.
+    spec fn spec_root(&self) -> SpecPAddr;
+
+    /// Return the physical address of the root page table.
+    fn root(&self) -> (root: PAddr)
+        requires
+            self.invariants(),
+        ensures
+            root@ == self.spec_root(),
+    ;
 
     /// Create an empty page table
     ///

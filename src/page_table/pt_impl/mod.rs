@@ -5,7 +5,10 @@ use super::{
     pte::PageTableEntry,
 };
 use crate::{
-    address::{addr::VAddr, frame::Frame},
+    address::{
+        addr::{PAddr, SpecPAddr, VAddr},
+        frame::Frame,
+    },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
 };
@@ -33,6 +36,14 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
 
     open spec fn inst_id(&self) -> InstanceId {
         self.0.inst_id()
+    }
+
+    open spec fn spec_root(&self) -> SpecPAddr {
+        self.0.pt_mem.root@
+    }
+
+    fn root(&self) -> (root: PAddr) {
+        self.0.pt_mem.root
     }
 
     fn new(allocator: &GlobalAllocator<A>, constants: PTConstants) -> (pt: Self) {
