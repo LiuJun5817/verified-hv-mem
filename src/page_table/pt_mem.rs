@@ -13,6 +13,7 @@
 use crate::{
     address::addr::{PAddr, SpecPAddr},
     bitmap_allocator::bitmap_trait::BitmapAllocator,
+    constants::*,
     page_table::{
         pt_arch::{PTArch, SpecPTArch},
         table::*,
@@ -78,10 +79,11 @@ impl SpecPageTableMem {
                 < self.arch.level_count()
         // All tables are properly aligned.
         &&& forall|base: SpecPAddr| #[trigger]
-            self.tables.contains_key(base) ==> base.aligned(
-                self.arch.table_size(self.tables[base]),
-            )
-        // Table dom is consistent with contents dom.
+            self.tables.contains_key(base) ==> base.aligned(self.arch.table_size(self.tables[base]))
+        &&& forall|base: SpecPAddr| #[trigger]
+            self.tables.contains_key(base) ==> base.0 + self.arch.table_size(self.tables[base])
+                <= PADDR_UPPER_BOUND
+            // Table dom is consistent with contents dom.
         &&& self.contents.dom()
             == self.tables.dom()
         // Table contents have the right length.
@@ -110,9 +112,9 @@ impl SpecPageTableMem {
             Seq::new(self.arch.entry_count(0), |_i| 0u64),
         )
         // Root table is aligned
-        &&& self.root.aligned(
-            self.arch.table_size(0),
-        )
+        &&& self.root.aligned(self.arch.table_size(0))
+        &&& self.root.0 + self.arch.table_size(0)
+            <= PADDR_UPPER_BOUND
         // Root table is empty
         &&& self.contents[self.root] == Seq::new(self.arch.entry_count(0), |_i| 0u64)
     }
@@ -161,8 +163,9 @@ impl SpecPageTableMem {
         )
         // TODO: assume smallest page size is 4096
         &&& new_base.aligned(4096)
-        &&& new_base.0
-            < usize::MAX
+        &&& new_base.0 < usize::MAX
+        &&& new_base.0 + s1.arch.table_size(level)
+            <= PADDR_UPPER_BOUND
         // new table doesn't overlap with existing tables
         &&& forall|base: SpecPAddr| #[trigger]
             s1.tables.contains_key(base) ==> !SpecPAddr::overlap(
@@ -464,8 +467,9 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
         // The direct-map offset preserves page alignment, and every allocator HVA
         // can be translated to a PA without underflow.
         &&& SpecPAddr(self.hva_to_pa_offset as nat).aligned(SPEC_FRAME_SIZE)
-        &&& self.hva_to_pa_offset
-            <= self.allocator_base@.0
+        &&& self.hva_to_pa_offset <= self.allocator_base@.0
+        &&& self.allocator_base@.0 - self.hva_to_pa_offset + A::spec_cap() * SPEC_FRAME_SIZE
+            <= PADDR_UPPER_BOUND
         // The PA root translates to an HVA frame allocated to this client.
         &&& self.client@->Some_0.owns(
             self.paddr_to_fid_spec(self.root@),
@@ -515,6 +519,8 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
             arch@.valid(),
             hva_to_pa_offset <= allocator.base.0,
             SpecPAddr(hva_to_pa_offset as nat).aligned(SPEC_FRAME_SIZE),
+            allocator.base@.0 - hva_to_pa_offset + A::spec_cap() * SPEC_FRAME_SIZE
+                <= PADDR_UPPER_BOUND,
             // TODO: remove this assumption by supporting different page table layouts.
             forall|level: nat| level < arch@.level_count() ==> arch@.entry_count(level) == 512,
         ensures
@@ -564,6 +570,11 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
             );
             assert(root@.aligned(SPEC_FRAME_SIZE));
             assert(arch@.table_size(0) == SPEC_FRAME_SIZE);
+            assert(root_hva@.0 + SPEC_FRAME_SIZE <= allocator.base@.0 + A::spec_cap()
+                * SPEC_FRAME_SIZE);
+            assert(root@.0 + hva_to_pa_offset == root_hva@.0);
+            assert(allocator.base@.0 - hva_to_pa_offset + hva_to_pa_offset == allocator.base@.0);
+            assert(root@.0 + SPEC_FRAME_SIZE <= PADDR_UPPER_BOUND);
             assert(res.view().init());
             SpecPageTableMem::lemma_init_implies_wf(res.view());
             assert(res.client@->Some_0.wf(res.inst_id()));
@@ -655,6 +666,16 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
                 new_base@,
                 Seq::new(s2.arch.entry_count(level as nat), |_i| 0u64),
             ));
+            assert(new_hva@.0 + SPEC_FRAME_SIZE <= old(self).allocator_base@.0 + A::spec_cap()
+                * SPEC_FRAME_SIZE);
+            assert(new_base@.0 + old(self).hva_to_pa_offset == new_hva@.0);
+            assert(old(self).allocator_base@.0 - old(self).hva_to_pa_offset + old(
+                self,
+            ).hva_to_pa_offset == old(self).allocator_base@.0);
+            assert((level as nat) < s1.arch.level_count());
+            assert(s1.arch.table_size(level as nat) == SPEC_FRAME_SIZE);
+            assert(new_base@.0 + s1.arch.table_size(level as nat) <= PADDR_UPPER_BOUND);
+            assert(SpecPageTableMem::alloc_table_spec(s1, s2, level as nat, new_base@));
             // Invariants preserved
             SpecPageTableMem::lemma_alloc_table_preserves_wf(s1, s2, level as nat, new_base@);
             old(self).tables@.dom().lemma_set_map_insert_commute(

@@ -87,7 +87,6 @@ use core::marker::Sized;
 use core::marker::Copy;
 use core::clone::Clone;
 use core::option::Option::{self, Some, None};
-use core::prelude::rust_2021::derive;
 
 pub trait BitAllocView {
     /// Specification function to view the internal u16 as a sequence of booleans.
@@ -695,7 +694,7 @@ impl<T: BitAllocView + Copy> BitAllocView for BitAllocCascade16<T> {
 
                     result = Some(curr_key);
                     assert(forall|t: int| key <= t < curr_key as int ==> self@[t] == false);
-                    break ;
+                    break;
                 } else {
                     proof {
                         lemma_view_indexs_st_to_ed_mapping_false(
@@ -867,7 +866,7 @@ impl<T: BitAllocView + Copy> BitAllocView for BitAllocCascade16<T> {
                                 (1usize << align_log2) <= capacity,
                         ;
                     }
-                    continue ;
+                    continue;
                 }
             } else {
                 // No more free bits found from `offset` to `capacity`.
@@ -2034,7 +2033,7 @@ impl BitAllocView for BitAlloc16 {
         {
             if self.get_bit(i) {
                 result = Some(i as usize);
-                break ;
+                break;
             }
             i += 1;
         }
@@ -2150,7 +2149,7 @@ impl BitAllocView for BitAlloc16 {
                                 (1usize << align_log2) <= capacity,
                         ;
                     }
-                    continue ;
+                    continue;
                 }
             } else {
                 // No more free bits found from `offset` to `capacity`.

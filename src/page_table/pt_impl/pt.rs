@@ -9,6 +9,7 @@ use crate::{
         frame::{Frame, MemAttr, SpecFrame},
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
+    constants::*,
     global_allocator::GlobalAllocator,
     page_table::{
         pt_arch::SpecPTArch,
@@ -69,7 +70,7 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
         requires
             allocator.invariants(),
             constants@.valid(),
-            constants.hva_to_pa_offset_valid(allocator.base@),
+            constants.hva_to_pa_offset_valid(allocator.base@, A::spec_cap() * SPEC_FRAME_SIZE),
             forall|level: nat|
                 level < constants.arch@.level_count() ==> constants.arch@.entry_count(level) == 512,
         ensures
@@ -416,6 +417,7 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
             old(self).constants@.arch.is_valid_frame_size(frame.size),
             vbase@.aligned(frame.size.as_nat()),
             frame.base@.aligned(frame.size.as_nat()),
+            frame.base@.0 + frame.size.as_nat() <= PADDR_UPPER_BOUND,
         ensures
             allocator.invariants(),
             self.inst_id() == old(self).inst_id(),

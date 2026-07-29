@@ -1,6 +1,5 @@
-#![allow(non_snake_case)]
-
 use super::state::MachineState;
+use crate::constants::*;
 use crate::model::types::*;
 use vstd::prelude::*;
 

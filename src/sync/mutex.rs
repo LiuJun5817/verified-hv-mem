@@ -226,7 +226,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> Mutex<K, V, Pred> {
                 };
                 let guard = MutexGuard { handle: Tracked(owner_token), token: Tracked(value) };
                 guard_opt = Some(guard);
-                break ;
+                break;
             }
         }
 

@@ -11,4 +11,4 @@ pub mod mmu;
 pub mod spec;
 
 pub use aarch64::Aarch64Hw;
-pub use mmu::{HardwareInstr, MmuHardware, MmuInstr, SmmuInstr};
+pub use mmu::{HardwareInstr, MmuHardware, MmuInstr, SmmuInstr, ZoneIdInstr};

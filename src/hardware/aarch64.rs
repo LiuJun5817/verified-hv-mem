@@ -14,14 +14,14 @@
 //! so it takes a **real** `usize` operand `ipa_page` (the IPA `>> 12`, i.e. the
 //! guest page number); `MmuHardware::unmap_dsb_tlbi` derives the spec page from it.
 //! The CPU invalidation seam includes the completion `DSB ISH`, matching the
-//! model's synchronous invalidate transition.  The VMID is read from the current
-//! `VTTBR_EL2`, which the caller must already have programmed.
+//! model's synchronous invalidate transition. The helper temporarily selects the
+//! requested executable zone ID in `VTTBR_EL2`, then restores the prior context.
 //!
 //! The SMMU command-queue methods ([`SmmuInstr`]) are currently placeholder bodies
 //! (`dsb ish`): the real `CMD_TLBI_S2_IPA`/`CMD_SYNC` command-queue MMIO writes
 //! depend on the platform's SMMU base address (configuration), so they are a
 //! documented trusted seam to be filled in per platform.
-use super::mmu::{HardwareInstr, MmuInstr, SmmuInstr};
+use super::mmu::{HardwareInstr, MmuInstr, SmmuInstr, ZoneIdInstr};
 use core::arch::asm;
 use vstd::prelude::*;
 
@@ -32,18 +32,33 @@ verus! {
 /// and so satisfies the combined [`HardwareInstr`] marker.
 pub struct Aarch64Hw;
 
+impl ZoneIdInstr for Aarch64Hw {
+    open spec fn valid_zone_id(zone_id: usize) -> bool {
+        // Jailhouse's scoped VTCR configuration uses the architectural 8-bit VMID format.
+        zone_id < 0x100
+    }
+}
+
 impl MmuInstr for Aarch64Hw {
     #[verifier::external_body]
-    fn issue_tlbi_s2_sync(ipa_page: usize) {
+    fn issue_tlbi_s2_sync(zone_id: usize, ipa_page: usize) {
         // Broadcast and complete a CPU stage-2 IPA invalidation across the
         // inner-shareable domain.
         // `IPAS2E1IS` requires a register operand: Xt holds IPA >> 12 = the 4K
         // guest page number.  One instruction removes every cached `(*, vm, gpa)`
-        // entry on every PE (VMID comes from VTTBR_EL2); the following DSB makes
-        // that invalidation complete before the model transition fires.
+        // entry on every PE. Select the requested VMID in VTTBR_EL2 for the
+        // invalidation, then restore the interrupted cell's translation context.
         unsafe {
+            let old_vttbr: u64;
+            asm!("mrs {old}, vttbr_el2", old = out(reg) old_vttbr);
+            let target_vttbr = (old_vttbr & 0x0000_ffff_ffff_ffff) | (((zone_id as u64) & 0xff)
+                << 48);
+            asm!("msr vttbr_el2, {target}", target = in(reg) target_vttbr);
+            asm!("isb");
             asm!("tlbi ipas2e1is, {x}", x = in(reg) ipa_page);
             asm!("dsb ish");
+            asm!("msr vttbr_el2, {old}", old = in(reg) old_vttbr);
+            asm!("isb");
         }
     }
 
@@ -60,7 +75,7 @@ impl MmuInstr for Aarch64Hw {
 
 impl SmmuInstr for Aarch64Hw {
     #[verifier::external_body]
-    fn issue_smmu_tlbi_s2(_ipa_page: usize) {
+    fn issue_smmu_tlbi_s2(_zone_id: usize, _ipa_page: usize) {
         // SMMUv3 stage-2 IPA invalidation: build a `CMD_TLBI_S2_IPA` command (with
         // `Addr = ipa_page` and the VMID from the device context) and write it to the
         // SMMU command queue (MMIO).  The SMMU is a device, not a CPU, so this is a

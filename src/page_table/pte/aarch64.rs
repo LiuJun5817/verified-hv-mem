@@ -19,12 +19,11 @@ verus! {
 // | 1     | descriptor  | 1 for a table/4K page; 0 for a 2M/1G block              |
 // | 0     | valid       | Set on every descriptor created by `new`                |
 //
-// The generic page-table interface currently treats bits 63:12 as the physical
-// address payload. Higher architectural descriptor fields are outside this PTE
-// abstraction.
+// Bits 47:12 carry the output address in the scoped 48-bit AArch64 format. Bit
+// 54 is the stage-2 execute-never attribute and must not be decoded as an address.
 pub const VALID: u64 = 1 << 0;
 
-/// Table or 4K-page descriptor rather than a block descriptor.
+/// Table or 4 KiB-page descriptor rather than a block descriptor.
 pub const NON_BLOCK: u64 = 1 << 1;
 
 /// Four-bit stage-2 memory-attribute field.
@@ -51,9 +50,11 @@ pub const SHAREABLE: u64 = 1 << 9;
 /// Access flag.
 pub const AF: u64 = 1 << 10;
 
-// Keep all address bits currently supported by `PAddr`. The low twelve bits are
-// occupied by descriptor fields or reserved by the 4K granule.
-pub const PHYS_ADDR_MASK: u64 = 0xffff_ffff_ffff_f000;
+/// Stage-2 execute-never attribute.
+pub const S2_XN: u64 = 1 << 54;
+
+/// Output-address bits supported by the scoped 48-bit AArch64 configuration.
+pub const PHYS_ADDR_MASK: u64 = 0x0000_ffff_ffff_f000;
 
 /// A VMSAv8-64 stage-2 Block/Page descriptor.
 ///
@@ -86,12 +87,17 @@ impl Aarch64PTE {
         } else {
             0
         };
+        let execute_never = if attr.executable {
+            0
+        } else {
+            S2_XN
+        };
         let non_block = if huge {
             0
         } else {
             NON_BLOCK
         };
-        VALID | AF | mem_type | readable | writable | non_block
+        VALID | AF | mem_type | readable | writable | execute_never | non_block
     }
 
     fn descriptor_flags(attr: MemAttr, huge: bool) -> (res: u64)
@@ -113,12 +119,17 @@ impl Aarch64PTE {
         } else {
             0
         };
+        let execute_never = if attr.executable {
+            0
+        } else {
+            S2_XN
+        };
         let non_block = if huge {
             0
         } else {
             NON_BLOCK
         };
-        VALID | AF | mem_type | readable | writable | non_block
+        VALID | AF | mem_type | readable | writable | execute_never | non_block
     }
 }
 
@@ -151,8 +162,7 @@ impl PageTableEntry for Aarch64PTE {
         MemAttr {
             readable: self.value & S2AP_R != 0,
             writable: self.value & S2AP_W != 0,
-            executable: false,
-            user_accessible: true,
+            executable: self.value & S2_XN == 0,
             device: self.value & ATTR_MASK == DEVICE_ATTR,
         }
     }
@@ -192,8 +202,7 @@ impl PageTableEntry for Aarch64PTE {
         MemAttr {
             readable: self.value & S2AP_R != 0,
             writable: self.value & S2AP_W != 0,
-            executable: false,
-            user_accessible: true,
+            executable: self.value & S2_XN == 0,
             device: self.value & ATTR_MASK == DEVICE_ATTR,
         }
     }
@@ -235,6 +244,11 @@ impl PageTableEntry for Aarch64PTE {
         } else {
             0
         };
+        let execute_never = if attr.executable {
+            0
+        } else {
+            S2_XN
+        };
         let non_block = if huge {
             0
         } else {
@@ -242,15 +256,18 @@ impl PageTableEntry for Aarch64PTE {
         };
 
         assert(raw_addr % 4096 == 0);
-        assert(flags == VALID | AF | mem_type | readable | writable | non_block);
+        assert(raw_addr < 0x1_0000_0000_0000u64);
+        assert(flags == VALID | AF | mem_type | readable | writable | execute_never | non_block);
         assert(value == (raw_addr & PHYS_ADDR_MASK) | flags);
         assert(mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE);
         assert(readable == 0 || readable == S2AP_R);
         assert(writable == 0 || writable == S2AP_W);
+        assert(execute_never == 0 || execute_never == S2_XN);
         assert(non_block == 0 || non_block == NON_BLOCK);
         assert((raw_addr & PHYS_ADDR_MASK) == raw_addr) by (bit_vector)
             requires
                 raw_addr % 4096 == 0,
+                raw_addr < 0x1_0000_0000_0000u64,
         ;
         assert(raw_addr & 0xfff == 0) by (bit_vector)
             requires
@@ -258,50 +275,65 @@ impl PageTableEntry for Aarch64PTE {
         ;
         assert(flags & PHYS_ADDR_MASK == 0) by (bit_vector)
             requires
-                flags == VALID | AF | mem_type | readable | writable | non_block,
+                flags == VALID | AF | mem_type | readable | writable | execute_never | non_block,
                 mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
                 readable == 0 || readable == S2AP_R,
                 writable == 0 || writable == S2AP_W,
+                execute_never == 0 || execute_never == S2_XN,
                 non_block == 0 || non_block == NON_BLOCK,
         ;
         assert(flags & VALID == VALID) by (bit_vector)
             requires
-                flags == VALID | AF | mem_type | readable | writable | non_block,
+                flags == VALID | AF | mem_type | readable | writable | execute_never | non_block,
                 mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
                 readable == 0 || readable == S2AP_R,
                 writable == 0 || writable == S2AP_W,
+                execute_never == 0 || execute_never == S2_XN,
                 non_block == 0 || non_block == NON_BLOCK,
         ;
         assert(flags & NON_BLOCK == non_block) by (bit_vector)
             requires
-                flags == VALID | AF | mem_type | readable | writable | non_block,
+                flags == VALID | AF | mem_type | readable | writable | execute_never | non_block,
                 mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
                 readable == 0 || readable == S2AP_R,
                 writable == 0 || writable == S2AP_W,
+                execute_never == 0 || execute_never == S2_XN,
                 non_block == 0 || non_block == NON_BLOCK,
         ;
         assert(flags & S2AP_R == readable) by (bit_vector)
             requires
-                flags == VALID | AF | mem_type | readable | writable | non_block,
+                flags == VALID | AF | mem_type | readable | writable | execute_never | non_block,
                 mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
                 readable == 0 || readable == S2AP_R,
                 writable == 0 || writable == S2AP_W,
+                execute_never == 0 || execute_never == S2_XN,
                 non_block == 0 || non_block == NON_BLOCK,
         ;
         assert(flags & S2AP_W == writable) by (bit_vector)
             requires
-                flags == VALID | AF | mem_type | readable | writable | non_block,
+                flags == VALID | AF | mem_type | readable | writable | execute_never | non_block,
                 mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
                 readable == 0 || readable == S2AP_R,
                 writable == 0 || writable == S2AP_W,
+                execute_never == 0 || execute_never == S2_XN,
+                non_block == 0 || non_block == NON_BLOCK,
+        ;
+        assert(flags & S2_XN == execute_never) by (bit_vector)
+            requires
+                flags == VALID | AF | mem_type | readable | writable | execute_never | non_block,
+                mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
+                readable == 0 || readable == S2AP_R,
+                writable == 0 || writable == S2AP_W,
+                execute_never == 0 || execute_never == S2_XN,
                 non_block == 0 || non_block == NON_BLOCK,
         ;
         assert(flags & ATTR_MASK == mem_type & ATTR_MASK) by (bit_vector)
             requires
-                flags == VALID | AF | mem_type | readable | writable | non_block,
+                flags == VALID | AF | mem_type | readable | writable | execute_never | non_block,
                 mem_type == DEVICE_ATTR || mem_type == NORMAL_ATTR | INNER | SHAREABLE,
                 readable == 0 || readable == S2AP_R,
                 writable == 0 || writable == S2AP_W,
+                execute_never == 0 || execute_never == S2_XN,
                 non_block == 0 || non_block == NON_BLOCK,
         ;
         assert(value & PHYS_ADDR_MASK == raw_addr) by (bit_vector)
@@ -360,6 +392,18 @@ impl PageTableEntry for Aarch64PTE {
         } else {
             assert(writable == 0);
         }
+        assert(value & S2_XN == execute_never) by (bit_vector)
+            requires
+                value == (raw_addr & PHYS_ADDR_MASK) | flags,
+                raw_addr & PHYS_ADDR_MASK == raw_addr,
+                flags & S2_XN == execute_never,
+        ;
+        if attr.executable {
+            assert(execute_never == 0);
+        } else {
+            assert(execute_never == S2_XN);
+            assert(S2_XN != 0) by (bit_vector);
+        }
         assert(value & ATTR_MASK == mem_type & ATTR_MASK) by (bit_vector)
             requires
                 value == (raw_addr & PHYS_ADDR_MASK) | flags,
@@ -376,15 +420,8 @@ impl PageTableEntry for Aarch64PTE {
         }
         assert(pte.spec_attr().readable == attr.readable);
         assert(pte.spec_attr().writable == attr.writable);
-        assert(!pte.spec_attr().executable);
-        assert(pte.spec_attr().user_accessible);
+        assert(pte.spec_attr().executable == attr.executable);
         assert(pte.spec_attr().device == attr.device);
-        // TRUSTED GAP: the real stage-2 descriptor format used here has no bits
-        // for these two generic `MemAttr` fields. Decoding therefore supplies
-        // the root implementation's defaults (`false` and `true`). The generic
-        // `PageTableEntry` trait still requires `new` to preserve all fields, so
-        // that stronger architecture-independent contract is assumed here.
-        assume(attr.executable == false && attr.user_accessible == true);
         assert(pte.spec_attr() == attr);
     }
 

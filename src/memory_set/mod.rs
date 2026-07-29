@@ -4,10 +4,11 @@
 use crate::{
     address::{
         addr::{SpecPAddr, SpecVAddr, VAddr},
-        frame::{FrameSize, SpecFrame},
+        frame::{Frame, FrameSize, SpecFrame},
         region::MemoryRegion,
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
+    constants::*,
     global_allocator::GlobalAllocator,
     hardware::spec::MmuS2MapToken,
     hardware::{HardwareInstr, MmuHardware},
@@ -91,6 +92,42 @@ impl SpecMemorySet {
         let r = choose|r: MemoryRegion|
             self.regions.contains(r) && #[trigger] r.spec_contains_vaddr(v);
         r.spec_translate(v)
+    }
+
+    /// Whether some mapping in this memory set covers `vaddr`.
+    pub open spec fn has_mapping_for(&self, vaddr: SpecVAddr) -> bool {
+        exists|vbase: SpecVAddr, frame: SpecFrame|
+            {
+                &&& #[trigger] self.mappings.contains_pair(vbase, frame)
+                &&& vaddr.within(vbase, frame.size.as_nat())
+            }
+    }
+
+    /// The unique mapping in this well-formed memory set that covers `vaddr`.
+    pub open spec fn mapping_for(&self, vaddr: SpecVAddr) -> (SpecVAddr, SpecFrame)
+        recommends
+            self.has_mapping_for(vaddr),
+    {
+        choose|vbase: SpecVAddr, frame: SpecFrame|
+            {
+                &&& #[trigger] self.mappings.contains_pair(vbase, frame)
+                &&& vaddr.within(vbase, frame.size.as_nat())
+            }
+    }
+
+    /// Read-only page-table query result.
+    pub open spec fn pt_query(
+        &self,
+        vaddr: SpecVAddr,
+        res: Result<(SpecVAddr, SpecFrame), ()>,
+    ) -> bool {
+        match res {
+            Ok((vbase, frame)) => {
+                &&& self.mappings.contains_pair(vbase, frame)
+                &&& vaddr.within(vbase, frame.size.as_nat())
+            },
+            Err(()) => !self.has_mapping_for(vaddr),
+        }
     }
 
     /// Insert a new region into the memory set, returning the new memory set.
@@ -283,12 +320,28 @@ pub trait MemorySet<PT, A, I> where
             res == self@.has_region_starting_at(v@),
     ;
 
+    /// Query the page-table mapping that covers `vaddr` without modifying this memory set.
+    fn pt_query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+        requires
+            self.invariants(),
+            vaddr@.0 < self.pt_constants().arch.vspace_size(),
+        ensures
+            self.invariants(),
+            self@.pt_query(
+                vaddr@,
+                match res {
+                    Ok((vbase, frame)) => Ok((vbase@, frame@)),
+                    Err(()) => Err(()),
+                },
+            ),
+    ;
+
     /// Create an empty memory set with the given instance ID.
     fn new(allocator: &GlobalAllocator<A>, pt_constants: PTConstants) -> (res: Self)
         requires
             allocator.invariants(),
             pt_constants@.valid(),
-            pt_constants.hva_to_pa_offset_valid(allocator.base@),
+            pt_constants.hva_to_pa_offset_valid(allocator.base@, A::spec_cap() * SPEC_FRAME_SIZE),
             pt_constants@.arch.leaf_frame_size() == FrameSize::Size4K,
             forall|level: nat|
                 level < pt_constants.arch@.level_count() ==> pt_constants.arch@.entry_count(level)
@@ -320,7 +373,7 @@ pub trait MemorySet<PT, A, I> where
         &mut self,
         allocator: &GlobalAllocator<A>,
         region: MemoryRegion,
-        vm: Ghost<VmId>,
+        zone_id: usize,
         mmu: &mut MmuHardware<I>,
         s2_tok: Tracked<MmuS2MapToken>,
         iommu: bool,
@@ -333,8 +386,9 @@ pub trait MemorySet<PT, A, I> where
             region.spec_within_vspace(old(self).pt_constants().arch.vspace_size()),
             !old(self)@.overlaps_vmem(region),
             old(mmu).wf(),
+            I::valid_zone_id(zone_id),
             s2_tok@.instance_id() == old(mmu).inst_id(),
-            s2_tok@.key() == vm@,
+            s2_tok@.key() == VmId(zone_id as nat),
             s2_tok@.value() == pt_s2map_inner(old(self)@.mappings),
         ensures
             self.inst_id() == old(self).inst_id(),
@@ -345,13 +399,13 @@ pub trait MemorySet<PT, A, I> where
             mmu.inst_id() == old(mmu).inst_id(),
             mmu.live_vms() == old(mmu).live_vms(),
             res@.instance_id() == mmu.inst_id(),
-            res@.key() == vm@,
+            res@.key() == VmId(zone_id as nat),
             res@.value() == pt_s2map_inner(self@.mappings),
     ;
 
     /// Remove a memory region by its starting virtual address, **forcing a per-page
-    /// `DSB`+`TLBI` (`unmap_invalidate`)** via the tokenized MMU.  `vm` is the owning
-    /// zone's id, `mmu` issues the maintenance instructions, and `s2_tok` is the
+    /// `DSB`+`TLBI` (`unmap_invalidate`)** via the tokenized MMU. `zone_id` identifies
+    /// the owning zone, `mmu` issues the maintenance instructions, and `s2_tok` is the
     /// zone's `s2map` slice token (threaded in/out).  The slice token ends equal to
     /// `pt_s2map_inner(self@.mappings)` — provable only because the instructions run
     /// (the encapsulated instance is the sole way to advance the slice token), so the
@@ -360,7 +414,7 @@ pub trait MemorySet<PT, A, I> where
         &mut self,
         allocator: &GlobalAllocator<A>,
         start: VAddr,
-        vm: Ghost<VmId>,
+        zone_id: usize,
         mmu: &mut MmuHardware<I>,
         s2_tok: Tracked<MmuS2MapToken>,
         iommu: bool,
@@ -371,8 +425,9 @@ pub trait MemorySet<PT, A, I> where
             old(self).inst_id() == allocator.inst_id(),
             old(self)@.has_region_starting_at(start@),
             old(mmu).wf(),
+            I::valid_zone_id(zone_id),
             s2_tok@.instance_id() == old(mmu).inst_id(),
-            s2_tok@.key() == vm@,
+            s2_tok@.key() == VmId(zone_id as nat),
             s2_tok@.value() == pt_s2map_inner(old(self)@.mappings),
         ensures
             self.inst_id() == old(self).inst_id(),
@@ -383,7 +438,7 @@ pub trait MemorySet<PT, A, I> where
             mmu.inst_id() == old(mmu).inst_id(),
             mmu.live_vms() == old(mmu).live_vms(),
             res@.instance_id() == mmu.inst_id(),
-            res@.key() == vm@,
+            res@.key() == VmId(zone_id as nat),
             res@.value() == pt_s2map_inner(self@.mappings),
     ;
 

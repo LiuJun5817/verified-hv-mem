@@ -2,9 +2,8 @@
 use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
 use crate::address::frame::{Frame, SpecFrame};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
+use crate::constants::*;
 use crate::global_allocator::GlobalAllocator;
-#[cfg(verus_keep_ghost)]
-use crate::global_allocator::SPEC_FRAME_SIZE;
 use crate::page_table::pt_arch::{PTArch, SpecPTArch};
 use vstd::prelude::*;
 
@@ -54,9 +53,14 @@ impl PTConstants {
 
     /// Whether this direct-map offset can translate every frame returned by an
     /// allocator with the given HVA base while preserving page alignment.
-    pub open spec fn hva_to_pa_offset_valid(self, allocator_base: SpecPAddr) -> bool {
+    pub open spec fn hva_to_pa_offset_valid(
+        self,
+        allocator_base: SpecPAddr,
+        allocator_span: nat,
+    ) -> bool {
         &&& self.hva_to_pa_offset <= allocator_base.0
         &&& SpecPAddr(self.hva_to_pa_offset as nat).aligned(SPEC_FRAME_SIZE)
+        &&& allocator_base.0 - self.hva_to_pa_offset + allocator_span <= PADDR_UPPER_BOUND
     }
 }
 
@@ -111,7 +115,11 @@ impl PageTableState {
             frame.size.as_nat(),
         )
         // Base paddr should align to frame size
-        &&& frame.base.aligned(frame.size.as_nat())
+        &&& frame.base.aligned(
+            frame.size.as_nat(),
+        )
+        // The frame must fit in the scoped physical-address space
+        &&& frame.base.0 + frame.size.as_nat() <= PADDR_UPPER_BOUND
     }
 
     /// State transition - map a virtual address to a physical frame.
@@ -170,10 +178,7 @@ impl PageTableState {
     /// Query precondition.
     pub open spec fn query_pre(self, vaddr: SpecVAddr) -> bool {
         // Vaddr should be within vspace size
-        &&& vaddr.0
-            < self.constants.arch.vspace_size()
-        // Vaddr should align to 8 bytes
-        &&& vaddr.aligned(8)
+        vaddr.0 < self.constants.arch.vspace_size()
     }
 
     /// Query the physical frame mapped to a virtual address.
@@ -371,7 +376,7 @@ pub trait PageTable<A> where Self: Sized, A: BitmapAllocator {
         requires
             allocator.invariants(),
             constants@.valid(),
-            constants.hva_to_pa_offset_valid(allocator.base@),
+            constants.hva_to_pa_offset_valid(allocator.base@, A::spec_cap() * SPEC_FRAME_SIZE),
             forall|level: nat|
                 level < constants.arch@.level_count() ==> constants.arch@.entry_count(level) == 512,
         ensures

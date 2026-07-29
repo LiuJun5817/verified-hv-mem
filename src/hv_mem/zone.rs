@@ -10,6 +10,7 @@
 use super::protocol::{BudgetGlobalState, BudgetProtocol, ZoneGhostProtocol, ZoneStateOps};
 use crate::{
     address::region::MemoryRegion,
+    address::{addr::VAddr, frame::Frame},
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
     hardware::spec::MmuS2MapToken,
@@ -180,6 +181,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         &&& self.lock.k@.cpu_cell_id == self.cpu_mem_set.id()
         &&& self.lock.k@.iommu_cell_id == self.iommu_mem_set.id()
         &&& self.lock.k@.zone_id == self.zone_id
+        &&& I::valid_zone_id(self.zone_id)
     }
 
     /// The HvMemSpec-instance ID of this zone, obtained from the lock's ghost key.
@@ -227,6 +229,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     ) -> (res: Self)
         requires
             zone_state.wf(mem_inst_id),
+            I::valid_zone_id(zone_id),
             // The exec memory sets satisfy their own invariants and belong to the
             // shared allocator instance.
             cpu_mem_set.invariants(),
@@ -499,6 +502,38 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     {
         self.lock.unlock_read(guard)
     }
+
+    /// Query the CPU stage-2 page table without modifying the zone.
+    pub fn pt_query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+        requires
+            self.wf(),
+            vaddr@.0 < self.vspace_size(),
+        ensures
+            self.wf(),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let mem_set = self.cpu_mem_set.borrow(Tracked(&content.cpu_mem_set_perm));
+        let res = mem_set.pt_query(vaddr);
+        self.lock.unlock_read(guard);
+        res
+    }
+
+    /// Query the IOMMU stage-2 page table without modifying the zone.
+    pub fn iommu_pt_query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+        requires
+            self.wf(),
+            vaddr@.0 < self.vspace_size(),
+        ensures
+            self.wf(),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let mem_set = self.iommu_mem_set.borrow(Tracked(&content.iommu_mem_set_perm));
+        let res = mem_set.pt_query(vaddr);
+        self.lock.unlock_read(guard);
+        res
+    }
 }
 
 /// Concrete `BudgetProtocol` implementation for `Zone`.
@@ -561,7 +596,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         let s2_out = mem_set.insert(
             allocator,
             region,
-            Ghost(VmId(self.lock.k@.zone_id as nat)),
+            self.zone_id,
             mmu,
             Tracked(s2map_tok),
             false,
@@ -632,7 +667,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         let s2_out = mem_set.remove(
             allocator,
             region.vstart,
-            Ghost(VmId(self.lock.k@.zone_id as nat)),
+            self.zone_id,
             mmu,
             Tracked(s2map_tok),
             false,
@@ -708,7 +743,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         let s2_out = mem_set.insert(
             allocator,
             region,
-            Ghost(VmId(self.lock.k@.zone_id as nat)),
+            self.zone_id,
             iommu_mmu,
             Tracked(iommu_s2map_tok),
             true,
@@ -778,7 +813,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         let s2_out = mem_set.remove(
             allocator,
             region.vstart,
-            Ghost(VmId(self.lock.k@.zone_id as nat)),
+            self.zone_id,
             iommu_mmu,
             Tracked(iommu_s2map_tok),
             true,

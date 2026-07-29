@@ -44,6 +44,7 @@ use crate::model::convert::*;
 use crate::model::software::{Region, SoftwareView};
 use crate::model::types::{GuestPage, PhysPage, S2Entry, SharedPage, VmId, VmPageKey};
 use crate::memory_set::SpecMemorySet;
+use crate::constants::*;
 
 // ---------------------------------------------------------------------------
 // §1  Per-region geometry

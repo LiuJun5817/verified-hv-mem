@@ -54,13 +54,19 @@ use vstd::prelude::*;
 
 verus! {
 
+/// Executable zone-ID encoding shared by a platform's CPU-MMU and SMMU backends.
+pub trait ZoneIdInstr {
+    /// Whether `zone_id` can be represented by this backend's executable VMID encoding.
+    spec fn valid_zone_id(zone_id: usize) -> bool;
+}
+
 /// Trusted **CPU MMU** stage-2 maintenance instructions.
 ///
 /// Each method is an exec `fn` that can appear in hypervisor code. Platform
 /// implementations provide `#[verifier::external_body]` bodies containing the actual
 /// `asm!` instructions, citing the architecture reference manual for correctness.
 /// These drive the **CPU MMU** regime only; the SMMU analogs live in [`SmmuInstr`].
-pub trait MmuInstr {
+pub trait MmuInstr: ZoneIdInstr {
     // ------------------------------------------------------------------
     // S2 TLB invalidation broadcast
     // ------------------------------------------------------------------
@@ -76,11 +82,13 @@ pub trait MmuInstr {
     ///
     /// `IPAS2E1IS` is a **register-form** maintenance op: the target IPA travels in
     /// `Xt` as `Xt[..] = IPA >> 12`, which for the model's 4K pages is exactly the
-    /// guest page number — hence the real `usize` operand `ipa_page`.  The VMID is
-    /// *not* an operand; it is read from the current `VTTBR_EL2`, which the caller
-    /// must already have programmed.  ([`MmuHardware::unmap_dsb_tlbi`] derives the
-    /// spec page from `ipa_page`, so the asm and the ghost transition agree.)
-    fn issue_tlbi_s2_sync(ipa_page: usize);
+    /// guest page number — hence the real `usize` operand `ipa_page`. The backend
+    /// uses `zone_id` to select the VMID in `VTTBR_EL2`; both executable operands
+    /// are also the sources of the abstract transition's VM and guest page.
+    fn issue_tlbi_s2_sync(zone_id: usize, ipa_page: usize)
+        requires
+            Self::valid_zone_id(zone_id),
+    ;
 
     // ------------------------------------------------------------------
     // Data Synchronization Barrier (DSB ISH)
@@ -99,7 +107,7 @@ pub trait MmuInstr {
 /// invalidation + completion), but the SMMU is an MMIO command-queue device, so the
 /// "instructions" are command-queue writes rather than CPU `TLBI`/`DSB`.  Driving
 /// the SMMU regime never touches the CPU MMU's TLB, and vice versa.
-pub trait SmmuInstr {
+pub trait SmmuInstr: ZoneIdInstr {
     // ------------------------------------------------------------------
     // SMMU stage-2 IPA invalidation
     // ------------------------------------------------------------------
@@ -111,7 +119,10 @@ pub trait SmmuInstr {
     /// MMIO device, so the "instruction" is a command-queue write; it must be
     /// followed by [`issue_smmu_sync`](Self::issue_smmu_sync) before the new
     /// translation may be relied on.  Flushes only the **SMMU** TLB.
-    fn issue_smmu_tlbi_s2(ipa_page: usize);
+    fn issue_smmu_tlbi_s2(zone_id: usize, ipa_page: usize)
+        requires
+            Self::valid_zone_id(zone_id),
+    ;
 
     // ------------------------------------------------------------------
     // SMMU command-queue synchronization (CMD_SYNC)
@@ -193,40 +204,45 @@ impl<I: HardwareInstr> MmuHardware<I> {
 
     /// Register a fresh vm: fires `add_vm`, **minting** that zone's `s2map` slice
     /// token (empty), which the caller stores in the new zone's lock.
-    pub fn add_vm(&mut self, vm: Ghost<VmId>) -> (res: Tracked<MmuS2MapToken>)
+    pub fn add_vm(&mut self, zone_id: usize) -> (res: Tracked<MmuS2MapToken>)
         requires
             old(self).wf(),
-            !old(self).live_vms().contains(vm@),
+            I::valid_zone_id(zone_id),
+            !old(self).live_vms().contains(VmId(zone_id as nat)),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),
-            self.live_vms() == old(self).live_vms().insert(vm@),
+            self.live_vms() == old(self).live_vms().insert(VmId(zone_id as nat)),
             res@.instance_id() == self.inst_id(),
-            res@.key() == vm@,
+            res@.key() == VmId(zone_id as nat),
             res@.value() == Map::<GuestPage, S2Entry>::empty(),
     {
-        let tracked new_tok = self.instance.borrow().add_vm(vm@, self.vm_ids.borrow_mut());
+        let tracked new_tok = self.instance.borrow().add_vm(
+            VmId(zone_id as nat),
+            self.vm_ids.borrow_mut(),
+        );
         Tracked(new_tok)
     }
 
     /// Deregister a vm after all of its walker-reachable mappings have been removed.
     /// The empty slice has no coherent TLB entries, so no hardware invalidation is
     /// needed at this lifecycle boundary.
-    pub fn remove_vm(&mut self, vm: Ghost<VmId>, s2_tok: Tracked<MmuS2MapToken>)
+    pub fn remove_vm(&mut self, zone_id: usize, s2_tok: Tracked<MmuS2MapToken>)
         requires
             old(self).wf(),
-            old(self).live_vms().contains(vm@),
+            I::valid_zone_id(zone_id),
+            old(self).live_vms().contains(VmId(zone_id as nat)),
             s2_tok@.instance_id() == old(self).inst_id(),
-            s2_tok@.key() == vm@,
+            s2_tok@.key() == VmId(zone_id as nat),
             s2_tok@.value() == Map::<GuestPage, S2Entry>::empty(),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),
-            self.live_vms() == old(self).live_vms().remove(vm@),
+            self.live_vms() == old(self).live_vms().remove(VmId(zone_id as nat)),
     {
         let tracked s2 = s2_tok.get();
         proof {
-            self.instance.borrow().remove_vm(vm@, s2, self.vm_ids.borrow_mut());
+            self.instance.borrow().remove_vm(VmId(zone_id as nat), s2, self.vm_ids.borrow_mut());
         }
     }
 
@@ -246,26 +262,27 @@ impl<I: HardwareInstr> MmuHardware<I> {
         &mut self,
         s2_tok: Tracked<MmuS2MapToken>,
         ipa_page: usize,
-        vm: Ghost<VmId>,
+        zone_id: usize,
     ) -> (res: Tracked<MmuS2MapToken>)
         requires
             old(self).wf(),
+            I::valid_zone_id(zone_id),
             s2_tok@.instance_id() == old(self).inst_id(),
-            s2_tok@.key() == vm@,
+            s2_tok@.key() == VmId(zone_id as nat),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),
             self.live_vms() == old(self).live_vms(),
             res@.instance_id() == self.inst_id(),
-            res@.key() == vm@,
+            res@.key() == VmId(zone_id as nat),
             res@.value() == s2_tok@.value().remove(GuestPage(ipa_page as nat)),
     {
         let ghost gpa = GuestPage(ipa_page as nat);
         let tracked s2 = s2_tok.get();
         I::issue_dsb_ish();
-        I::issue_tlbi_s2_sync(ipa_page);
+        I::issue_tlbi_s2_sync(zone_id, ipa_page);
         let tracked new_tok = self.instance.borrow().unmap_invalidate(
-            vm@,
+            VmId(zone_id as nat),
             gpa,
             s2,
             self.tlb.borrow_mut(),
@@ -282,26 +299,27 @@ impl<I: HardwareInstr> MmuHardware<I> {
         &mut self,
         s2_tok: Tracked<MmuS2MapToken>,
         ipa_page: usize,
-        vm: Ghost<VmId>,
+        zone_id: usize,
         entry: Ghost<S2Entry>,
     ) -> (res: Tracked<MmuS2MapToken>)
         requires
             old(self).wf(),
+            I::valid_zone_id(zone_id),
             s2_tok@.instance_id() == old(self).inst_id(),
-            s2_tok@.key() == vm@,
+            s2_tok@.key() == VmId(zone_id as nat),
             !s2_tok@.value().contains_key(GuestPage(ipa_page as nat)),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),
             self.live_vms() == old(self).live_vms(),
             res@.instance_id() == self.inst_id(),
-            res@.key() == vm@,
+            res@.key() == VmId(zone_id as nat),
             res@.value() == s2_tok@.value().insert(GuestPage(ipa_page as nat), entry@),
     {
         let ghost gpa = GuestPage(ipa_page as nat);
         let tracked s2 = s2_tok.get();
         I::issue_dsb_ish();
-        let tracked new_tok = self.instance.borrow().map(vm@, gpa, entry@, s2);
+        let tracked new_tok = self.instance.borrow().map(VmId(zone_id as nat), gpa, entry@, s2);
         Tracked(new_tok)
     }
 
@@ -320,26 +338,27 @@ impl<I: HardwareInstr> MmuHardware<I> {
         &mut self,
         s2_tok: Tracked<MmuS2MapToken>,
         ipa_page: usize,
-        vm: Ghost<VmId>,
+        zone_id: usize,
     ) -> (res: Tracked<MmuS2MapToken>)
         requires
             old(self).wf(),
+            I::valid_zone_id(zone_id),
             s2_tok@.instance_id() == old(self).inst_id(),
-            s2_tok@.key() == vm@,
+            s2_tok@.key() == VmId(zone_id as nat),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),
             self.live_vms() == old(self).live_vms(),
             res@.instance_id() == self.inst_id(),
-            res@.key() == vm@,
+            res@.key() == VmId(zone_id as nat),
             res@.value() == s2_tok@.value().remove(GuestPage(ipa_page as nat)),
     {
         let ghost gpa = GuestPage(ipa_page as nat);
         let tracked s2 = s2_tok.get();
-        I::issue_smmu_tlbi_s2(ipa_page);
+        I::issue_smmu_tlbi_s2(zone_id, ipa_page);
         I::issue_smmu_sync();
         let tracked new_tok = self.instance.borrow().unmap_invalidate(
-            vm@,
+            VmId(zone_id as nat),
             gpa,
             s2,
             self.tlb.borrow_mut(),
@@ -358,26 +377,27 @@ impl<I: HardwareInstr> MmuHardware<I> {
         &mut self,
         s2_tok: Tracked<MmuS2MapToken>,
         ipa_page: usize,
-        vm: Ghost<VmId>,
+        zone_id: usize,
         entry: Ghost<S2Entry>,
     ) -> (res: Tracked<MmuS2MapToken>)
         requires
             old(self).wf(),
+            I::valid_zone_id(zone_id),
             s2_tok@.instance_id() == old(self).inst_id(),
-            s2_tok@.key() == vm@,
+            s2_tok@.key() == VmId(zone_id as nat),
             !s2_tok@.value().contains_key(GuestPage(ipa_page as nat)),
         ensures
             self.wf(),
             self.inst_id() == old(self).inst_id(),
             self.live_vms() == old(self).live_vms(),
             res@.instance_id() == self.inst_id(),
-            res@.key() == vm@,
+            res@.key() == VmId(zone_id as nat),
             res@.value() == s2_tok@.value().insert(GuestPage(ipa_page as nat), entry@),
     {
         let ghost gpa = GuestPage(ipa_page as nat);
         let tracked s2 = s2_tok.get();
         I::issue_smmu_sync();
-        let tracked new_tok = self.instance.borrow().map(vm@, gpa, entry@, s2);
+        let tracked new_tok = self.instance.borrow().map(VmId(zone_id as nat), gpa, entry@, s2);
         Tracked(new_tok)
     }
 }

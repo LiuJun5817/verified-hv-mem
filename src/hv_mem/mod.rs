@@ -22,11 +22,12 @@ extern crate alloc;
 
 use crate::{
     address::{
-        addr::SpecVAddr,
-        frame::{FrameSize, SpecFrame},
+        addr::{SpecVAddr, VAddr},
+        frame::{Frame, FrameSize, SpecFrame},
         region::MemoryRegion,
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
+    constants::*,
     global_allocator::GlobalAllocator,
     hardware::{HardwareInstr, MmuHardware},
     memory_set::{MemorySet, SpecMemorySet},
@@ -269,8 +270,12 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     ) -> (res: Result<(), ()>)
         requires
             self.invariants(),
+            I::valid_zone_id(zid),
             pt_constants@.valid(),
-            pt_constants.hva_to_pa_offset_valid(self.allocator.base@),
+            pt_constants.hva_to_pa_offset_valid(
+                self.allocator.base@,
+                A::spec_cap() * SPEC_FRAME_SIZE,
+            ),
             pt_constants@ == self.lock.k@.pt_constants,
             forall|level: nat|
                 level < pt_constants.arch@.level_count() ==> pt_constants.arch@.entry_count(level)
@@ -328,9 +333,9 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         // Mint this zone's CPU MMU `s2map` slice token (empty, keyed by the vm); the
         // forced sync clause holds at birth because an empty mem_set projects to an
         // empty `s2map`.
-        let s2map_tok = mmu.add_vm(Ghost(VmId(zid as nat)));
+        let s2map_tok = mmu.add_vm(zid);
         // Mint this zone's IOMMU slice token (empty) on the separate IOMMU instance.
-        let iommu_s2map_tok = iommu_mmu.add_vm(Ghost(VmId(zid as nat)));
+        let iommu_s2map_tok = iommu_mmu.add_vm(zid);
         proof {
             assert(pt_s2map_inner(cpu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
             assert(pt_s2map_inner(iommu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
@@ -493,8 +498,8 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             s2map_tok,
             iommu_s2map_tok,
         } = zone_content;
-        mmu.remove_vm(Ghost(VmId(zid as nat)), Tracked(s2map_tok));
-        iommu_mmu.remove_vm(Ghost(VmId(zid as nat)), Tracked(iommu_s2map_tok));
+        mmu.remove_vm(zid, Tracked(s2map_tok));
+        iommu_mmu.remove_vm(zid, Tracked(iommu_s2map_tok));
 
         // ── Step 5: restore resources owned by both memory sets ──────────────
 
@@ -619,6 +624,50 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
 
         let lock = RwLock::new(key, Tracked(content));
         Self { zone_list, lock, allocator }
+    }
+
+    /// Query zone `zid`'s CPU stage-2 page table under shared locks.
+    pub fn pt_query(&self, zid: usize, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+        requires
+            self.invariants(),
+            vaddr@.0 < self.lock.k@.pt_constants.arch.vspace_size(),
+        ensures
+            self.invariants(),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I> { zone_list_perm, .. } = content;
+        let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
+
+        let res = match Self::find_zone_index(zones, zid) {
+            Some(i) => zones[i].pt_query(vaddr),
+            None => Err(()),
+        };
+
+        self.lock.unlock_read(guard);
+        res
+    }
+
+    /// Query zone `zid`'s IOMMU stage-2 page table under shared locks.
+    pub fn iommu_pt_query(&self, zid: usize, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+        requires
+            self.invariants(),
+            vaddr@.0 < self.lock.k@.pt_constants.arch.vspace_size(),
+        ensures
+            self.invariants(),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I> { zone_list_perm, .. } = content;
+        let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
+
+        let res = match Self::find_zone_index(zones, zid) {
+            Some(i) => zones[i].iommu_pt_query(vaddr),
+            None => Err(()),
+        };
+
+        self.lock.unlock_read(guard);
+        res
     }
 
     /// Insert `region` into zone `zid` using only the HvMem **read** lock.

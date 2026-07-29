@@ -6,6 +6,7 @@
 //! is exactly the set of frames that client currently owns.  The Instance
 //! invariants (`inv_free_clients_disjoint` and `inv_clients_disjoint`) then
 //! guarantee, at the type level, that no two clients ever hold the same frame.
+use crate::constants::*;
 use core::marker::PhantomData;
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::cell::{CellId, PCell};
@@ -534,12 +535,6 @@ pub type RegisteredToken = AllocSpec::registered;
 pub type ClientToken = AllocSpec::client_sets;
 
 pub type GbAlloc = GlobalAllocator<BitAlloc1M>;
-
-/// Frame Size: 4 KiB (4096 bytes).
-pub const FRAME_SIZE: usize = 4096;
-
-/// Frame size in spec mode.
-pub spec const SPEC_FRAME_SIZE: nat = 4096;
 
 /// Permission to access a 4K Frame
 pub type Frame4KPerm = vstd::simple_pptr::PointsTo<[u8; 4096]>;
@@ -1178,6 +1173,7 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         ensures
             res.0@.aligned(SPEC_FRAME_SIZE),
             res.0.0 >= self.base.0,
+            res.0@.0 + SPEC_FRAME_SIZE <= self.base@.0 + A::spec_cap() * SPEC_FRAME_SIZE,
             res.1.wf(self.inst_id()),
             res.1.cid() == client.cid(),
             !client.owns(self.paddr_to_fid_spec(res.0@)),
@@ -1214,6 +1210,26 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
             assert(AllocMutexPred::<A>::inv(self.mutex.k@, content));
         }
         let frame = self.fid_to_paddr(idx);
+        proof {
+            assert(idx < A::spec_cap());
+            assert((idx as nat) < A::spec_cap());
+            assert((idx as nat) + 1 <= A::spec_cap());
+            assert(frame@.0 == self.base@.0 + idx as nat * SPEC_FRAME_SIZE);
+            vstd::arithmetic::mul::lemma_mul_inequality(
+                ((idx as nat) + 1) as int,
+                A::spec_cap() as int,
+                SPEC_FRAME_SIZE as int,
+            );
+            assert(((idx as nat) + 1) * SPEC_FRAME_SIZE <= A::spec_cap() * SPEC_FRAME_SIZE);
+            vstd::arithmetic::mul::lemma_mul_is_distributive_add_other_way(
+                SPEC_FRAME_SIZE as int,
+                idx as int,
+                1,
+            );
+            assert(((idx as nat) + 1) * SPEC_FRAME_SIZE == idx as nat * SPEC_FRAME_SIZE
+                + SPEC_FRAME_SIZE);
+            assert(frame@.0 + SPEC_FRAME_SIZE <= self.base@.0 + A::spec_cap() * SPEC_FRAME_SIZE);
+        }
         // ── unlock ────────────────────────────────────────────────────────────
         self.mutex.unlock(MutexGuard { handle, token: Tracked(content) });
         (frame, Tracked(new_client))

@@ -14,6 +14,7 @@ use crate::address::addr::{SpecPAddr, SpecVAddr};
 use crate::address::frame::{MemAttr, SpecFrame};
 use crate::address::region::*;
 use crate::model::types::{AccessPerms, GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
+use crate::constants::*;
 
 // ─────────────────────────── page-number extraction ───────────────────────────
 // The two primitives that turn a byte address into its (model) page number — the

@@ -17,6 +17,7 @@ use crate::address::{
     frame::{Frame, FrameSize, SpecFrame},
 };
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
+use crate::constants::*;
 use crate::global_allocator::GlobalAllocator;
 use crate::hardware::spec::MmuS2MapToken;
 use crate::hardware::{HardwareInstr, MmuHardware};
@@ -220,11 +221,15 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         false
     }
 
+    fn pt_query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>) {
+        self.pt.query(vaddr)
+    }
+
     fn insert(
         &mut self,
         allocator: &GlobalAllocator<A>,
         region: MemoryRegion,
-        vm: Ghost<VmId>,
+        zone_id: usize,
         mmu: &mut MmuHardware<I>,
         s2_tok: Tracked<MmuS2MapToken>,
         iommu: bool,
@@ -293,8 +298,9 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 mmu.wf(),
                 mmu.inst_id() == old(mmu).inst_id(),
                 mmu.live_vms() == old(mmu).live_vms(),
+                I::valid_zone_id(zone_id),
                 s2@.instance_id() == mmu.inst_id(),
-                s2@.key() == vm@,
+                s2@.key() == VmId(zone_id as nat),
                 s2@.value() == pt_s2map_inner(self.pt@.mappings),
             decreases region.pages - i,
         {
@@ -329,9 +335,9 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
             let ipa_page = vbase.0 / PAGE_SIZE;
             s2 =
             if iommu {
-                mmu.iommu_map_sync(s2, ipa_page, vm, Ghost(frame_to_s2(frame@)))
+                mmu.iommu_map_sync(s2, ipa_page, zone_id, Ghost(frame_to_s2(frame@)))
             } else {
-                mmu.map_dsb(s2, ipa_page, vm, Ghost(frame_to_s2(frame@)))
+                mmu.map_dsb(s2, ipa_page, zone_id, Ghost(frame_to_s2(frame@)))
             };
             proof {
                 lemma_pt_s2map_inner_insert(old_mappings, vbase@, frame@);
@@ -525,7 +531,7 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         &mut self,
         allocator: &GlobalAllocator<A>,
         start: VAddr,
-        vm: Ghost<VmId>,
+        zone_id: usize,
         mmu: &mut MmuHardware<I>,
         s2_tok: Tracked<MmuS2MapToken>,
         iommu: bool,
@@ -545,7 +551,7 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
             decreases len - i,
         {
             if self.regions[i].vstart.0 == start.0 {
-                break ;
+                break;
             }
             i += 1;
         }
@@ -620,8 +626,9 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 mmu.wf(),
                 mmu.inst_id() == old(mmu).inst_id(),
                 mmu.live_vms() == old(mmu).live_vms(),
+                I::valid_zone_id(zone_id),
                 s2@.instance_id() == mmu.inst_id(),
-                s2@.key() == vm@,
+                s2@.key() == VmId(zone_id as nat),
                 s2@.value() == pt_s2map_inner(self.pt@.mappings),
             decreases region.pages - i,
         {
@@ -645,9 +652,9 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
             // page — provable only because the real instructions run.
             s2 =
             if iommu {
-                mmu.iommu_unmap_invalidate(s2, ipa_page, vm)
+                mmu.iommu_unmap_invalidate(s2, ipa_page, zone_id)
             } else {
-                mmu.unmap_dsb_tlbi(s2, ipa_page, vm)
+                mmu.unmap_dsb_tlbi(s2, ipa_page, zone_id)
             };
             let ghost mappings = self.pt@.mappings;
             i += 1;

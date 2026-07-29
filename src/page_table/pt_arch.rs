@@ -11,12 +11,10 @@ use crate::address::{
     addr::{SpecVAddr, VAddr},
     frame::FrameSize,
 };
+use crate::constants::*;
 use alloc::vec::Vec;
 
 verus! {
-
-/// Page table entry size.
-pub spec const PTE_SIZE: nat = 8;
 
 /// Represents a single level in a hierarchical page table structure.
 pub struct SpecPTArchLevel {
