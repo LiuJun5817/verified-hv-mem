@@ -13,7 +13,7 @@ use super::{MemorySet, SpecMemorySet};
 extern crate alloc;
 
 use crate::address::{
-    addr::{PAddr, SpecVAddr, VAddr},
+    addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
     frame::{Frame, FrameSize, SpecFrame},
 };
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
@@ -126,6 +126,10 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         self.pt@.constants
     }
 
+    open spec fn spec_pt_root(&self) -> SpecPAddr {
+        self.pt.spec_root()
+    }
+
     open spec fn invariants(&self) -> bool {
         &&& self.pt@.constants.valid()
         // Frame size is 4K
@@ -219,6 +223,10 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
             }
         }
         false
+    }
+
+    fn pt_root(&self) -> (res: PAddr) {
+        self.pt.root()
     }
 
     fn pt_query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>) {

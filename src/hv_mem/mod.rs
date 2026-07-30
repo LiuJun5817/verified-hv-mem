@@ -22,7 +22,7 @@ extern crate alloc;
 
 use crate::{
     address::{
-        addr::{SpecVAddr, VAddr},
+        addr::{PAddr, SpecVAddr, VAddr},
         frame::{Frame, FrameSize, SpecFrame},
         region::MemoryRegion,
     },
@@ -566,6 +566,44 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         self.lock.unlock_read(guard);
         result
     }
+
+    /// Return zone `zid`'s CPU stage-2 page-table root physical address.
+    pub fn pt_root(&self, zid: usize) -> (res: Result<PAddr, ()>)
+        requires
+            self.invariants(),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, P, I> { zone_list_perm, .. } = content;
+        let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
+
+        let res = match Self::find_zone_index(zones, zid) {
+            Some(i) => Ok(zones[i].pt_root()),
+            None => Err(()),
+        };
+
+        self.lock.unlock_read(guard);
+        res
+    }
+
+    /// Return zone `zid`'s IOMMU stage-2 page-table root physical address.
+    pub fn iommu_pt_root(&self, zid: usize) -> (res: Result<PAddr, ()>)
+        requires
+            self.invariants(),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, P, I> { zone_list_perm, .. } = content;
+        let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
+
+        let res = match Self::find_zone_index(zones, zid) {
+            Some(i) => Ok(zones[i].iommu_pt_root()),
+            None => Err(()),
+        };
+
+        self.lock.unlock_read(guard);
+        res
+    }
 }
 
 /// Concrete `BudgetProtocol` specialisation: both `insert_region` and
@@ -631,8 +669,6 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         requires
             self.invariants(),
             vaddr@.0 < self.lock.k@.pt_constants.arch.vspace_size(),
-        ensures
-            self.invariants(),
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
@@ -653,8 +689,6 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         requires
             self.invariants(),
             vaddr@.0 < self.lock.k@.pt_constants.arch.vspace_size(),
-        ensures
-            self.invariants(),
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);

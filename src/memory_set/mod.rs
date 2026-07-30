@@ -3,7 +3,7 @@
 //! insert, remove, and find memory areas.
 use crate::{
     address::{
-        addr::{SpecPAddr, SpecVAddr, VAddr},
+        addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
         frame::{Frame, FrameSize, SpecFrame},
         region::MemoryRegion,
     },
@@ -295,6 +295,17 @@ pub trait MemorySet<PT, A, I> where
     /// Page-table constants used by this memory set's backing page table.
     spec fn pt_constants(&self) -> SpecPTConstants;
 
+    /// Physical address of this memory set's backing page-table root.
+    spec fn spec_pt_root(&self) -> SpecPAddr;
+
+    /// Return the physical address of this memory set's backing page-table root.
+    fn pt_root(&self) -> (res: PAddr)
+        requires
+            self.invariants(),
+        ensures
+            res@ == self.spec_pt_root(),
+    ;
+
     /// Check whether the memory set contains no regions or mappings.
     fn is_empty(&self) -> (res: bool)
         requires
@@ -326,7 +337,6 @@ pub trait MemorySet<PT, A, I> where
             self.invariants(),
             vaddr@.0 < self.pt_constants().arch.vspace_size(),
         ensures
-            self.invariants(),
             self@.pt_query(
                 vaddr@,
                 match res {

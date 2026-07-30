@@ -10,7 +10,10 @@
 use super::protocol::{BudgetGlobalState, BudgetProtocol, ZoneGhostProtocol, ZoneStateOps};
 use crate::{
     address::region::MemoryRegion,
-    address::{addr::VAddr, frame::Frame},
+    address::{
+        addr::{PAddr, VAddr},
+        frame::Frame,
+    },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
     hardware::spec::MmuS2MapToken,
@@ -503,13 +506,37 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         self.lock.unlock_read(guard)
     }
 
+    /// Return the physical address of the CPU stage-2 page-table root.
+    pub fn pt_root(&self) -> (res: PAddr)
+        requires
+            self.wf(),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let mem_set = self.cpu_mem_set.borrow(Tracked(&content.cpu_mem_set_perm));
+        let res = mem_set.pt_root();
+        self.lock.unlock_read(guard);
+        res
+    }
+
+    /// Return the physical address of the IOMMU stage-2 page-table root.
+    pub fn iommu_pt_root(&self) -> (res: PAddr)
+        requires
+            self.wf(),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let mem_set = self.iommu_mem_set.borrow(Tracked(&content.iommu_mem_set_perm));
+        let res = mem_set.pt_root();
+        self.lock.unlock_read(guard);
+        res
+    }
+
     /// Query the CPU stage-2 page table without modifying the zone.
     pub fn pt_query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
         requires
             self.wf(),
             vaddr@.0 < self.vspace_size(),
-        ensures
-            self.wf(),
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
@@ -524,8 +551,6 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         requires
             self.wf(),
             vaddr@.0 < self.vspace_size(),
-        ensures
-            self.wf(),
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
