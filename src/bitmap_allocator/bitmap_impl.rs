@@ -1014,8 +1014,15 @@ impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
         ));
 
         // Identify the updated bit in the parent view.
-        assert((i * cap + res_is_some.unwrap()) / cap == i && (i * cap + res_is_some.unwrap()) % cap
-            == res_is_some.unwrap()) by (nonlinear_arith)
+        assert((i * cap + res_is_some.unwrap()) / cap == i) by (nonlinear_arith)
+            requires
+                res_is_some.unwrap() + i * cap < Self::spec_cap(),
+                Self::spec_cap() == cap * 16,
+                0 <= i < 16,
+                cap > 0,
+                res_is_some.unwrap() < cap,
+        ;
+        assert((i * cap + res_is_some.unwrap()) % cap == res_is_some.unwrap()) by (nonlinear_arith)
             requires
                 res_is_some.unwrap() + i * cap < Self::spec_cap(),
                 Self::spec_cap() == cap * 16,
@@ -1031,15 +1038,20 @@ impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
                 + res_is_some.unwrap()) as int) implies self@[loc2] == old(self)@[loc2] by {
             let j = loc2 / cap;
             let k = loc2 % cap;
-
-            assert(0 <= k < cap && 0 <= j < 16 && loc2 == j * cap + k) by (nonlinear_arith)
+            assert(0 <= k < cap);
+            assert(0 <= j < 16) by (nonlinear_arith)
+                requires
+                    j == loc2 / cap,
+                    0 <= loc2 < Self::spec_cap() && loc2 != (i * cap + res_is_some.unwrap()) as int,
+                    Self::spec_cap() == 16 * cap,
+            ;
+            assert(loc2 == j * cap + k) by (nonlinear_arith)
                 requires
                     j == loc2 / cap,
                     k == loc2 % cap,
                     0 <= loc2 < Self::spec_cap() && loc2 != (i * cap + res_is_some.unwrap()) as int,
                     Self::spec_cap() == 16 * cap,
             ;
-
             assert(self@[j * cap + k] == self.sub[j]@[k]);
             assert(old(self).sub[j]@[k] == self.sub[j]@[k]);
         };
@@ -1059,8 +1071,16 @@ impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
             i * cap <= loc2 < (i * cap + res_is_some.unwrap()) as int implies old(self)@[loc2]
             == false by {
             assert(old(self)@[loc2] == old(self).sub[i as int]@[loc2 - (i * cap) as int]) by {
-                assert(i == loc2 / cap && loc2 % cap == loc2 - (i * cap) as int)
-                    by (nonlinear_arith)
+                assert(i == loc2 / cap) by (nonlinear_arith)
+                    requires
+                        i * cap <= loc2 < (i * cap + res_is_some.unwrap()) as int,
+                        res_is_some.unwrap() + i * cap < Self::spec_cap(),
+                        Self::spec_cap() == cap * 16,
+                        0 <= i < 16,
+                        cap > 0,
+                        res_is_some.unwrap() < cap,
+                ;
+                assert(loc2 % cap == loc2 - (i * cap) as int) by (nonlinear_arith)
                     requires
                         i * cap <= loc2 < (i * cap + res_is_some.unwrap()) as int,
                         res_is_some.unwrap() + i * cap < Self::spec_cap(),
@@ -1145,12 +1165,44 @@ impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
 
         assert(self.sub[i as int]@ == old(self).sub[i as int]@.update(bit_index as int, true));
 
-        assert(bit_index + i * cap < Self::spec_cap() && (i * cap + bit_index) / cap == i && (i
-            * cap + bit_index) % cap == bit_index && key == i * cap + bit_index)
-            by (nonlinear_arith)
+        assert(bit_index + i * cap < Self::spec_cap()) by (nonlinear_arith)
+            requires
+                bit_index == key % T::spec_cap(),
+                bit_index < cap,
+                key < Self::spec_cap(),
+                Self::spec_cap() == cap * 16,
+                0 <= i < 16,
+                cap > 0,
+        ;
+        assert((i * cap + bit_index) / cap == i) by (nonlinear_arith)
+            requires
+                bit_index + i * cap < Self::spec_cap(),
+                key < Self::spec_cap(),
+                bit_index == key % T::spec_cap(),
+                Self::spec_cap() == cap * 16,
+                0 <= i < 16,
+                cap > 0,
+                bit_index < cap,
+                cap == T::spec_cap(),
+        ;
+        assert((i * cap + bit_index) % cap == bit_index) by (nonlinear_arith)
+            requires
+                bit_index + i * cap < Self::spec_cap(),
+                key < Self::spec_cap(),
+                bit_index == key % T::spec_cap(),
+                Self::spec_cap() == cap * 16,
+                0 <= i < 16,
+                cap > 0,
+                bit_index < cap,
+                cap == T::spec_cap(),
+        ;
+        assert(key == i * cap + bit_index) by (nonlinear_arith)
             requires
                 i == key / T::spec_cap(),
                 bit_index == key % T::spec_cap(),
+                (i * cap + bit_index) / cap == i,
+                (i * cap + bit_index) % cap == bit_index,
+                bit_index + i * cap < Self::spec_cap(),
                 Self::spec_cap() == cap * 16,
                 cap == T::spec_cap(),
                 0 <= i < 16,
@@ -1166,15 +1218,20 @@ impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
         )@[loc2] by {
             let j = loc2 / cap;
             let k = loc2 % cap;
-
-            assert(0 <= k < cap && 0 <= j < 16 && loc2 == j * cap + k) by (nonlinear_arith)
+            assert(0 <= k < cap);
+            assert(0 <= j < 16) by (nonlinear_arith)
+                requires
+                    j == loc2 / cap,
+                    0 <= loc2 < Self::spec_cap() && loc2 != key as int,
+                    Self::spec_cap() == 16 * cap,
+            ;
+            assert(loc2 == j * cap + k) by (nonlinear_arith)
                 requires
                     j == loc2 / cap,
                     k == loc2 % cap,
                     0 <= loc2 < Self::spec_cap() && loc2 != key as int,
                     Self::spec_cap() == 16 * cap,
             ;
-
             assert(self@[j * cap + k] == self.sub[j]@[k]);
             assert(old(self).sub[j]@[k] == self.sub[j]@[k]);
         };
