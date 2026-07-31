@@ -26,7 +26,7 @@ use vstd::prelude::*;
 
 verus! {
 
-use super::hardware::{HardwareRefinement, HardwareSpec};
+use super::hardware::*;
 use super::software::*;
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 use crate::hardware::HardwareInstr;
@@ -2594,8 +2594,8 @@ pub proof fn lemma_iommu_remove_region_machine_trace(
 // 1. `ZonePred::inv(k, v)` holds of every zone lock's resident content
 //    (the `RwLock` re-establishes it on every release).
 // 2. *Shard identities*: a map-sharded token's `(key, value)` pair **is** the
-//    matching entry of the aggregate instance state — for `v.s2map_tok` /
-//    `v.iommu_s2map_tok` (the two `MmuSpec` instances) and
+//    matching entry of the aggregate instance state — for `v.cpu_mmu_tok` /
+//    `v.iommu_mmu_tok` (the two `MmuSpec` instances) and
 //    `v.zone_state.zone_tok` (`BudgetSpec::zones`).  This is the soundness
 //    guarantee of the tokenized-state-machine encoding.
 // 3. [`lemma_zone_pred_synced`] chains 1 + 2 into [`zone_synced`] — one zone's
@@ -2623,8 +2623,8 @@ pub proof fn lemma_iommu_remove_region_machine_trace(
 /// (flattened `MmuSpec.s2map`) equals the matching software-maintained projection.
 /// This is the per-vm lock invariant aggregated over all VMs.
 pub open spec fn specs_synced(hw: HardwareSpec, sw: SoftwareSpec) -> bool {
-    &&& flatten_s2map(hw.mmu.s2map) == state_s2_map(sw.budget)
-    &&& flatten_s2map(hw.smmu.s2map) == state_iommu_s2_map(sw.budget)
+    &&& flatten_vm_s2(hw.mmu.vms) == state_s2_map(sw.budget)
+    &&& flatten_vm_s2(hw.smmu.vms) == state_iommu_s2_map(sw.budget)
 }
 
 /// **Synced specs refine a `wf` machine.** Reachable `HardwareSpec` / `BudgetSpec`
@@ -2648,10 +2648,12 @@ pub proof fn lemma_specs_synced_implies_wf_machine(hw: HardwareSpec, sw: Softwar
 /// both hardware instances' slices for `VmId(zid)` exist and equal the
 /// projections of the zone's ghost memory sets.
 pub open spec fn zone_synced(hw: HardwareSpec, sw: SoftwareSpec, zid: nat) -> bool {
-    &&& hw.mmu.s2map.contains_key(VmId(zid))
-    &&& hw.mmu.s2map[VmId(zid)] == pt_s2map_inner(sw.budget.zones[zid].cpu_mem_set.mappings)
-    &&& hw.smmu.s2map.contains_key(VmId(zid))
-    &&& hw.smmu.s2map[VmId(zid)] == pt_s2map_inner(sw.budget.zones[zid].iommu_mem_set.mappings)
+    &&& hw.mmu.vms.contains_key(VmId(zid))
+    &&& hw.mmu.vms[VmId(zid)].s2map
+        == pt_s2map_inner(sw.budget.zones[zid].cpu_mem_set.mappings)
+    &&& hw.smmu.vms.contains_key(VmId(zid))
+    &&& hw.smmu.vms[VmId(zid)].s2map
+        == pt_s2map_inner(sw.budget.zones[zid].iommu_mem_set.mappings)
 }
 
 /// The system-level sync the implementation maintains: every live zone is
@@ -2660,9 +2662,9 @@ pub open spec fn zone_synced(hw: HardwareSpec, sw: SoftwareSpec, zid: nat) -> bo
 pub open spec fn impl_synced(hw: HardwareSpec, sw: SoftwareSpec) -> bool {
     &&& forall|zid: nat| #[trigger] sw.budget.zone_ids.contains(zid) ==> zone_synced(hw, sw, zid)
     &&& forall|vm: VmId| #[trigger]
-        hw.mmu.s2map.contains_key(vm) ==> sw.budget.zone_ids.contains(vm.0)
+        hw.mmu.vms.contains_key(vm) ==> sw.budget.zone_ids.contains(vm.0)
     &&& forall|vm: VmId| #[trigger]
-        hw.smmu.s2map.contains_key(vm) ==> sw.budget.zone_ids.contains(vm.0)
+        hw.smmu.vms.contains_key(vm) ==> sw.budget.zone_ids.contains(vm.0)
 }
 
 /// A zone lock's invariant and its resident shard identities directly yield
@@ -2677,10 +2679,10 @@ pub proof fn lemma_zone_pred_synced<PT, M, A, I>(
         ZonePred::<PT, M, A, BudgetProtocol, I>::inv(k, v),
         // Shard identities (tokenized-SM guarantee): each lock-resident token's
         // value is the matching entry of its instance's aggregate state.
-        hw.mmu.s2map.contains_key(VmId(k.zone_id as nat)),
-        hw.mmu.s2map[VmId(k.zone_id as nat)] == v.s2map_tok.value(),
-        hw.smmu.s2map.contains_key(VmId(k.zone_id as nat)),
-        hw.smmu.s2map[VmId(k.zone_id as nat)] == v.iommu_s2map_tok.value(),
+        hw.mmu.vms.contains_key(VmId(k.zone_id as nat)),
+        hw.mmu.vms[VmId(k.zone_id as nat)] == v.cpu_mmu_tok.value(),
+        hw.smmu.vms.contains_key(VmId(k.zone_id as nat)),
+        hw.smmu.vms[VmId(k.zone_id as nat)] == v.iommu_mmu_tok.value(),
         sw.budget.zones[k.zone_id as nat] == v.zone_state.ghost_zone(),
     ensures
         zone_synced(hw, sw, k.zone_id as nat),
@@ -2695,8 +2697,8 @@ pub proof fn lemma_impl_synced_specs_synced(hw: HardwareSpec, sw: SoftwareSpec)
     ensures
         specs_synced(hw, sw),
 {
-    assert(flatten_s2map(hw.mmu.s2map) =~= state_s2_map(sw.budget)) by {};
-    assert(flatten_s2map(hw.smmu.s2map) =~= state_iommu_s2_map(sw.budget)) by {};
+    assert(flatten_vm_s2(hw.mmu.vms) =~= state_s2_map(sw.budget)) by {};
+    assert(flatten_vm_s2(hw.smmu.vms) =~= state_iommu_s2_map(sw.budget)) by {};
 }
 
 /// **Implementation states refine a `wf` machine.** The endpoint of the chain:

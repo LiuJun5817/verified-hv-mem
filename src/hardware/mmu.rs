@@ -1,167 +1,60 @@
-//! The concrete stage-2 hardware handle ([`MmuHardware`]) and its asm seams
-//! ([`MmuInstr`] for the CPU MMU, [`SmmuInstr`] for the IOMMU/SMMU).
+//! Executable interfaces for stage-2 translation maintenance.
 //!
-//! # Two regimes, one abstraction, two instances
-//!
-//! The hypervisor drives **two independent stage-2 translation regimes**: the CPU
-//! **MMU** (instruction/data accesses by guests) and the **SMMU** — the IOMMU that
-//! translates device DMA.  In hardware they are genuinely separate structures with
-//! **separate TLBs**: a CPU `TLBI IPAS2E1IS` does not flush the SMMU TLB, and an
-//! SMMU `CMD_TLBI_S2_IPA` does not flush the CPU TLB.  They also walk **separate
-//! page tables** here (each zone keeps a distinct `cpu_mem_set` and
-//! `iommu_mem_set`).
-//!
-//! Both regimes obey the *same* abstract law, so they share the
-//! [`MmuSpec`](crate::hardware::spec) state-machine **type** — but as **two distinct
-//! `Instance`s** with disjoint `s2map`/`tlb`/`vm_ids` tokens.  Concretely the
-//! hypervisor holds two `MmuHardware` values, threaded separately as `mmu` (the CPU
-//! MMU) and `iommu_mmu` (the SMMU); a maintenance call on one cannot touch the
-//! other's tokens.
-//!
-//! # The asm seams are split by regime
-//!
-//! Only the *real instructions* differ between regimes, so the trusted asm seam is
-//! split in two:
-//!
-//! * [`MmuInstr`] — CPU MMU maintenance (`TLBI IPAS2E1IS`, `DSB ISH`);
-//! * [`SmmuInstr`] — SMMU command-queue maintenance (`CMD_TLBI_S2_IPA`, `CMD_SYNC`).
-//!
-//! [`HardwareInstr`] is just the combined marker (`MmuInstr + SmmuInstr`) a single
-//! platform backend (e.g. `Aarch64Hw`) implements.  Each method wraps a real
-//! instruction in `#[verifier::external_body]` asm and carries no abstract state.
-//! [`MmuHardware<I>`] owns one regime's `MmuSpec` instance and its global
-//! `tlb`/`vm_ids` tokens; its CPU methods ([`MmuHardware::unmap_dsb_tlbi`],
-//! [`MmuHardware::map_dsb`]) emit `MmuInstr` asm and its SMMU methods
-//! ([`MmuHardware::iommu_unmap_invalidate`], [`MmuHardware::iommu_map_sync`]) emit
-//! `SmmuInstr` asm — each pairing the instructions with the matching ghost
-//! transition, so the asm and the transition firing sit behind one trust boundary.
-//!
-//! # Why the `Instance` is private — the forcing
-//!
-//! A `tokenized_state_machine!` transition is a `proof fn` on the `Instance`: any
-//! code that can name an `MmuSpec::Instance` could fire it in ghost code with no
-//! real instruction.  The forcing rests on keeping the instance out of
-//! implementation hands: `MmuHardware`'s fields are **private** and never handed
-//! out, so only this module's methods fire transitions.  `MemorySet::remove` holds
-//! an `&mut MmuHardware` and can *call* [`MmuHardware::unmap_dsb_tlbi`], but cannot
-//! fire `unmap`/`invalidate` itself.  And `unmap_dsb_tlbi`'s postcondition is
-//! unprovable unless its real `DSB`+`TLBI` actually run, since only they advance
-//! the encapsulated tokens.
-use crate::hardware::spec::{MmuInstance, MmuS2MapToken, MmuSpec, MmuTlbToken, MmuVmIdsToken};
+//! [`MmuInstr`] describes CPU MMU operations and [`SmmuInstr`] describes IOMMU
+//! operations. [`MmuHardware`] combines those operations with transitions of one
+//! private [`MmuSpec`](crate::hardware::spec::MmuSpec) instance. `HvMem` creates
+//! separate `MmuHardware` values for the CPU and IOMMU regimes.
+use crate::hardware::spec::{MmuInstance, MmuSpec, MmuVmIdsToken, MmuVmState, MmuVmToken};
 use crate::model::types::{GuestPage, S2Entry, VmId};
 use core::marker::PhantomData;
 use vstd::prelude::*;
 
 verus! {
 
-/// Executable zone-ID encoding shared by a platform's CPU-MMU and SMMU backends.
+/// Zone-ID constraint shared by the CPU and IOMMU backends.
 pub trait ZoneIdInstr {
-    /// Whether `zone_id` can be represented by this backend's executable VMID encoding.
+    /// Whether the backend can represent `zone_id`.
     spec fn valid_zone_id(zone_id: usize) -> bool;
 }
 
-/// Trusted **CPU MMU** stage-2 maintenance instructions.
-///
-/// Each method is an exec `fn` that can appear in hypervisor code. Platform
-/// implementations provide `#[verifier::external_body]` bodies containing the actual
-/// `asm!` instructions, citing the architecture reference manual for correctness.
-/// These drive the **CPU MMU** regime only; the SMMU analogs live in [`SmmuInstr`].
+/// CPU stage-2 maintenance operations supplied by a platform backend.
 pub trait MmuInstr: ZoneIdInstr {
-    // ------------------------------------------------------------------
-    // S2 TLB invalidation broadcast
-    // ------------------------------------------------------------------
-    /// Broadcast and complete a CPU stage-2 TLB invalidation for the IPA
-    /// `(vm, gpa)` across every PE in the inner-shareable domain.
-    ///
-    /// On AArch64 this is `TLBI IPAS2E1IS, Xt` followed by the completion
-    /// `DSB ISH`.  `IPAS2E1IS` is inner-shareable, so the invalidation is a
-    /// broadcast over every PE in that domain and takes no per-CPU argument; the
-    /// trailing `DSB ISH` is part of this method because the model-level invalidate
-    /// transition is synchronous.  This flushes only the **CPU** TLB — the SMMU TLB
-    /// is unaffected (use [`SmmuInstr::issue_smmu_tlbi_s2`]).
-    ///
-    /// `IPAS2E1IS` is a **register-form** maintenance op: the target IPA travels in
-    /// `Xt` as `Xt[..] = IPA >> 12`, which for the model's 4K pages is exactly the
-    /// guest page number — hence the real `usize` operand `ipa_page`. The backend
-    /// uses `zone_id` to select the VMID in `VTTBR_EL2`; both executable operands
-    /// are also the sources of the abstract transition's VM and guest page.
+    /// Invalidate one CPU stage-2 IPA for `zone_id` and wait for completion.
+    /// `ipa_page` is the 4 KiB guest page number (`IPA >> 12`).
     fn issue_tlbi_s2_sync(zone_id: usize, ipa_page: usize)
         requires
             Self::valid_zone_id(zone_id),
     ;
 
-    // ------------------------------------------------------------------
-    // Data Synchronization Barrier (DSB ISH)
-    // ------------------------------------------------------------------
-    /// Issue a Data Synchronization Barrier in the inner-shareable domain.
-    ///
-    /// On AArch64: `DSB ISH`.  Before a TLBI, this makes prior page-table writes
-    /// visible to walkers; after a TLBI, it waits for the invalidation to complete
-    /// on every PE in the domain.
+    /// Issue the CPU-side synchronization operation used after page-table writes.
     fn issue_dsb_ish();
 }
 
-/// Trusted **IOMMU (SMMU)** stage-2 maintenance instructions.
-///
-/// The device-side counterpart of [`MmuInstr`]: same abstract effect (stage-2
-/// invalidation + completion), but the SMMU is an MMIO command-queue device, so the
-/// "instructions" are command-queue writes rather than CPU `TLBI`/`DSB`.  Driving
-/// the SMMU regime never touches the CPU MMU's TLB, and vice versa.
+/// IOMMU stage-2 maintenance operations supplied by a platform backend.
 pub trait SmmuInstr: ZoneIdInstr {
-    // ------------------------------------------------------------------
-    // SMMU stage-2 IPA invalidation
-    // ------------------------------------------------------------------
-    /// Invalidate the SMMU stage-2 TLB for the IPA `(stream, gpa)`.
-    ///
-    /// On Arm SMMUv3 this is a `CMD_TLBI_S2_IPA` command enqueued on the command
-    /// queue (the IPA travels as `Addr = IPA >> 12`, the 4K guest page number; the
-    /// VMID comes from the device's STE/CD).  Unlike the CPU `TLBI`, the SMMU is an
-    /// MMIO device, so the "instruction" is a command-queue write; it must be
-    /// followed by [`issue_smmu_sync`](Self::issue_smmu_sync) before the new
-    /// translation may be relied on.  Flushes only the **SMMU** TLB.
+    /// Submit an IOMMU invalidation for one VM and guest page.
     fn issue_smmu_tlbi_s2(zone_id: usize, ipa_page: usize)
         requires
             Self::valid_zone_id(zone_id),
     ;
 
-    // ------------------------------------------------------------------
-    // SMMU command-queue synchronization (CMD_SYNC)
-    // ------------------------------------------------------------------
-    /// SMMU command-queue synchronization barrier (`CMD_SYNC`).
-    ///
-    /// Completes all preceding command-queue commands — the SMMU analog of the CPU
-    /// `DSB ISH` for stage-2 maintenance.  After it returns, the preceding
-    /// `CMD_TLBI_S2_IPA` (or a fresh stage-2 PTE) is guaranteed observed by the SMMU.
+    /// Wait for previously submitted IOMMU maintenance commands.
     fn issue_smmu_sync();
 }
 
-/// Combined platform seam: a single backend that drives **both** stage-2 regimes —
-/// the CPU MMU ([`MmuInstr`]) and the SMMU ([`SmmuInstr`]).  It is only a marker, so
-/// every `I: HardwareInstr` bound (in `MemorySet`, `Zone`, `HvMem`, …) keeps working
-/// while the actual instructions are cleanly partitioned into the two regime traits.
+/// A platform backend that implements both maintenance interfaces.
 pub trait HardwareInstr: MmuInstr + SmmuInstr {
 
 }
 
-/// Concrete stage-2 hardware handle for **one regime** — the owner of that
-/// regime's `MmuSpec` instance and its global `tlb`/`vm_ids` tokens.  The
-/// hypervisor builds two of these: one for the CPU MMU (threaded as `mmu`) and one
-/// for the SMMU/IOMMU (threaded as `iommu_mmu`).  They are distinct instances with
-/// disjoint tokens, so a CPU invalidation can never advance the SMMU's TLB token
-/// and vice versa.
+/// Concrete stage-2 hardware handle for one regime.
 ///
-/// An **exec** struct carrying `Tracked` fields, so it threads through exec code
-/// (`MemorySet::remove`) as `&mut MmuHardware<I>` while its methods drive both the
-/// real instructions and the ghost transitions.  Its CPU methods emit [`MmuInstr`]
-/// asm; its SMMU methods emit [`SmmuInstr`] asm.
+/// It owns one private state-machine instance. `HvMem` holds the VM registry token,
+/// and each `Zone` holds its CPU or IOMMU VM token. The instance has no executable
+/// mutable state, so operations use a shared reference to the handle.
 pub struct MmuHardware<I> where I: HardwareInstr {
-    /// PRIVATE — the instance handle.  Never handed out (see module docs): this
-    /// is what keeps transitions un-fireable by ordinary token-holding code.
+    /// State-machine instance used by this hardware regime.
     instance: Tracked<MmuInstance>,
-    /// PRIVATE — the live-vm mirror token, updated by `add_vm` and `remove_vm`.
-    vm_ids: Tracked<MmuVmIdsToken>,
-    /// PRIVATE — the single global TLB token (variable-sharded).
-    tlb: Tracked<MmuTlbToken>,
     /// Phantom type parameter for the platform-specific instruction implementation.
     _phantom: PhantomData<I>,
 }
@@ -172,232 +65,229 @@ impl<I: HardwareInstr> MmuHardware<I> {
         self.instance@.id()
     }
 
-    /// The set of live vms (the `vm_ids` mirror).
-    pub closed spec fn live_vms(&self) -> Set<VmId> {
-        self.vm_ids@.value()
-    }
-
-    /// The encapsulated `tlb`/`vm_ids` tokens belong to this handle's instance.
-    /// (`s2map` is *not* here — its per-vm slices live in the zone locks; only the
-    /// instance + global `tlb` + the `vm_ids` mirror are encapsulated here.  Full
-    /// `tlb_coherent` is the `MmuSpec` invariant, so it never needs threading.)
+    /// The handle has no mutable shard: well-formedness is structural.
     pub closed spec fn wf(&self) -> bool {
-        &&& self.tlb@.instance_id() == self.instance@.id()
-        &&& self.vm_ids@.instance_id() == self.instance@.id()
+        true
     }
 
-    /// Create a new `MmuHardware`.
-    pub fn new() -> (res: Self)
+    /// Create a persistent MMU instance and return its empty VM registry token.
+    pub fn new() -> (res: (Self, Tracked<MmuVmIdsToken>))
         ensures
-            res.live_vms() =~= Set::<VmId>::empty(),
-            res.wf(),
+            res.0.wf(),
+            res.1@.instance_id() == res.0.inst_id(),
+            res.1@.value() =~= Set::<VmId>::empty(),
     {
-        let tracked (Tracked(inst), Tracked(s2map_tok), Tracked(vm_ids_tok), Tracked(tlb_tok)) =
+        let tracked (Tracked(inst), Tracked(vm_ids_tok), Tracked(_vms_tok)) =
             MmuSpec::Instance::initialize();
-        MmuHardware {
-            instance: Tracked(inst),
-            vm_ids: Tracked(vm_ids_tok),
-            tlb: Tracked(tlb_tok),
-            _phantom: PhantomData,
-        }
+        (
+            MmuHardware { instance: Tracked(inst), _phantom: PhantomData },
+            Tracked(vm_ids_tok),
+        )
     }
 
-    /// Register a fresh vm: fires `add_vm`, **minting** that zone's `s2map` slice
-    /// token (empty), which the caller stores in the new zone's lock.
-    pub fn add_vm(&mut self, zone_id: usize) -> (res: Tracked<MmuS2MapToken>)
+    /// Register a fresh VM and mint its empty compound shard token.
+    pub proof fn add_vm(
+        tracked &self,
+        zone_id: usize,
+        tracked registry: &mut MmuVmIdsToken,
+    ) -> (tracked res: MmuVmToken)
         requires
-            old(self).wf(),
+            self.wf(),
             I::valid_zone_id(zone_id),
-            !old(self).live_vms().contains(VmId(zone_id as nat)),
+            old(registry).instance_id() == self.inst_id(),
+            !old(registry).value().contains(VmId(zone_id as nat)),
         ensures
             self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            self.live_vms() == old(self).live_vms().insert(VmId(zone_id as nat)),
-            res@.instance_id() == self.inst_id(),
-            res@.key() == VmId(zone_id as nat),
-            res@.value() == Map::<GuestPage, S2Entry>::empty(),
+            registry.instance_id() == self.inst_id(),
+            registry.value() == old(registry).value().insert(VmId(zone_id as nat)),
+            res.instance_id() == self.inst_id(),
+            res.key() == VmId(zone_id as nat),
+            res.value() == MmuVmState::empty(),
+            res.value().coherent(VmId(zone_id as nat)),
     {
-        let tracked new_tok = self.instance.borrow().add_vm(
-            VmId(zone_id as nat),
-            self.vm_ids.borrow_mut(),
-        );
-        Tracked(new_tok)
+        let tracked new_tok =
+            self.instance.borrow().add_vm(VmId(zone_id as nat), registry);
+        new_tok
     }
 
-    /// Deregister a vm after all of its walker-reachable mappings have been removed.
-    /// The empty slice has no coherent TLB entries, so no hardware invalidation is
-    /// needed at this lifecycle boundary.
-    pub fn remove_vm(&mut self, zone_id: usize, s2_tok: Tracked<MmuS2MapToken>)
+    /// Deregister a VM after both components of its shard are empty.
+    pub proof fn remove_vm(
+        tracked &self,
+        zone_id: usize,
+        tracked registry: &mut MmuVmIdsToken,
+        tracked vm_tok: MmuVmToken,
+    )
         requires
-            old(self).wf(),
+            self.wf(),
             I::valid_zone_id(zone_id),
-            old(self).live_vms().contains(VmId(zone_id as nat)),
-            s2_tok@.instance_id() == old(self).inst_id(),
-            s2_tok@.key() == VmId(zone_id as nat),
-            s2_tok@.value() == Map::<GuestPage, S2Entry>::empty(),
+            old(registry).instance_id() == self.inst_id(),
+            old(registry).value().contains(VmId(zone_id as nat)),
+            vm_tok.instance_id() == self.inst_id(),
+            vm_tok.key() == VmId(zone_id as nat),
+            vm_tok.value().s2map == Map::<GuestPage, S2Entry>::empty(),
+            vm_tok.value().coherent(VmId(zone_id as nat)),
         ensures
             self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            self.live_vms() == old(self).live_vms().remove(VmId(zone_id as nat)),
+            registry.instance_id() == self.inst_id(),
+            registry.value() == old(registry).value().remove(VmId(zone_id as nat)),
     {
-        let tracked s2 = s2_tok.get();
-        proof {
-            self.instance.borrow().remove_vm(VmId(zone_id as nat), s2, self.vm_ids.borrow_mut());
-        }
+        assert(vm_tok.value().tlb =~= Map::<crate::model::types::TlbKey, crate::model::types::TlbEntry>::empty()) by {
+            assert forall|key: crate::model::types::TlbKey|
+                !vm_tok.value().tlb.contains_key(key) by {
+                if vm_tok.value().tlb.contains_key(key) {
+                    assert(vm_tok.value().s2map.contains_key(key.gpa));
+                }
+            }
+        };
+        assert(vm_tok.value() == MmuVmState::empty());
+        self.instance.borrow().remove_vm(VmId(zone_id as nat), registry, vm_tok);
     }
 
-    // ── CPU MMU stage-2 maintenance ─────────────────────────────────────────────
-    // Emit `MmuInstr` asm (`DSB ISH` / `TLBI IPAS2E1IS`) and run on the CPU MMU
-    // instance.  The SMMU counterparts are further below.
-    /// One per-page break-before-make step: the caller has written the PTE invalid;
-    /// this issues the pre-TLBI `DSB ISH` (drops `(vm, gpa)` from the vm's slice)
-    /// and the completed `TLBI IPAS2E1IS` broadcast (clears the page's cached
-    /// entries) — together, firing the bundled `unmap_invalidate`.  Consumes the
-    /// vm's slice token and returns it with the page removed; `tlb_coherent` is
-    /// preserved by the `MmuSpec` invariant, so it is not part of this contract.
-    ///
-    /// `ipa_page` is the real operand (`IPA >> 12`); the spec page is **derived**
-    /// from it, so the asm and the ghost transition target the same page.
+    // ── CPU MMU operations ───────────────────────────────────────────────────────
+    /// Synchronize a removed CPU mapping, invalidate its IPA, and update the VM
+    /// token. `ipa_page` is the 4 KiB guest page number.
     pub fn unmap_dsb_tlbi(
-        &mut self,
-        s2_tok: Tracked<MmuS2MapToken>,
+        &self,
+        vm_tok: Tracked<MmuVmToken>,
         ipa_page: usize,
         zone_id: usize,
-    ) -> (res: Tracked<MmuS2MapToken>)
+    ) -> (res: Tracked<MmuVmToken>)
         requires
-            old(self).wf(),
+            self.wf(),
             I::valid_zone_id(zone_id),
-            s2_tok@.instance_id() == old(self).inst_id(),
-            s2_tok@.key() == VmId(zone_id as nat),
+            vm_tok@.instance_id() == self.inst_id(),
+            vm_tok@.key() == VmId(zone_id as nat),
+            vm_tok@.value().coherent(VmId(zone_id as nat)),
         ensures
             self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            self.live_vms() == old(self).live_vms(),
             res@.instance_id() == self.inst_id(),
             res@.key() == VmId(zone_id as nat),
-            res@.value() == s2_tok@.value().remove(GuestPage(ipa_page as nat)),
+            res@.value().s2map
+                == vm_tok@.value().s2map.remove(GuestPage(ipa_page as nat)),
+            res@.value().tlb == vm_tok@.value().tlb.remove_keys(
+                crate::hardware::spec::invalidation_targets(
+                    VmId(zone_id as nat), GuestPage(ipa_page as nat),
+                ),
+            ),
+            res@.value().coherent(VmId(zone_id as nat)),
     {
         let ghost gpa = GuestPage(ipa_page as nat);
-        let tracked s2 = s2_tok.get();
+        let tracked vm_state = vm_tok.get();
         I::issue_dsb_ish();
         I::issue_tlbi_s2_sync(zone_id, ipa_page);
         let tracked new_tok = self.instance.borrow().unmap_invalidate(
             VmId(zone_id as nat),
             gpa,
-            s2,
-            self.tlb.borrow_mut(),
+            vm_state,
         );
         Tracked(new_tok)
     }
 
-    /// Map side of break-before-make: the caller has written a *fresh* PTE; this
-    /// issues the `DSB ISH` that makes it walker-reachable, firing `map` (adds
-    /// `(gpa => entry)` to the vm's slice).  No `TLBI` — by the `MmuSpec` invariant a
-    /// page absent from the slice has no cached entry.  Consumes the vm's slice token
-    /// (with the page absent) and returns it with the page inserted.
+    /// Synchronize a new CPU mapping and add it to the VM token.
     pub fn map_dsb(
-        &mut self,
-        s2_tok: Tracked<MmuS2MapToken>,
+        &self,
+        vm_tok: Tracked<MmuVmToken>,
         ipa_page: usize,
         zone_id: usize,
         entry: Ghost<S2Entry>,
-    ) -> (res: Tracked<MmuS2MapToken>)
+    ) -> (res: Tracked<MmuVmToken>)
         requires
-            old(self).wf(),
+            self.wf(),
             I::valid_zone_id(zone_id),
-            s2_tok@.instance_id() == old(self).inst_id(),
-            s2_tok@.key() == VmId(zone_id as nat),
-            !s2_tok@.value().contains_key(GuestPage(ipa_page as nat)),
+            vm_tok@.instance_id() == self.inst_id(),
+            vm_tok@.key() == VmId(zone_id as nat),
+            !vm_tok@.value().s2map.contains_key(GuestPage(ipa_page as nat)),
+            vm_tok@.value().coherent(VmId(zone_id as nat)),
         ensures
             self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            self.live_vms() == old(self).live_vms(),
             res@.instance_id() == self.inst_id(),
             res@.key() == VmId(zone_id as nat),
-            res@.value() == s2_tok@.value().insert(GuestPage(ipa_page as nat), entry@),
+            res@.value().s2map == vm_tok@.value().s2map.insert(
+                GuestPage(ipa_page as nat), entry@,
+            ),
+            res@.value().tlb == vm_tok@.value().tlb,
+            res@.value().coherent(VmId(zone_id as nat)),
     {
         let ghost gpa = GuestPage(ipa_page as nat);
-        let tracked s2 = s2_tok.get();
+        let tracked vm_state = vm_tok.get();
         I::issue_dsb_ish();
-        let tracked new_tok = self.instance.borrow().map(VmId(zone_id as nat), gpa, entry@, s2);
+        let tracked new_tok = self.instance.borrow().map(
+            VmId(zone_id as nat), gpa, entry@, vm_state,
+        );
         Tracked(new_tok)
     }
 
-    // ── SMMU (IOMMU) stage-2 maintenance ────────────────────────────────────────
-    // The device-side counterparts of the CPU methods above.  Same ghost transitions
-    // (the `MmuSpec` model is regime-agnostic), but they emit `SmmuInstr` command-
-    // queue asm instead of CPU `DSB`/`TLBI`, and run on the separate `iommu_mmu`
-    // instance — so their tokens never alias the CPU MMU's.
-    /// SMMU counterpart of [`unmap_dsb_tlbi`](Self::unmap_dsb_tlbi): one per-page
-    /// break-before-make unmap on the IOMMU regime.
-    ///
-    /// Issues the SMMU stage-2 invalidation (`CMD_TLBI_S2_IPA`) and the command-queue
-    /// completion barrier (`CMD_SYNC`) — *not* a CPU `DSB`/`TLBI` — firing the same
-    /// abstract `unmap_invalidate` transition on this (IOMMU) instance's tokens.
+    // ── IOMMU operations ─────────────────────────────────────────────────────────
+    /// Submit and complete an IOMMU invalidation, then remove the mapping and its
+    /// cached entries from the VM token.
     pub fn iommu_unmap_invalidate(
-        &mut self,
-        s2_tok: Tracked<MmuS2MapToken>,
+        &self,
+        vm_tok: Tracked<MmuVmToken>,
         ipa_page: usize,
         zone_id: usize,
-    ) -> (res: Tracked<MmuS2MapToken>)
+    ) -> (res: Tracked<MmuVmToken>)
         requires
-            old(self).wf(),
+            self.wf(),
             I::valid_zone_id(zone_id),
-            s2_tok@.instance_id() == old(self).inst_id(),
-            s2_tok@.key() == VmId(zone_id as nat),
+            vm_tok@.instance_id() == self.inst_id(),
+            vm_tok@.key() == VmId(zone_id as nat),
+            vm_tok@.value().coherent(VmId(zone_id as nat)),
         ensures
             self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            self.live_vms() == old(self).live_vms(),
             res@.instance_id() == self.inst_id(),
             res@.key() == VmId(zone_id as nat),
-            res@.value() == s2_tok@.value().remove(GuestPage(ipa_page as nat)),
+            res@.value().s2map
+                == vm_tok@.value().s2map.remove(GuestPage(ipa_page as nat)),
+            res@.value().tlb == vm_tok@.value().tlb.remove_keys(
+                crate::hardware::spec::invalidation_targets(
+                    VmId(zone_id as nat), GuestPage(ipa_page as nat),
+                ),
+            ),
+            res@.value().coherent(VmId(zone_id as nat)),
     {
         let ghost gpa = GuestPage(ipa_page as nat);
-        let tracked s2 = s2_tok.get();
+        let tracked vm_state = vm_tok.get();
         I::issue_smmu_tlbi_s2(zone_id, ipa_page);
         I::issue_smmu_sync();
         let tracked new_tok = self.instance.borrow().unmap_invalidate(
             VmId(zone_id as nat),
             gpa,
-            s2,
-            self.tlb.borrow_mut(),
+            vm_state,
         );
         Tracked(new_tok)
     }
 
-    /// SMMU counterpart of [`map_dsb`](Self::map_dsb): the map-side break-before-make
-    /// completion on the IOMMU regime.
-    ///
-    /// Issues the SMMU command-queue completion barrier (`CMD_SYNC`) so the freshly
-    /// written stage-2 PTE is observed by the SMMU, firing the same abstract `map`
-    /// transition.  No invalidation — by the `MmuSpec` invariant an absent page has
-    /// no cached entry.
+    /// Synchronize a new IOMMU mapping and add it to the VM token.
     pub fn iommu_map_sync(
-        &mut self,
-        s2_tok: Tracked<MmuS2MapToken>,
+        &self,
+        vm_tok: Tracked<MmuVmToken>,
         ipa_page: usize,
         zone_id: usize,
         entry: Ghost<S2Entry>,
-    ) -> (res: Tracked<MmuS2MapToken>)
+    ) -> (res: Tracked<MmuVmToken>)
         requires
-            old(self).wf(),
+            self.wf(),
             I::valid_zone_id(zone_id),
-            s2_tok@.instance_id() == old(self).inst_id(),
-            s2_tok@.key() == VmId(zone_id as nat),
-            !s2_tok@.value().contains_key(GuestPage(ipa_page as nat)),
+            vm_tok@.instance_id() == self.inst_id(),
+            vm_tok@.key() == VmId(zone_id as nat),
+            !vm_tok@.value().s2map.contains_key(GuestPage(ipa_page as nat)),
+            vm_tok@.value().coherent(VmId(zone_id as nat)),
         ensures
             self.wf(),
-            self.inst_id() == old(self).inst_id(),
-            self.live_vms() == old(self).live_vms(),
             res@.instance_id() == self.inst_id(),
             res@.key() == VmId(zone_id as nat),
-            res@.value() == s2_tok@.value().insert(GuestPage(ipa_page as nat), entry@),
+            res@.value().s2map == vm_tok@.value().s2map.insert(
+                GuestPage(ipa_page as nat), entry@,
+            ),
+            res@.value().tlb == vm_tok@.value().tlb,
+            res@.value().coherent(VmId(zone_id as nat)),
     {
         let ghost gpa = GuestPage(ipa_page as nat);
-        let tracked s2 = s2_tok.get();
+        let tracked vm_state = vm_tok.get();
         I::issue_smmu_sync();
-        let tracked new_tok = self.instance.borrow().map(VmId(zone_id as nat), gpa, entry@, s2);
+        let tracked new_tok = self.instance.borrow().map(
+            VmId(zone_id as nat), gpa, entry@, vm_state,
+        );
         Tracked(new_tok)
     }
 }

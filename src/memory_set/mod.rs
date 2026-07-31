@@ -10,12 +10,13 @@ use crate::{
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     constants::*,
     global_allocator::GlobalAllocator,
-    hardware::spec::MmuS2MapToken,
+    hardware::spec::MmuVmToken,
     hardware::{HardwareInstr, MmuHardware},
     model::types::VmId,
     page_table::{PTConstants, PageTable, SpecPTConstants},
 };
 use vstd::prelude::*;
+pub use vec::VecMemorySet;
 
 mod vec;
 
@@ -384,10 +385,10 @@ pub trait MemorySet<PT, A, I> where
         allocator: &GlobalAllocator<A>,
         region: MemoryRegion,
         zone_id: usize,
-        mmu: &mut MmuHardware<I>,
-        s2_tok: Tracked<MmuS2MapToken>,
+        mmu: &MmuHardware<I>,
+        s2_tok: Tracked<MmuVmToken>,
         iommu: bool,
-    ) -> (res: Tracked<MmuS2MapToken>)
+    ) -> (res: Tracked<MmuVmToken>)
         requires
             old(self).invariants(),
             allocator.invariants(),
@@ -395,22 +396,22 @@ pub trait MemorySet<PT, A, I> where
             region.spec_valid(),
             region.spec_within_vspace(old(self).pt_constants().arch.vspace_size()),
             !old(self)@.overlaps_vmem(region),
-            old(mmu).wf(),
+            mmu.wf(),
             I::valid_zone_id(zone_id),
-            s2_tok@.instance_id() == old(mmu).inst_id(),
+            s2_tok@.instance_id() == mmu.inst_id(),
             s2_tok@.key() == VmId(zone_id as nat),
-            s2_tok@.value() == pt_s2map_inner(old(self)@.mappings),
+            s2_tok@.value().s2map == pt_s2map_inner(old(self)@.mappings),
+            s2_tok@.value().coherent(VmId(zone_id as nat)),
         ensures
             self.inst_id() == old(self).inst_id(),
             self.pt_constants() == old(self).pt_constants(),
             self@ == old(self)@.insert_region(region),
             self.invariants(),
             mmu.wf(),
-            mmu.inst_id() == old(mmu).inst_id(),
-            mmu.live_vms() == old(mmu).live_vms(),
             res@.instance_id() == mmu.inst_id(),
             res@.key() == VmId(zone_id as nat),
-            res@.value() == pt_s2map_inner(self@.mappings),
+            res@.value().s2map == pt_s2map_inner(self@.mappings),
+            res@.value().coherent(VmId(zone_id as nat)),
     ;
 
     /// Remove a memory region by its starting virtual address, **forcing a per-page
@@ -425,31 +426,31 @@ pub trait MemorySet<PT, A, I> where
         allocator: &GlobalAllocator<A>,
         start: VAddr,
         zone_id: usize,
-        mmu: &mut MmuHardware<I>,
-        s2_tok: Tracked<MmuS2MapToken>,
+        mmu: &MmuHardware<I>,
+        s2_tok: Tracked<MmuVmToken>,
         iommu: bool,
-    ) -> (res: Tracked<MmuS2MapToken>)
+    ) -> (res: Tracked<MmuVmToken>)
         requires
             old(self).invariants(),
             allocator.invariants(),
             old(self).inst_id() == allocator.inst_id(),
             old(self)@.has_region_starting_at(start@),
-            old(mmu).wf(),
+            mmu.wf(),
             I::valid_zone_id(zone_id),
-            s2_tok@.instance_id() == old(mmu).inst_id(),
+            s2_tok@.instance_id() == mmu.inst_id(),
             s2_tok@.key() == VmId(zone_id as nat),
-            s2_tok@.value() == pt_s2map_inner(old(self)@.mappings),
+            s2_tok@.value().s2map == pt_s2map_inner(old(self)@.mappings),
+            s2_tok@.value().coherent(VmId(zone_id as nat)),
         ensures
             self.inst_id() == old(self).inst_id(),
             self.pt_constants() == old(self).pt_constants(),
             self@ == old(self)@.remove_region(start@),
             self.invariants(),
             mmu.wf(),
-            mmu.inst_id() == old(mmu).inst_id(),
-            mmu.live_vms() == old(mmu).live_vms(),
             res@.instance_id() == mmu.inst_id(),
             res@.key() == VmId(zone_id as nat),
-            res@.value() == pt_s2map_inner(self@.mappings),
+            res@.value().s2map == pt_s2map_inner(self@.mappings),
+            res@.value().coherent(VmId(zone_id as nat)),
     ;
 
     /// Lemma. The invariants imply the well-formedness of the memory set.

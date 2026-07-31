@@ -19,7 +19,7 @@ use crate::address::{
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 use crate::constants::*;
 use crate::global_allocator::GlobalAllocator;
-use crate::hardware::spec::MmuS2MapToken;
+use crate::hardware::spec::MmuVmToken;
 use crate::hardware::{HardwareInstr, MmuHardware};
 use crate::model::types::{VmId, VmPageKey};
 use crate::page_table::{PTConstants, PageTable, SpecPTConstants};
@@ -238,10 +238,10 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         allocator: &GlobalAllocator<A>,
         region: MemoryRegion,
         zone_id: usize,
-        mmu: &mut MmuHardware<I>,
-        s2_tok: Tracked<MmuS2MapToken>,
+        mmu: &MmuHardware<I>,
+        s2_tok: Tracked<MmuVmToken>,
         iommu: bool,
-    ) -> (res: Tracked<MmuS2MapToken>) {
+    ) -> (res: Tracked<MmuVmToken>) {
         let mut s2 = s2_tok;
         // New region does not overlap with old regions
         assert(forall|j: int|
@@ -304,12 +304,11 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                         )),
                 // MMU forcing: the vm's `s2map` slice tracks the (growing) mappings.
                 mmu.wf(),
-                mmu.inst_id() == old(mmu).inst_id(),
-                mmu.live_vms() == old(mmu).live_vms(),
                 I::valid_zone_id(zone_id),
                 s2@.instance_id() == mmu.inst_id(),
                 s2@.key() == VmId(zone_id as nat),
-                s2@.value() == pt_s2map_inner(self.pt@.mappings),
+                s2@.value().s2map == pt_s2map_inner(self.pt@.mappings),
+                s2@.value().coherent(VmId(zone_id as nat)),
             decreases region.pages - i,
         {
             let vbase = VAddr(region.vstart.0 + i * PAGE_SIZE);
@@ -540,10 +539,10 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         allocator: &GlobalAllocator<A>,
         start: VAddr,
         zone_id: usize,
-        mmu: &mut MmuHardware<I>,
-        s2_tok: Tracked<MmuS2MapToken>,
+        mmu: &MmuHardware<I>,
+        s2_tok: Tracked<MmuVmToken>,
         iommu: bool,
-    ) -> (res: Tracked<MmuS2MapToken>) {
+    ) -> (res: Tracked<MmuVmToken>) {
         let mut s2 = s2_tok;
         let len = self.regions.len();
         let mut i = 0;
@@ -632,12 +631,11 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 // MMU forcing: the vm's slice token tracks the (shrinking) mappings
                 // as each page is unmapped + flushed.
                 mmu.wf(),
-                mmu.inst_id() == old(mmu).inst_id(),
-                mmu.live_vms() == old(mmu).live_vms(),
                 I::valid_zone_id(zone_id),
                 s2@.instance_id() == mmu.inst_id(),
                 s2@.key() == VmId(zone_id as nat),
-                s2@.value() == pt_s2map_inner(self.pt@.mappings),
+                s2@.value().s2map == pt_s2map_inner(self.pt@.mappings),
+                s2@.value().coherent(VmId(zone_id as nat)),
             decreases region.pages - i,
         {
             let vaddr = VAddr(region.vstart.0 + i * PAGE_SIZE);

@@ -1,40 +1,20 @@
-//! AArch64 realization of the stage-2 maintenance trust contract — both regimes:
-//! the CPU MMU ([`MmuInstr`]) and the SMMU/IOMMU ([`SmmuInstr`]), combined under
-//! [`HardwareInstr`].
+//! AArch64 implementation of the CPU and IOMMU maintenance interfaces.
 //!
-//! Each method wraps a real maintenance / barrier instruction in an
-//! `#[verifier::external_body]` exec `fn` containing the `asm!`.  These bodies are
-//! the trusted seam between running code and the MMU state machine: `MmuHardware`
-//! pairs each instruction with the ghost transition it realizes.
-//!
-//! ## Trust boundary
-//!
-//! The `asm!` strings are trusted against the Arm Architecture Reference Manual,
-//! not proved against a formal ISA model.  `TLBI IPAS2E1IS` is a register-form op,
-//! so it takes a **real** `usize` operand `ipa_page` (the IPA `>> 12`, i.e. the
-//! guest page number); `MmuHardware::unmap_dsb_tlbi` derives the spec page from it.
-//! The CPU invalidation seam includes the completion `DSB ISH`, matching the
-//! model's synchronous invalidate transition. The helper temporarily selects the
-//! requested executable zone ID in `VTTBR_EL2`, then restores the prior context.
-//!
-//! The SMMU command-queue methods ([`SmmuInstr`]) are currently placeholder bodies
-//! (`dsb ish`): the real `CMD_TLBI_S2_IPA`/`CMD_SYNC` command-queue MMIO writes
-//! depend on the platform's SMMU base address (configuration), so they are a
-//! documented trusted seam to be filled in per platform.
+//! The CPU methods execute AArch64 system instructions. The IOMMU methods are
+//! placeholders that currently execute only `dsb ish`; SMMUv3 command-queue MMIO
+//! support will replace them when the platform configuration is available.
 use super::mmu::{HardwareInstr, MmuInstr, SmmuInstr, ZoneIdInstr};
 use core::arch::asm;
 use vstd::prelude::*;
 
 verus! {
 
-/// Zero-sized AArch64 backend that `MmuHardware` is parameterized over.  It
-/// implements both regime seams — [`MmuInstr`] (CPU MMU) and [`SmmuInstr`] (SMMU) —
-/// and so satisfies the combined [`HardwareInstr`] marker.
+/// Zero-sized backend used as the instruction type of `MmuHardware`.
 pub struct Aarch64Hw;
 
 impl ZoneIdInstr for Aarch64Hw {
     open spec fn valid_zone_id(zone_id: usize) -> bool {
-        // Jailhouse's scoped VTCR configuration uses the architectural 8-bit VMID format.
+        // Jailhouse uses the architectural 8-bit VMID format.
         zone_id < 0x100
     }
 }
@@ -42,12 +22,8 @@ impl ZoneIdInstr for Aarch64Hw {
 impl MmuInstr for Aarch64Hw {
     #[verifier::external_body]
     fn issue_tlbi_s2_sync(zone_id: usize, ipa_page: usize) {
-        // Broadcast and complete a CPU stage-2 IPA invalidation across the
-        // inner-shareable domain.
-        // `IPAS2E1IS` requires a register operand: Xt holds IPA >> 12 = the 4K
-        // guest page number.  One instruction removes every cached `(*, vm, gpa)`
-        // entry on every PE. Select the requested VMID in VTTBR_EL2 for the
-        // invalidation, then restore the interrupted cell's translation context.
+        // Select the VMID, invalidate the requested guest page, and restore the
+        // previous VTTBR value. `IPAS2E1IS` takes IPA >> 12 in a register.
         unsafe {
             let old_vttbr: u64;
             asm!("mrs {old}, vttbr_el2", old = out(reg) old_vttbr);
@@ -64,8 +40,7 @@ impl MmuInstr for Aarch64Hw {
 
     #[verifier::external_body]
     fn issue_dsb_ish() {
-        // Data Synchronization Barrier, inner-shareable.  Does not retire until the
-        // preceding broadcast has completed on every PE.
+        // Order page-table writes in the inner-shareable domain.
         #[cfg(target_arch = "aarch64")]
         unsafe {
             asm!("dsb ish");
@@ -76,12 +51,7 @@ impl MmuInstr for Aarch64Hw {
 impl SmmuInstr for Aarch64Hw {
     #[verifier::external_body]
     fn issue_smmu_tlbi_s2(_zone_id: usize, _ipa_page: usize) {
-        // SMMUv3 stage-2 IPA invalidation: build a `CMD_TLBI_S2_IPA` command (with
-        // `Addr = ipa_page` and the VMID from the device context) and write it to the
-        // SMMU command queue (MMIO).  The SMMU is a device, not a CPU, so this is a
-        // queue write rather than a `TLBI` instruction; a `DSB ISH` orders the write
-        // to the queue, and `issue_smmu_sync` (CMD_SYNC) completes it.  Left as a
-        // documented trusted seam (the concrete MMIO base is platform configuration).
+        // Placeholder for an SMMUv3 CMD_TLBI_S2_IPA command.
         #[cfg(target_arch = "aarch64")]
         unsafe {
             asm!("dsb ish");
@@ -90,10 +60,7 @@ impl SmmuInstr for Aarch64Hw {
 
     #[verifier::external_body]
     fn issue_smmu_sync() {
-        // SMMUv3 `CMD_SYNC`: write a CMD_SYNC to the command queue and poll the
-        // consumer index / wait for completion, guaranteeing preceding commands
-        // (CMD_TLBI_S2_IPA, configuration invalidations) are observed.  Ordered with
-        // a `DSB ISH`; the queue-polling MMIO is platform configuration.
+        // Placeholder for an SMMUv3 CMD_SYNC command and completion wait.
         #[cfg(target_arch = "aarch64")]
         unsafe {
             asm!("dsb ish");
