@@ -4,7 +4,7 @@
 use crate::{
     address::{
         addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
-        frame::{Frame, FrameSize, SpecFrame},
+        frame::{FrameSize, MemAttr, SpecFrame},
         region::MemoryRegion,
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
@@ -15,8 +15,8 @@ use crate::{
     model::types::VmId,
     page_table::{PTConstants, PageTable, SpecPTConstants},
 };
-use vstd::prelude::*;
 pub use vec::VecMemorySet;
+use vstd::prelude::*;
 
 mod vec;
 
@@ -95,39 +95,26 @@ impl SpecMemorySet {
         r.spec_translate(v)
     }
 
-    /// Whether some mapping in this memory set covers `vaddr`.
-    pub open spec fn has_mapping_for(&self, vaddr: SpecVAddr) -> bool {
-        exists|vbase: SpecVAddr, frame: SpecFrame|
-            {
-                &&& #[trigger] self.mappings.contains_pair(vbase, frame)
-                &&& vaddr.within(vbase, frame.size.as_nat())
-            }
-    }
-
-    /// The unique mapping in this well-formed memory set that covers `vaddr`.
-    pub open spec fn mapping_for(&self, vaddr: SpecVAddr) -> (SpecVAddr, SpecFrame)
-        recommends
-            self.has_mapping_for(vaddr),
-    {
-        choose|vbase: SpecVAddr, frame: SpecFrame|
-            {
-                &&& #[trigger] self.mappings.contains_pair(vbase, frame)
-                &&& vaddr.within(vbase, frame.size.as_nat())
-            }
-    }
-
-    /// Read-only page-table query result.
-    pub open spec fn pt_query(
+    /// Read-only region translation result for an arbitrary virtual address.
+    pub open spec fn query_vaddr(
         &self,
         vaddr: SpecVAddr,
-        res: Result<(SpecVAddr, SpecFrame), ()>,
+        res: Result<(SpecPAddr, MemAttr), ()>,
     ) -> bool {
         match res {
-            Ok((vbase, frame)) => {
-                &&& self.mappings.contains_pair(vbase, frame)
-                &&& vaddr.within(vbase, frame.size.as_nat())
+            Ok((paddr, attr)) => {
+                exists|region: MemoryRegion|
+                    {
+                        &&& #[trigger] self.regions.contains(region)
+                        &&& region.spec_contains_vaddr(vaddr)
+                        &&& paddr == region.spec_translate(vaddr)
+                        &&& attr == region.attr
+                    }
             },
-            Err(()) => !self.has_mapping_for(vaddr),
+            Err(()) => {
+                !exists|region: MemoryRegion| #[trigger]
+                    self.regions.contains(region) && region.spec_contains_vaddr(vaddr)
+            },
         }
     }
 
@@ -332,16 +319,16 @@ pub trait MemorySet<PT, A, I> where
             res == self@.has_region_starting_at(v@),
     ;
 
-    /// Query the page-table mapping that covers `vaddr` without modifying this memory set.
-    fn pt_query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+    /// Translate `vaddr` through its containing region without consulting the page table.
+    fn query_vaddr(&self, vaddr: VAddr) -> (res: Result<(PAddr, MemAttr), ()>)
         requires
             self.invariants(),
             vaddr@.0 < self.pt_constants().arch.vspace_size(),
         ensures
-            self@.pt_query(
+            self@.query_vaddr(
                 vaddr@,
                 match res {
-                    Ok((vbase, frame)) => Ok((vbase@, frame@)),
+                    Ok((paddr, attr)) => Ok((paddr@, attr)),
                     Err(()) => Err(()),
                 },
             ),
@@ -376,10 +363,11 @@ pub trait MemorySet<PT, A, I> where
             allocator.invariants(),
     ;
 
-    /// Insert a new memory region, **forcing a per-page `DSB` (`map`)** via the
-    /// tokenized MMU so the vm's `s2map` slice token tracks the new mappings.  The
-    /// slice token is threaded in/out and ends equal to `pt_s2map_inner(self@.mappings)`
-    /// — the zone's sync point, re-established for the lock invariant.
+    /// Insert a new memory region, forcing one `DSB`-ordered MMU transition per
+    /// concrete page-table block so the vm's dense 4 KiB `s2map` slice tracks the
+    /// mappings. The slice token is threaded in/out and ends equal to
+    /// `pt_s2map_inner(self@.mappings)` — the zone's sync point, re-established
+    /// for the lock invariant.
     fn insert(
         &mut self,
         allocator: &GlobalAllocator<A>,
@@ -414,8 +402,8 @@ pub trait MemorySet<PT, A, I> where
             res@.value().coherent(VmId(zone_id as nat)),
     ;
 
-    /// Remove a memory region by its starting virtual address, **forcing a per-page
-    /// `DSB`+`TLBI` (`unmap_invalidate`)** via the tokenized MMU. `zone_id` identifies
+    /// Remove a memory region by its starting virtual address, forcing one
+    /// `DSB`+`TLBI` transition per concrete page-table block. `zone_id` identifies
     /// the owning zone, `mmu` issues the maintenance instructions, and `s2_tok` is the
     /// zone's `s2map` slice token (threaded in/out).  The slice token ends equal to
     /// `pt_s2map_inner(self@.mappings)` — provable only because the instructions run

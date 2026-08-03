@@ -38,6 +38,12 @@ impl MmuInstr for Aarch64Hw {
         }
     }
 
+    fn issue_tlbi_s2_range_sync(zone_id: usize, ipa_page: usize, _page_count: usize) {
+        // Invalidating the aligned IPA of a block descriptor evicts the cached
+        // block translation, regardless of its logical 4 KiB page count.
+        Self::issue_tlbi_s2_sync(zone_id, ipa_page);
+    }
+
     #[verifier::external_body]
     fn issue_dsb_ish() {
         // Order page-table writes in the inner-shareable domain.
@@ -56,6 +62,12 @@ impl SmmuInstr for Aarch64Hw {
         unsafe {
             asm!("dsb ish");
         }
+    }
+
+    fn issue_smmu_tlbi_s2_range(zone_id: usize, ipa_page: usize, _page_count: usize) {
+        // Placeholder backend preserving the block-base contract expected by
+        // a future SMMUv3 CMD_TLBI_S2_IPA implementation.
+        Self::issue_smmu_tlbi_s2(zone_id, ipa_page);
     }
 
     #[verifier::external_body]

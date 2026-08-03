@@ -26,6 +26,14 @@ pub trait MmuInstr: ZoneIdInstr {
             Self::valid_zone_id(zone_id),
     ;
 
+    /// Invalidate one aligned stage-2 block and wait for completion.
+    /// `ipa_page` and `page_count` describe the block in 4 KiB pages.
+    fn issue_tlbi_s2_range_sync(zone_id: usize, ipa_page: usize, page_count: usize)
+        requires
+            Self::valid_zone_id(zone_id),
+            page_count > 0,
+    ;
+
     /// Issue the CPU-side synchronization operation used after page-table writes.
     fn issue_dsb_ish();
 }
@@ -36,6 +44,14 @@ pub trait SmmuInstr: ZoneIdInstr {
     fn issue_smmu_tlbi_s2(zone_id: usize, ipa_page: usize)
         requires
             Self::valid_zone_id(zone_id),
+    ;
+
+    /// Submit an IOMMU invalidation for one aligned stage-2 block.
+    /// `ipa_page` and `page_count` describe the block in 4 KiB pages.
+    fn issue_smmu_tlbi_s2_range(zone_id: usize, ipa_page: usize, page_count: usize)
+        requires
+            Self::valid_zone_id(zone_id),
+            page_count > 0,
     ;
 
     /// Wait for previously submitted IOMMU maintenance commands.
@@ -287,6 +303,172 @@ impl<I: HardwareInstr> MmuHardware<I> {
         I::issue_smmu_sync();
         let tracked new_tok = self.instance.borrow().map(
             VmId(zone_id as nat), gpa, entry@, vm_state,
+        );
+        Tracked(new_tok)
+    }
+
+    /// Make all logical 4 KiB translations of one newly written block reachable
+    /// with a single CPU-side synchronization operation.
+    pub fn map_range_dsb(
+        &self,
+        vm_tok: Tracked<MmuVmToken>,
+        ipa_page: usize,
+        page_count: usize,
+        zone_id: usize,
+        entries: Ghost<Map<GuestPage, S2Entry>>,
+    ) -> (res: Tracked<MmuVmToken>)
+        requires
+            self.wf(),
+            I::valid_zone_id(zone_id),
+            page_count > 0,
+            entries@.dom() == crate::hardware::spec::guest_page_range(
+                GuestPage(ipa_page as nat), page_count as nat,
+            ),
+            vm_tok@.instance_id() == self.inst_id(),
+            vm_tok@.key() == VmId(zone_id as nat),
+            vm_tok@.value().s2map.dom().disjoint(entries@.dom()),
+            vm_tok@.value().coherent(VmId(zone_id as nat)),
+        ensures
+            self.wf(),
+            res@.instance_id() == self.inst_id(),
+            res@.key() == VmId(zone_id as nat),
+            res@.value().s2map == vm_tok@.value().s2map.union_prefer_right(entries@),
+            res@.value().tlb == vm_tok@.value().tlb,
+            res@.value().coherent(VmId(zone_id as nat)),
+    {
+        let tracked vm_state = vm_tok.get();
+        I::issue_dsb_ish();
+        let tracked new_tok = self.instance.borrow().map_range(
+            VmId(zone_id as nat), entries@, vm_state,
+        );
+        Tracked(new_tok)
+    }
+
+    /// Invalidate one CPU block/range and remove all of its logical 4 KiB
+    /// translations from the VM token.
+    pub fn unmap_range_dsb_tlbi(
+        &self,
+        vm_tok: Tracked<MmuVmToken>,
+        ipa_page: usize,
+        page_count: usize,
+        zone_id: usize,
+    ) -> (res: Tracked<MmuVmToken>)
+        requires
+            self.wf(),
+            I::valid_zone_id(zone_id),
+            page_count > 0,
+            vm_tok@.instance_id() == self.inst_id(),
+            vm_tok@.key() == VmId(zone_id as nat),
+            vm_tok@.value().coherent(VmId(zone_id as nat)),
+        ensures
+            self.wf(),
+            res@.instance_id() == self.inst_id(),
+            res@.key() == VmId(zone_id as nat),
+            res@.value().s2map == vm_tok@.value().s2map.remove_keys(
+                crate::hardware::spec::guest_page_range(
+                    GuestPage(ipa_page as nat), page_count as nat,
+                ),
+            ),
+            res@.value().tlb == vm_tok@.value().tlb.remove_keys(
+                crate::hardware::spec::range_invalidation_targets(
+                    VmId(zone_id as nat),
+                    crate::hardware::spec::guest_page_range(
+                        GuestPage(ipa_page as nat), page_count as nat,
+                    ),
+                ),
+            ),
+            res@.value().coherent(VmId(zone_id as nat)),
+    {
+        let ghost gpas = crate::hardware::spec::guest_page_range(
+            GuestPage(ipa_page as nat), page_count as nat,
+        );
+        let tracked vm_state = vm_tok.get();
+        I::issue_dsb_ish();
+        I::issue_tlbi_s2_range_sync(zone_id, ipa_page, page_count);
+        let tracked new_tok = self.instance.borrow().unmap_invalidate_range(
+            VmId(zone_id as nat), gpas, vm_state,
+        );
+        Tracked(new_tok)
+    }
+
+    /// IOMMU counterpart of [`map_range_dsb`](Self::map_range_dsb).
+    pub fn iommu_map_range_sync(
+        &self,
+        vm_tok: Tracked<MmuVmToken>,
+        ipa_page: usize,
+        page_count: usize,
+        zone_id: usize,
+        entries: Ghost<Map<GuestPage, S2Entry>>,
+    ) -> (res: Tracked<MmuVmToken>)
+        requires
+            self.wf(),
+            I::valid_zone_id(zone_id),
+            page_count > 0,
+            entries@.dom() == crate::hardware::spec::guest_page_range(
+                GuestPage(ipa_page as nat), page_count as nat,
+            ),
+            vm_tok@.instance_id() == self.inst_id(),
+            vm_tok@.key() == VmId(zone_id as nat),
+            vm_tok@.value().s2map.dom().disjoint(entries@.dom()),
+            vm_tok@.value().coherent(VmId(zone_id as nat)),
+        ensures
+            self.wf(),
+            res@.instance_id() == self.inst_id(),
+            res@.key() == VmId(zone_id as nat),
+            res@.value().s2map == vm_tok@.value().s2map.union_prefer_right(entries@),
+            res@.value().tlb == vm_tok@.value().tlb,
+            res@.value().coherent(VmId(zone_id as nat)),
+    {
+        let tracked vm_state = vm_tok.get();
+        I::issue_smmu_sync();
+        let tracked new_tok = self.instance.borrow().map_range(
+            VmId(zone_id as nat), entries@, vm_state,
+        );
+        Tracked(new_tok)
+    }
+
+    /// IOMMU counterpart of [`unmap_range_dsb_tlbi`](Self::unmap_range_dsb_tlbi).
+    pub fn iommu_unmap_range_invalidate(
+        &self,
+        vm_tok: Tracked<MmuVmToken>,
+        ipa_page: usize,
+        page_count: usize,
+        zone_id: usize,
+    ) -> (res: Tracked<MmuVmToken>)
+        requires
+            self.wf(),
+            I::valid_zone_id(zone_id),
+            page_count > 0,
+            vm_tok@.instance_id() == self.inst_id(),
+            vm_tok@.key() == VmId(zone_id as nat),
+            vm_tok@.value().coherent(VmId(zone_id as nat)),
+        ensures
+            self.wf(),
+            res@.instance_id() == self.inst_id(),
+            res@.key() == VmId(zone_id as nat),
+            res@.value().s2map == vm_tok@.value().s2map.remove_keys(
+                crate::hardware::spec::guest_page_range(
+                    GuestPage(ipa_page as nat), page_count as nat,
+                ),
+            ),
+            res@.value().tlb == vm_tok@.value().tlb.remove_keys(
+                crate::hardware::spec::range_invalidation_targets(
+                    VmId(zone_id as nat),
+                    crate::hardware::spec::guest_page_range(
+                        GuestPage(ipa_page as nat), page_count as nat,
+                    ),
+                ),
+            ),
+            res@.value().coherent(VmId(zone_id as nat)),
+    {
+        let ghost gpas = crate::hardware::spec::guest_page_range(
+            GuestPage(ipa_page as nat), page_count as nat,
+        );
+        let tracked vm_state = vm_tok.get();
+        I::issue_smmu_tlbi_s2_range(zone_id, ipa_page, page_count);
+        I::issue_smmu_sync();
+        let tracked new_tok = self.instance.borrow().unmap_invalidate_range(
+            VmId(zone_id as nat), gpas, vm_state,
         );
         Tracked(new_tok)
     }

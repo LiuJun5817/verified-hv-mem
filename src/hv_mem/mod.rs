@@ -23,7 +23,7 @@ extern crate alloc;
 use crate::{
     address::{
         addr::{PAddr, SpecVAddr, VAddr},
-        frame::{Frame, FrameSize, SpecFrame},
+        frame::{FrameSize, MemAttr, SpecFrame},
         region::MemoryRegion,
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
@@ -729,8 +729,8 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         Self { zone_list, lock, allocator, cpu_mmu, iommu_mmu, pt_constants }
     }
 
-    /// Query zone `zid`'s CPU stage-2 page table under shared locks.
-    pub fn pt_query(&self, zid: usize, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+    /// Translate `vaddr` through zone `zid`'s CPU region set under shared locks.
+    pub fn query_vaddr(&self, zid: usize, vaddr: VAddr) -> (res: Result<(PAddr, MemAttr), ()>)
         requires
             self.invariants(),
             vaddr@.0 < self.lock.k@.pt_constants.arch.vspace_size(),
@@ -741,7 +741,7 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
         let res = match Self::find_zone_index(zones, zid) {
-            Some(i) => zones[i].pt_query(vaddr),
+            Some(i) => zones[i].query_vaddr(vaddr),
             None => Err(()),
         };
 
@@ -749,8 +749,8 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         res
     }
 
-    /// Query zone `zid`'s IOMMU stage-2 page table under shared locks.
-    pub fn iommu_pt_query(&self, zid: usize, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+    /// Translate `vaddr` through zone `zid`'s IOMMU region set under shared locks.
+    pub fn iommu_query_vaddr(&self, zid: usize, vaddr: VAddr) -> (res: Result<(PAddr, MemAttr), ()>)
         requires
             self.invariants(),
             vaddr@.0 < self.lock.k@.pt_constants.arch.vspace_size(),
@@ -761,7 +761,7 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
         let res = match Self::find_zone_index(zones, zid) {
-            Some(i) => zones[i].iommu_pt_query(vaddr),
+            Some(i) => zones[i].iommu_query_vaddr(vaddr),
             None => Err(()),
         };
 

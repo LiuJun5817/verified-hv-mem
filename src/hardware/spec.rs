@@ -18,6 +18,16 @@ pub open spec fn invalidation_targets(vm: VmId, gpa: GuestPage) -> Set<TlbKey> {
     Set::new(|k: TlbKey| k.vm == vm && k.gpa == gpa)
 }
 
+/// All cached entries belonging to one VM and a set of guest pages.
+pub open spec fn range_invalidation_targets(vm: VmId, gpas: Set<GuestPage>) -> Set<TlbKey> {
+    Set::new(|k: TlbKey| k.vm == vm && gpas.contains(k.gpa))
+}
+
+/// A consecutive range of 4 KiB guest pages.
+pub open spec fn guest_page_range(base: GuestPage, count: nat) -> Set<GuestPage> {
+    Set::new(|gpa: GuestPage| base.0 <= gpa.0 < base.0 + count)
+}
+
 /// All stage-2 state owned by one VM shard.
 pub ghost struct MmuVmState {
     /// MMU-reachable stage-2 translations for this VM.
@@ -138,6 +148,29 @@ tokenized_state_machine! {
             }
         }
 
+        /// Add a block's logical 4 KiB translations atomically.
+        transition! {
+            map_range(vm: VmId, entries: Map<GuestPage, S2Entry>) {
+                remove vms -= [vm => let state];
+                require state.s2map.dom().disjoint(entries.dom());
+                add vms += [vm => MmuVmState {
+                    s2map: state.s2map.union_prefer_right(entries),
+                    tlb: state.tlb,
+                }];
+            }
+        }
+
+        /// Remove a block's logical translations and every matching cached entry.
+        transition! {
+            unmap_invalidate_range(vm: VmId, gpas: Set<GuestPage>) {
+                remove vms -= [vm => let state];
+                add vms += [vm => MmuVmState {
+                    s2map: state.s2map.remove_keys(gpas),
+                    tlb: state.tlb.remove_keys(range_invalidation_targets(vm, gpas)),
+                }];
+            }
+        }
+
         // ── Inductive proofs ──────────────────────────────────────────────────────
 
         #[inductive(initialize)]
@@ -157,40 +190,61 @@ tokenized_state_machine! {
 
         #[inductive(fill)]
         fn fill_inductive(pre: Self, post: Self, cpu: CpuId, vm: VmId, gpa: GuestPage) {
-            let tkey0 = TlbKey::new(cpu, vm, gpa);
-            assert forall|key: TlbKey| #[trigger] post.vms[vm].tlb.contains_key(key) implies {
+            assert(forall|key: TlbKey| #[trigger] post.vms[vm].tlb.contains_key(key) ==> {
                 &&& key.vm == vm
                 &&& post.vms[vm].s2map.contains_key(key.gpa)
                 &&& post.vms[vm].tlb[key].as_s2_entry() == post.vms[vm].s2map[key.gpa]
-            } by {
-                if key == tkey0 { }
-            };
+            });
         }
 
         #[inductive(unmap_invalidate)]
         fn unmap_invalidate_inductive(pre: Self, post: Self, vm: VmId, gpa: GuestPage) {
             assert(post.vms.dom() =~= post.vm_ids);
-            assert forall|key: TlbKey| #[trigger] post.vms[vm].tlb.contains_key(key) implies {
+            assert(forall|key: TlbKey| #[trigger] post.vms[vm].tlb.contains_key(key) ==> {
                 &&& key.vm == vm
                 &&& post.vms[vm].s2map.contains_key(key.gpa)
                 &&& post.vms[vm].tlb[key].as_s2_entry() == post.vms[vm].s2map[key.gpa]
-            } by {
-                assert(!invalidation_targets(vm, gpa).contains(key));
-                assert(key.gpa != gpa);
-            };
+            });
         }
 
         #[inductive(map)]
         fn map_inductive(pre: Self, post: Self, vm: VmId, gpa: GuestPage, entry: S2Entry) {
             assert(post.vms.dom() =~= post.vm_ids);
-            assert forall|key: TlbKey| #[trigger] post.vms[vm].tlb.contains_key(key) implies {
+            assert(forall|key: TlbKey| #[trigger] post.vms[vm].tlb.contains_key(key) ==> {
                 &&& key.vm == vm
                 &&& post.vms[vm].s2map.contains_key(key.gpa)
                 &&& post.vms[vm].tlb[key].as_s2_entry() == post.vms[vm].s2map[key.gpa]
-            } by {
-                assert(pre.vms[vm].s2map.contains_key(key.gpa));
-                assert(key.gpa != gpa);
-            };
+            });
+        }
+
+        #[inductive(map_range)]
+        fn map_range_inductive(
+            pre: Self,
+            post: Self,
+            vm: VmId,
+            entries: Map<GuestPage, S2Entry>,
+        ) {
+            assert(post.vms.dom() =~= pre.vms.dom());
+            assert(forall|key: TlbKey| #[trigger] post.vms[vm].tlb.contains_key(key) ==> {
+                &&& key.vm == vm
+                &&& post.vms[vm].s2map.contains_key(key.gpa)
+                &&& post.vms[vm].tlb[key].as_s2_entry() == post.vms[vm].s2map[key.gpa]
+            });
+        }
+
+        #[inductive(unmap_invalidate_range)]
+        fn unmap_invalidate_range_inductive(
+            pre: Self,
+            post: Self,
+            vm: VmId,
+            gpas: Set<GuestPage>,
+        ) {
+            assert(post.vms.dom() =~= pre.vms.dom());
+            assert(forall|key: TlbKey| #[trigger] post.vms[vm].tlb.contains_key(key) ==> {
+                &&& key.vm == vm
+                &&& post.vms[vm].s2map.contains_key(key.gpa)
+                &&& post.vms[vm].tlb[key].as_s2_entry() == post.vms[vm].s2map[key.gpa]
+            });
         }
     }
 }

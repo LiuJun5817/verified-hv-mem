@@ -12,7 +12,7 @@ use crate::{
     address::region::MemoryRegion,
     address::{
         addr::{PAddr, VAddr},
-        frame::Frame,
+        frame::MemAttr,
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
@@ -544,8 +544,8 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         res
     }
 
-    /// Query the CPU stage-2 page table without modifying the zone.
-    pub fn pt_query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+    /// Translate a CPU virtual address through the zone's region set.
+    pub fn query_vaddr(&self, vaddr: VAddr) -> (res: Result<(PAddr, MemAttr), ()>)
         requires
             self.wf(),
             vaddr@.0 < self.vspace_size(),
@@ -553,13 +553,13 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
         let mem_set = self.cpu_mem_set.borrow(Tracked(&content.cpu_mem_set_perm));
-        let res = mem_set.pt_query(vaddr);
+        let res = mem_set.query_vaddr(vaddr);
         self.lock.unlock_read(guard);
         res
     }
 
-    /// Query the IOMMU stage-2 page table without modifying the zone.
-    pub fn iommu_pt_query(&self, vaddr: VAddr) -> (res: Result<(VAddr, Frame), ()>)
+    /// Translate an IOMMU virtual address through the zone's region set.
+    pub fn iommu_query_vaddr(&self, vaddr: VAddr) -> (res: Result<(PAddr, MemAttr), ()>)
         requires
             self.wf(),
             vaddr@.0 < self.vspace_size(),
@@ -567,7 +567,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
         let mem_set = self.iommu_mem_set.borrow(Tracked(&content.iommu_mem_set_perm));
-        let res = mem_set.pt_query(vaddr);
+        let res = mem_set.query_vaddr(vaddr);
         self.lock.unlock_read(guard);
         res
     }

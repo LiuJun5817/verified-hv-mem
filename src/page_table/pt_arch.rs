@@ -315,15 +315,73 @@ impl PTArch {
         VAddr(vaddr.0 / fsize * fsize)
     }
 
+    /// Whether this concrete architecture exposes a descriptor of `size`.
+    pub fn is_valid_frame_size(&self, size: FrameSize) -> (res: bool)
+        requires
+            self@.valid(),
+        ensures
+            res == self@.is_valid_frame_size(size),
+    {
+        let mut i: usize = 0;
+        while i < self.0.len()
+            invariant
+                0 <= i <= self.0.len(),
+                self@.valid(),
+                forall|j: int|
+                    #![auto]
+                    0 <= j < i ==> self.0[j].frame_size.as_nat() != size.as_nat(),
+            decreases self.0.len() - i,
+        {
+            let level_size = self.0[i].frame_size;
+            assert(self@.frame_size(i as nat) == level_size);
+            if level_size.as_usize() == size.as_usize() {
+                assert(self@.is_valid_frame_size(size));
+                return true;
+            }
+            i += 1;
+        }
+        assert(!self@.is_valid_frame_size(size));
+        false
+    }
+
     /// Get the corresponding level of a frame size.
-    #[verifier::external_body]
     pub fn level_of_frame_size(&self, size: FrameSize) -> (res: usize)
         requires
+            self@.valid(),
             self@.is_valid_frame_size(size),
         ensures
             res == self@.level_of_frame_size(size),
     {
-        self.0.as_slice().iter().position(|l| l.frame_size.as_usize() == size.as_usize()).unwrap()
+        let mut i: usize = 0;
+        while i < self.0.len()
+            invariant
+                0 <= i <= self.0.len(),
+                self@.valid(),
+                forall|j: int|
+                    #![auto]
+                    0 <= j < i ==> self.0[j].frame_size.as_nat()
+                        != size.as_nat(),
+            decreases self.0.len() - i,
+        {
+            let level_size = self.0[i].frame_size;
+            assert(self@.frame_size(i as nat) == level_size);
+            if level_size.as_usize() == size.as_usize() {
+                proof {
+                    let ghost ghost_level = self@.level_of_frame_size(size);
+                    if ghost_level < i {
+                        self@.lemma_frame_size_monotonic(ghost_level, i as nat);
+                    } else if ghost_level > i {
+                        self@.lemma_frame_size_monotonic(i as nat, ghost_level);
+                    }
+                    assert(ghost_level == i);
+                }
+                return i;
+            }
+            i += 1;
+        }
+        // unreachable
+        assert(!self@.is_valid_frame_size(size));
+        0
     }
 }
 
