@@ -265,7 +265,7 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
     }
 
     /// Recursively remove a page table entry.
-    pub fn remove(&mut self, vbase: VAddr, base: PAddr, level: usize) -> (res: PagingResult)
+    pub fn remove(&mut self, vbase: VAddr, base: PAddr, level: usize) -> (res: PagingResult<Frame>)
         requires
             old(self).pt_mem.invariants(),
             old(self)@.wf(),
@@ -273,7 +273,14 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
             old(self).pt_mem@.contains_table(base@),
             old(self).pt_mem@.level(base@) == level,
         ensures
-            (self@, res) == old(self)@.remove(vbase@, base@, level as nat),
+            ({
+                let (new, spec_res) = old(self)@.remove(vbase@, base@, level as nat);
+                &&& self@ == new
+                &&& spec_res == match res {
+                    Ok(frame) => Ok(frame@),
+                    Err(()) => Err(()),
+                }
+            }),
             self.inst_id() == old(self).inst_id(),
             self.pt_mem.invariants(),
             self@.wf(),
@@ -290,8 +297,13 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
             if level >= self.constants.arch.level_count() - 1 {
                 // Leaf node
                 if vbase.aligned(self.constants.arch.frame_size(level).as_usize()) {
+                    let frame = Frame {
+                        base: pte.addr(),
+                        size: self.constants.arch.frame_size(level),
+                        attr: pte.attr(),
+                    };
                     self.pt_mem.write(base, idx, E::empty().to_u64());
-                    PagingResult::Ok(())
+                    PagingResult::Ok(frame)
                 } else {
                     PagingResult::Err(())
                 }
@@ -299,8 +311,13 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
                 // Intermediate node
                 if pte.huge() {
                     if vbase.aligned(self.constants.arch.frame_size(level).as_usize()) {
+                        let frame = Frame {
+                            base: pte.addr(),
+                            size: self.constants.arch.frame_size(level),
+                            attr: pte.attr(),
+                        };
                         self.pt_mem.write(base, idx, E::empty().to_u64());
-                        PagingResult::Ok(())
+                        PagingResult::Ok(frame)
                     } else {
                         PagingResult::Err(())
                     }
@@ -467,7 +484,9 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
     }
 
     /// Remove the mapping for a given virtual base address.
-    pub fn unmap(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr) -> (res: PagingResult)
+    pub fn unmap(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr) -> (res: PagingResult<
+        Frame,
+    >)
         requires
             allocator.invariants(),
             old(self).inst_id() == allocator.inst_id(),
@@ -479,7 +498,11 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
             self.invariants(),
             ({
                 let (s2, r) = old(self)@@.unmap(vbase@);
-                r is Ok == res is Ok && s2 == self@@
+                &&& r == match res {
+                    Ok(frame) => Ok(frame@),
+                    Err(()) => Err(()),
+                }
+                &&& s2 == self@@
             }),
     {
         let ghost root = self.pt_mem@.root;

@@ -194,7 +194,7 @@ impl PTTreeNode {
     /// Removes a frame at `path` by setting it to `Empty`.
     ///
     /// Does nothing if the entry at `path` is already `Empty`.
-    pub open spec fn remove(self, path: PTTreePath) -> (Self, PagingResult)
+    pub open spec fn remove(self, path: PTTreePath) -> (Self, PagingResult<SpecFrame>)
         recommends
             self.wf(),
             path.valid(self.constants.arch, self.level),
@@ -204,7 +204,7 @@ impl PTTreeNode {
         let entry = self.entries[idx as int];
         if path.len() <= 1 {
             match entry {
-                NodeEntry::Frame(_) => (self.update(idx, NodeEntry::Empty), Ok(())),
+                NodeEntry::Frame(frame) => (self.update(idx, NodeEntry::Empty), Ok(frame)),
                 _ => (self, Err(())),
             }
         } else {
@@ -215,7 +215,7 @@ impl PTTreeNode {
                 },
                 NodeEntry::Frame(frame) => {
                     if remain.is_zero() {
-                        (self.update(idx, NodeEntry::Empty), Ok(()))
+                        (self.update(idx, NodeEntry::Empty), Ok(frame))
                     } else {
                         (self, Err(()))
                     }
@@ -1571,6 +1571,28 @@ impl PTTreeNode {
         }
     }
 
+    /// A successful removal returns the frame reached by the removal path.
+    pub proof fn lemma_remove_ok_result(self, path: PTTreePath)
+        requires
+            self.wf(),
+            path.valid(self.constants.arch, self.level),
+            self.remove(path).1 is Ok,
+        ensures
+            self.remove(path).1.unwrap() == self.visit(path).last()->Frame_0,
+        decreases path.len(),
+    {
+        let (idx, remain) = path.step();
+        let entry = self.entries[idx as int];
+        assert(self.entries.contains(entry));
+        if path.len() > 1 {
+            match entry {
+                NodeEntry::Node(node) => node.lemma_remove_ok_result(remain),
+                NodeEntry::Frame(_) => {},
+                NodeEntry::Empty => {},
+            }
+        }
+    }
+
     /// Lemma. `remove` always fails if `self` is empty.
     pub proof fn lemma_empty_implies_remove_fail(self, path: PTTreePath)
         requires
@@ -1925,10 +1947,7 @@ impl PTTreeModel {
 
     /// View the tree as `PageTableState`.
     pub open spec fn view(self) -> PageTableState {
-        PageTableState {
-            mappings: self.mappings(),
-            constants: SpecPTConstants { arch: self.arch() },
-        }
+        PageTableState { mappings: self.mappings(), constants: self.root.constants }
     }
 
     /// Map a virtual address to a physical frame.
@@ -1957,7 +1976,7 @@ impl PTTreeModel {
     /// Unmap a virtual address.
     ///
     /// If unmapping succeeds, return `Ok` and the updated tree.
-    pub open spec fn unmap(self, vbase: SpecVAddr) -> (Self, PagingResult)
+    pub open spec fn unmap(self, vbase: SpecVAddr) -> (Self, PagingResult<SpecFrame>)
         recommends
             self.wf(),
     {
@@ -1967,10 +1986,9 @@ impl PTTreeModel {
             (self.arch().level_count() - 1) as nat,
         );
         let (node, res) = self.root.remove(path);
-        if res is Ok {
-            (Self::new(node.prune(path)), Ok(()))
-        } else {
-            (self, Err(()))
+        match res {
+            Ok(frame) => (Self::new(node.prune(path)), Ok(frame)),
+            Err(()) => (self, Err(())),
         }
     }
 
@@ -2365,6 +2383,7 @@ impl PTTreeModel {
             self.unmap(vbase).1 is Ok,
         ensures
             self.mappings().contains_key(vbase),
+            self.unmap(vbase).1.unwrap() == self.mappings()[vbase],
     {
         let path = PTTreePath::from_vaddr_root(
             vbase,
@@ -2375,6 +2394,7 @@ impl PTTreeModel {
 
         // Prove `real_path` is a padded prefix of `path`.
         self.root.lemma_remove_ok_implies_visit_reaches_frame(path);
+        self.root.lemma_remove_ok_result(path);
         self.root.lemma_visit_length_bounds(path);
         self.root.lemma_real_path_valid(path);
         self.root.lemma_real_path_visits_same_entry(path);
@@ -2382,6 +2402,10 @@ impl PTTreeModel {
         assert(path.has_padded_prefix(real_path));
 
         PTTreePath::lemma_padded_prefix_implies_vaddr_eq(self.arch(), path, real_path);
+        let frame = self.unmap(vbase).1.unwrap();
+        assert(self.root.path_mappings().contains_pair(real_path, frame));
+        self.lemma_mappings_consistent_with_path_mappings();
+        assert(self.mappings().contains_pair(vbase, frame));
     }
 
     /// Lemma. `vbase` in `mappings()` implies `unmap` succeeds.
@@ -2635,6 +2659,7 @@ impl PTTreeModel {
     {
         if self.mappings().contains_key(vbase) {
             self.lemma_vbase_exist_implies_unmap_ok(vbase);
+            self.lemma_unmap_ok_implies_vbase_exist(vbase);
             self.lemma_unmap_removes_mapping(vbase);
         } else {
             if self.unmap(vbase).1 is Ok {

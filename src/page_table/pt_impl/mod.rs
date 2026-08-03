@@ -42,6 +42,17 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
         self.0.pt_mem.root@
     }
 
+    fn constants(&self) -> (res: PTConstants) {
+        let res = self.0.constants.clone();
+        proof {
+            let view = self.0.view();
+            view.construct_node_facts(view.pt_mem.root, 0);
+            let node = view.construct_node(view.pt_mem.root, 0);
+            assert(node.constants == view.constants);
+        }
+        res
+    }
+
     fn root(&self) -> (root: PAddr) {
         self.0.pt_mem.root
     }
@@ -80,7 +91,7 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
         self.0.map(allocator, vbase, frame)
     }
 
-    fn unmap(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr) -> (res: Result<(), ()>) {
+    fn unmap(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr) -> (res: Result<Frame, ()>) {
         proof {
             let view = self.0.view();
             view.lemma_wf_implies_node_wf();

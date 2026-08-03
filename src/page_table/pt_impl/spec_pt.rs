@@ -276,7 +276,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
     /// Perform a recursive specification-level page table removal starting from a given base.
     pub open spec fn remove(self, vbase: SpecVAddr, base: SpecPAddr, level: nat) -> (
         Self,
-        PagingResult,
+        PagingResult<SpecFrame>,
     )
         recommends
             self.wf(),
@@ -295,7 +295,13 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                             self.pt_mem.write(base, idx, E::spec_empty().spec_to_u64()),
                             self.constants,
                         ),
-                        Ok(()),
+                        Ok(
+                            SpecFrame {
+                                base: pte.spec_addr(),
+                                size: self.constants.arch.frame_size(level),
+                                attr: pte.spec_attr(),
+                            },
+                        ),
                     )
                 } else {
                     (self, Err(()))
@@ -308,7 +314,13 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                                 self.pt_mem.write(base, idx, E::spec_empty().spec_to_u64()),
                                 self.constants,
                             ),
-                            Ok(()),
+                            Ok(
+                                SpecFrame {
+                                    base: pte.spec_addr(),
+                                    size: self.constants.arch.frame_size(level),
+                                    attr: pte.spec_attr(),
+                                },
+                            ),
                         )
                     } else {
                         (self, Err(()))

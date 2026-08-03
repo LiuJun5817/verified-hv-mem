@@ -1,6 +1,6 @@
 //! Page table trait with formal specification.
 use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
-use crate::address::frame::{Frame, SpecFrame};
+use crate::address::frame::{Frame, FrameSize, SpecFrame};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 use crate::constants::*;
 use crate::global_allocator::GlobalAllocator;
@@ -16,6 +16,8 @@ pub type PagingResult<T = ()> = Result<T, ()>;
 pub struct SpecPTConstants {
     /// Page table architecture.
     pub arch: SpecPTArch,
+    /// Whether higher layers may create non-leaf block mappings.
+    pub huge_pages: bool,
 }
 
 impl SpecPTConstants {
@@ -29,6 +31,8 @@ impl SpecPTConstants {
 pub struct PTConstants {
     /// Page table architecture.
     pub arch: PTArch,
+    /// Whether higher layers may create non-leaf block mappings.
+    pub huge_pages: bool,
     /// HVA to PA offset. Table frames allocated by allocator are in HVA (hypervisor virtual address),
     /// but the page table entries need to store the PA. This offset is used to convert between HVA
     /// and PA if host hypervisor uses a fixed offset mapping.
@@ -41,14 +45,18 @@ impl Clone for PTConstants {
             res@ == self@,
             res.hva_to_pa_offset == self.hva_to_pa_offset,
     {
-        PTConstants { arch: self.arch.clone(), hva_to_pa_offset: self.hva_to_pa_offset }
+        PTConstants {
+            arch: self.arch.clone(),
+            huge_pages: self.huge_pages,
+            hva_to_pa_offset: self.hva_to_pa_offset,
+        }
     }
 }
 
 impl PTConstants {
     /// View as `PTConstants`
     pub open spec fn view(self) -> SpecPTConstants {
-        SpecPTConstants { arch: self.arch@ }
+        SpecPTConstants { arch: self.arch@, huge_pages: self.huge_pages }
     }
 
     /// Whether this direct-map offset can translate every frame returned by an
@@ -157,7 +165,12 @@ impl PageTableState {
     }
 
     /// State transition - unmap a virtual address.
-    pub open spec fn unmap(s1: Self, s2: Self, vbase: SpecVAddr, res: PagingResult) -> bool {
+    pub open spec fn unmap(
+        s1: Self,
+        s2: Self,
+        vbase: SpecVAddr,
+        res: PagingResult<SpecFrame>,
+    ) -> bool {
         &&& s1.constants == s2.constants
         // Precondition
         &&& s1.unmap_pre(vbase)
@@ -165,6 +178,7 @@ impl PageTableState {
         &&& if s1.mappings.contains_key(vbase) {
             // Unmapping succeeds
             &&& res is Ok
+            &&& res->Ok_0 == s1.mappings[vbase]
             // Update page table
             &&& s1.mappings.remove(vbase) === s2.mappings
         } else {
@@ -193,7 +207,7 @@ impl PageTableState {
         &&& if self.has_mapping_for(vaddr) {
             // Query succeeds
             &&& res is Ok
-            &&& res.unwrap() == self.mapping_for(vaddr)
+            &&& res->Ok_0 == self.mapping_for(vaddr)
         } else {
             // Query fails
             &&& res is Err
@@ -248,7 +262,12 @@ impl PageTableState {
     }
 
     /// Lemma. `unmap` preserves well-formedness.
-    pub proof fn lemma_unmap_preserves_wf(s1: Self, s2: Self, vbase: SpecVAddr, res: PagingResult)
+    pub proof fn lemma_unmap_preserves_wf(
+        s1: Self,
+        s2: Self,
+        vbase: SpecVAddr,
+        res: PagingResult<SpecFrame>,
+    )
         requires
             s1.wf(),
             s2.unmap_pre(vbase),
@@ -360,6 +379,18 @@ pub trait PageTable<A> where Self: Sized, A: BitmapAllocator {
     /// Physical address of the root page table.
     spec fn spec_root(&self) -> SpecPAddr;
 
+    /// Return the concrete page-table constants used by this implementation.
+    ///
+    /// Concrete users such as `VecMemorySet` need the runtime architecture to
+    /// choose a mapping granularity, while the abstract contract continues to
+    /// expose only `SpecPTConstants` through `view()`.
+    fn constants(&self) -> (res: PTConstants)
+        requires
+            self.invariants(),
+        ensures
+            res@ == self@.constants,
+    ;
+
     /// Return the physical address of the root page table.
     fn root(&self) -> (root: PAddr)
         requires
@@ -416,7 +447,7 @@ pub trait PageTable<A> where Self: Sized, A: BitmapAllocator {
     ;
 
     /// Unmap a virtual address.
-    fn unmap(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr) -> (res: Result<(), ()>)
+    fn unmap(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr) -> (res: Result<Frame, ()>)
         requires
             allocator.invariants(),
             old(self).inst_id() == allocator.inst_id(),
@@ -426,7 +457,15 @@ pub trait PageTable<A> where Self: Sized, A: BitmapAllocator {
             allocator.invariants(),
             self.inst_id() == old(self).inst_id(),
             self.invariants(),
-            PageTableState::unmap(old(self)@, self@, vbase@, res),
+            PageTableState::unmap(
+                old(self)@,
+                self@,
+                vbase@,
+                match res {
+                    Ok(frame) => Ok(frame@),
+                    Err(()) => Err(()),
+                },
+            ),
     ;
 
     /// Query the physical frame mapped to a virtual address.
