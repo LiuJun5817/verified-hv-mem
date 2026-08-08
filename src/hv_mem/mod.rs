@@ -57,40 +57,6 @@ pub open spec fn mmu_vm_ids(zone_ids: Set<nat>) -> Set<VmId> {
     Set::new(|vm: VmId| zone_ids.contains(vm.0))
 }
 
-proof fn lemma_mmu_vm_ids_empty()
-    ensures
-        mmu_vm_ids(Set::<nat>::empty()) =~= Set::<VmId>::empty(),
-{
-}
-
-proof fn lemma_mmu_vm_ids_insert(zone_ids: Set<nat>, zid: nat)
-    ensures
-        mmu_vm_ids(zone_ids.insert(zid))
-            =~= mmu_vm_ids(zone_ids).insert(VmId(zid)),
-{
-    assert forall|vm: VmId| #[trigger]
-        mmu_vm_ids(zone_ids.insert(zid)).contains(vm)
-            == mmu_vm_ids(zone_ids).insert(VmId(zid)).contains(vm) by {
-        if vm.0 == zid {
-            assert(vm == VmId(zid));
-        }
-    }
-}
-
-proof fn lemma_mmu_vm_ids_remove(zone_ids: Set<nat>, zid: nat)
-    ensures
-        mmu_vm_ids(zone_ids.remove(zid))
-            =~= mmu_vm_ids(zone_ids).remove(VmId(zid)),
-{
-    assert forall|vm: VmId| #[trigger]
-        mmu_vm_ids(zone_ids.remove(zid)).contains(vm)
-            == mmu_vm_ids(zone_ids).remove(VmId(zid)).contains(vm) by {
-        if vm.0 == zid {
-            assert(vm == VmId(zid));
-        }
-    }
-}
-
 /// Ghost key for `HvMem`'s outer `RwLock`.
 ///
 /// Binds the lock to the `PCell<Vec<Zone<...>>>` (via `cell_id`).
@@ -415,7 +381,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         zones.push(new_zone);
         self.zone_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
-            lemma_mmu_vm_ids_insert(pre_add_zone_ids, zid as nat);
+            // lemma_mmu_vm_ids_insert(pre_add_zone_ids, zid as nat);
             assert(content.cpu_vm_ids_tok.value()
                 =~= mmu_vm_ids(P::zone_ids(&content.global_state)));
             assert(content.iommu_vm_ids_tok.value()
@@ -560,7 +526,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         // ── Step 7: advance protocol ghost state ───────────────────────────────
         proof {
             P::remove_zone(&mut content.global_state, zone_state);
-            lemma_mmu_vm_ids_remove(pre_remove_zone_ids, zid as nat);
+            // lemma_mmu_vm_ids_remove(pre_remove_zone_ids, zid as nat);
             assert(content.cpu_vm_ids_tok.value()
                 =~= mmu_vm_ids(P::zone_ids(&content.global_state)));
             assert(content.iommu_vm_ids_tok.value()
@@ -722,7 +688,7 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         );
 
         proof {
-            lemma_mmu_vm_ids_empty();
+            assert(mmu_vm_ids(Set::<nat>::empty()) =~= Set::<VmId>::empty());
             assert(HvMemPred::<PT, M, A, BudgetProtocol, I>::inv(key@, content));
         }
         let lock = RwLock::new(key, Tracked(content));
