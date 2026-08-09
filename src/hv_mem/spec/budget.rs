@@ -182,6 +182,13 @@ tokenized_state_machine! {
         }
 
         transition! {
+            cpu_clear(zid: nat) {
+                remove zones -= [zid => let zone];
+                add zones += [zid => zone.cpu_clear()];
+            }
+        }
+
+        transition! {
             iommu_insert_region(zid: nat, region: MemoryRegion) {
                 remove zones -= [zid => let zone];
                 require(zone_regions(zid).contains(region) || region == gic_region());
@@ -196,6 +203,13 @@ tokenized_state_machine! {
                 remove zones -= [zid => let zone];
                 require(zone.iommu_mem_set.regions.contains(region));
                 add zones += [zid => zone.iommu_remove_region(region)];
+            }
+        }
+
+        transition! {
+            iommu_clear(zid: nat) {
+                remove zones -= [zid => let zone];
+                add zones += [zid => zone.iommu_clear()];
             }
         }
 
@@ -234,6 +248,8 @@ tokenized_state_machine! {
                 } else {
                     assert(post.zones[zid2] == pre.zones[zid2]);
                     assert(pre.zones.contains_key(zid2));
+                    assert(pre.zones[zid2].iommu_mem_set.regions.contains(r));
+                    assert(zone_regions(zid2).contains(r) || r == gic_region());
                 }
             };
         }
@@ -360,6 +376,49 @@ tokenized_state_machine! {
             };
         }
 
+        #[inductive(cpu_clear)]
+        fn cpu_clear_inductive(pre: Self, post: Self, zid: nat) {
+            let old_zone = pre.zones[zid];
+            let new_zone = post.zones[zid];
+            assert(post.zones.dom() == post.zone_ids);
+            assert forall|zid2: nat| post.zones.contains_key(zid2)
+                implies #[trigger] post.zones[zid2].wf() by {
+                if zid2 == zid {
+                    assert(old_zone.wf());
+                    assert(new_zone == old_zone.cpu_clear());
+                    assert(new_zone.cpu_mem_set == SpecMemorySet {
+                        regions: Set::empty(),
+                        mappings: Map::empty(),
+                    });
+                    assert(new_zone.cpu_mem_set.wf());
+                    assert(new_zone.wf());
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                }
+            };
+            assert forall|zid2: nat, r: MemoryRegion|
+                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r)
+                implies #[trigger] zone_regions(zid2).contains(r) by {
+                if zid2 == zid {
+                    assert(new_zone.cpu_mem_set.regions =~= Set::empty());
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                    assert(pre.zones.contains_key(zid2));
+                }
+            };
+            assert forall|zid2: nat, r: MemoryRegion|
+                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].iommu_mem_set.regions.contains(r)
+                implies #[trigger] zone_regions(zid2).contains(r) || r == gic_region() by {
+                if zid2 == zid {
+                    assert(new_zone.iommu_mem_set == old_zone.iommu_mem_set);
+                    assert(pre.zones.contains_key(zid));
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                    assert(pre.zones.contains_key(zid2));
+                }
+            };
+        }
+
         #[inductive(iommu_insert_region)]
         fn iommu_insert_region_inductive(pre: Self, post: Self, zid: nat, region: MemoryRegion) {
             let old_zone = pre.zones[zid];
@@ -448,6 +507,49 @@ tokenized_state_machine! {
                     assert(new_zone == old_zone.iommu_remove_region(region));
                     assert(old_zone.iommu_mem_set.regions.contains(r));
                     assert(pre.zones.contains_key(zid));
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                    assert(pre.zones.contains_key(zid2));
+                }
+            };
+        }
+
+        #[inductive(iommu_clear)]
+        fn iommu_clear_inductive(pre: Self, post: Self, zid: nat) {
+            let old_zone = pre.zones[zid];
+            let new_zone = post.zones[zid];
+            assert(post.zones.dom() == post.zone_ids);
+            assert forall|zid2: nat| post.zones.contains_key(zid2)
+                implies #[trigger] post.zones[zid2].wf() by {
+                if zid2 == zid {
+                    assert(old_zone.wf());
+                    assert(new_zone == old_zone.iommu_clear());
+                    assert(new_zone.iommu_mem_set == SpecMemorySet {
+                        regions: Set::empty(),
+                        mappings: Map::empty(),
+                    });
+                    assert(new_zone.iommu_mem_set.wf());
+                    assert(new_zone.wf());
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                }
+            };
+            assert forall|zid2: nat, r: MemoryRegion|
+                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r)
+                implies #[trigger] zone_regions(zid2).contains(r) by {
+                if zid2 == zid {
+                    assert(new_zone.cpu_mem_set == old_zone.cpu_mem_set);
+                    assert(pre.zones.contains_key(zid));
+                } else {
+                    assert(post.zones[zid2] == pre.zones[zid2]);
+                    assert(pre.zones.contains_key(zid2));
+                }
+            };
+            assert forall|zid2: nat, r: MemoryRegion|
+                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].iommu_mem_set.regions.contains(r)
+                implies #[trigger] zone_regions(zid2).contains(r) || r == gic_region() by {
+                if zid2 == zid {
+                    assert(new_zone.iommu_mem_set.regions =~= Set::empty());
                 } else {
                     assert(post.zones[zid2] == pre.zones[zid2]);
                     assert(pre.zones.contains_key(zid2));

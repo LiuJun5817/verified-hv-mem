@@ -48,6 +48,8 @@ pub struct ZoneKey {
     pub cpu_cell_id: CellId,
     /// `PCell::id()` of the zone's IOMMU `mem_set` cell.
     pub iommu_cell_id: CellId,
+    /// `PCell::id()` of the zone's opaque integration payload.
+    pub payload_cell_id: CellId,
     /// Spec (ClosureSpec / BudgetSpec) instance id shared by the whole hypervisor.
     pub mem_inst_id: InstanceId,
     /// Global allocator instance id — must match `M::inst_id()` of the stored memory set.
@@ -65,11 +67,13 @@ pub struct ZoneKey {
 ///
 /// Generic over `P: ZoneGhostProtocol`: the concrete `ZoneToken` type depends on
 /// which spec assumption is in use (`BudgetZoneState` for BudgetProtocol).
-pub tracked struct ZoneRwContent<M, P> where P: ZoneGhostProtocol {
+pub tracked struct ZoneRwContent<M, P, D = ()> where P: ZoneGhostProtocol {
     /// Permission to read/write the zone's exec CPU `mem_set` PCell.
     pub cpu_mem_set_perm: PointsTo<M>,
     /// Permission to read/write the zone's exec IOMMU `mem_set` PCell.
     pub iommu_mem_set_perm: PointsTo<M>,
+    /// Permission to read/write the zone's opaque integration payload.
+    pub payload_perm: PointsTo<D>,
     /// Per-zone ghost token (map-sharded `zones[zid]` for the active spec).
     pub zone_state: P::ZoneToken,
     /// This zone's CPU MMU `s2map` slice token, kept in sync with the CPU
@@ -82,22 +86,23 @@ pub tracked struct ZoneRwContent<M, P> where P: ZoneGhostProtocol {
 }
 
 /// Phantom struct that carries the `Zone`-level `InvariantPredicate`.
-pub struct ZonePred<PT, M, A, P, I> where
+pub struct ZonePred<PT, M, A, P, I, D = ()> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
     I: HardwareInstr,
  {
-    pub _phantom: PhantomData<(PT, M, A, P, I)>,
+    pub _phantom: PhantomData<(PT, M, A, P, I, D)>,
 }
 
-impl<PT, M, A, P, I> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePred<
+impl<PT, M, A, P, I, D> InvariantPredicate<ZoneKey, ZoneRwContent<M, P, D>> for ZonePred<
     PT,
     M,
     A,
     P,
     I,
+    D,
 > where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
@@ -112,7 +117,7 @@ impl<PT, M, A, P, I> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePr
     /// - `zone_state` belongs to the key's spec instance,
     /// - the ghost zone's CPU/IOMMU views mirror the exec memory sets' views, and
     /// - the CPU and IOMMU `s2map` slice tokens are synced with their memory sets.
-    open spec fn inv(k: ZoneKey, v: ZoneRwContent<M, P>) -> bool {
+    open spec fn inv(k: ZoneKey, v: ZoneRwContent<M, P, D>) -> bool {
         &&& v.cpu_mem_set_perm.is_init()
         &&& v.cpu_mem_set_perm@.pcell === k.cpu_cell_id
         &&& v.cpu_mem_set_perm@.mem_contents->Init_0.invariants()
@@ -123,6 +128,8 @@ impl<PT, M, A, P, I> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePr
         &&& v.iommu_mem_set_perm@.mem_contents->Init_0.invariants()
         &&& v.iommu_mem_set_perm@.mem_contents->Init_0.inst_id() == k.alloc_inst_id
         &&& v.iommu_mem_set_perm@.mem_contents->Init_0.pt_constants() == k.pt_constants
+        &&& v.payload_perm.is_init()
+        &&& v.payload_perm@.pcell === k.payload_cell_id
         &&& v.zone_state.zone_id() == k.zone_id
         &&& v.zone_state.wf(k.mem_inst_id)
         &&& v.zone_state.ghost_zone().cpu_mem_set == v.cpu_mem_set_perm@.mem_contents->Init_0@
@@ -136,7 +143,9 @@ impl<PT, M, A, P, I> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePr
         &&& v.cpu_mmu_tok.value().s2map == pt_s2map_inner(
             v.cpu_mem_set_perm@.mem_contents->Init_0@.mappings,
         )
-        &&& v.cpu_mmu_tok.value().coherent(VmId(k.zone_id as nat))
+        &&& v.cpu_mmu_tok.value().coherent(
+            VmId(k.zone_id as nat),
+        )
         // The IOMMU `s2map` slice token is *synced* with the IOMMU memory set.
         &&& v.iommu_mmu_tok.instance_id() == k.iommu_mmu_inst_id
         &&& v.iommu_mmu_tok.key() == VmId(k.zone_id as nat)
@@ -152,7 +161,7 @@ impl<PT, M, A, P, I> InvariantPredicate<ZoneKey, ZoneRwContent<M, P>> for ZonePr
 /// Multiple CPUs from the **same zone** can hold read guards concurrently
 /// (e.g., for page-table walks).  A write guard gives exclusive access for
 /// operations that mutate either visible memory set.
-pub struct Zone<PT, M, A, P, I> where
+pub struct Zone<PT, M, A, P, I, D = ()> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
@@ -163,15 +172,17 @@ pub struct Zone<PT, M, A, P, I> where
     pub cpu_mem_set: PCell<M>,
     /// Exec IOMMU memory set — written only while the write guard is held.
     pub iommu_mem_set: PCell<M>,
-    /// RwLock protecting `ZoneRwContent<M, P>` with `ZoneKey` predicate.
-    pub lock: RwLock<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P, I>>,
+    /// Opaque integration payload, protected by the same lock as the memory sets.
+    pub payload: PCell<D>,
+    /// RwLock protecting `ZoneRwContent<M, P, D>` with `ZoneKey` predicate.
+    pub lock: RwLock<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
     /// Zone identifier.
     pub zone_id: usize,
     /// Phantom data for unused type parameters.
-    pub _phantom: PhantomData<(PT, A, P, I)>,
+    pub _phantom: PhantomData<(PT, A, P, I, D)>,
 }
 
-impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
+impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
@@ -185,6 +196,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         &&& self.lock.wf()
         &&& self.lock.k@.cpu_cell_id == self.cpu_mem_set.id()
         &&& self.lock.k@.iommu_cell_id == self.iommu_mem_set.id()
+        &&& self.lock.k@.payload_cell_id == self.payload.id()
         &&& self.lock.k@.zone_id == self.zone_id
         &&& I::valid_zone_id(self.zone_id)
     }
@@ -223,6 +235,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     pub fn new(
         cpu_mem_set: M,
         iommu_mem_set: M,
+        payload: D,
         zone_id: usize,
         Ghost(mem_inst_id): Ghost<InstanceId>,
         Ghost(alloc_inst_id): Ghost<InstanceId>,
@@ -270,11 +283,13 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         // Store the exec CPU/IOMMU mem_sets in fresh PCells.
         let (cpu_mem_set_cell, Tracked(cpu_mem_set_perm)) = PCell::new(cpu_mem_set);
         let (iommu_mem_set_cell, Tracked(iommu_mem_set_perm)) = PCell::new(iommu_mem_set);
+        let (payload_cell, Tracked(payload_perm)) = PCell::new(payload);
 
         // Bundle permission + ghost tokens into the lock content.
-        let tracked zone_rw_content = ZoneRwContent::<M, P> {
+        let tracked zone_rw_content = ZoneRwContent::<M, P, D> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
+            payload_perm,
             zone_state,
             cpu_mmu_tok,
             iommu_mmu_tok,
@@ -286,6 +301,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
                 zone_id,
                 cpu_cell_id: cpu_mem_set_cell.id(),
                 iommu_cell_id: iommu_mem_set_cell.id(),
+                payload_cell_id: payload_cell.id(),
                 mem_inst_id,
                 alloc_inst_id,
                 mmu_inst_id,
@@ -298,6 +314,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
         Zone {
             cpu_mem_set: cpu_mem_set_cell,
             iommu_mem_set: iommu_mem_set_cell,
+            payload: payload_cell,
             lock: zone_lock,
             zone_id,
             _phantom: PhantomData,
@@ -307,7 +324,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     /// Acquire exclusive (write) access to this zone's CPU memory set.
     pub fn lock_write(&self) -> (res: (
         M,
-        RwWriteGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P, I>>,
+        RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
     ))
         requires
             self.wf(),
@@ -325,6 +342,8 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
                 == self.lock.k@.alloc_inst_id,
             res.1.token.iommu_mem_set_perm@.mem_contents->Init_0.pt_constants()
                 == self.lock.k@.pt_constants,
+            res.1.token.payload_perm@.pcell == self.payload.id(),
+            res.1.token.payload_perm.is_init(),
             res.1.token@.zone_state.zone_id() == self.lock.k@.zone_id,
             res.1.token@.zone_state.wf(self.lock.k@.mem_inst_id),
             res.1.token@.zone_state.ghost_zone().cpu_mem_set == res.0@,
@@ -346,7 +365,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             res.1.token@.iommu_mmu_tok.value().coherent(VmId(self.lock.k@.zone_id as nat)),
     {
         let RwWriteGuard { handle, token } = self.lock.lock_write();
-        let tracked mut content: ZoneRwContent<M, P> = token.get();
+        let tracked mut content: ZoneRwContent<M, P, D> = token.get();
         let mem_set = self.cpu_mem_set.take(Tracked(&mut content.cpu_mem_set_perm));
         (mem_set, RwWriteGuard { handle, token: Tracked(content) })
     }
@@ -354,7 +373,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     /// Acquire exclusive (write) access to this zone's IOMMU memory set.
     pub fn lock_write_iommu(&self) -> (res: (
         M,
-        RwWriteGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P, I>>,
+        RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
     ))
         requires
             self.wf(),
@@ -372,6 +391,8 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
                 == self.lock.k@.pt_constants,
             res.1.token.iommu_mem_set_perm@.pcell == self.iommu_mem_set.id(),
             !res.1.token.iommu_mem_set_perm.is_init(),
+            res.1.token.payload_perm@.pcell == self.payload.id(),
+            res.1.token.payload_perm.is_init(),
             res.1.token@.zone_state.zone_id() == self.lock.k@.zone_id,
             res.1.token@.zone_state.wf(self.lock.k@.mem_inst_id),
             res.1.token@.zone_state.ghost_zone().cpu_mem_set
@@ -392,7 +413,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             res.1.token@.iommu_mmu_tok.value().coherent(VmId(self.lock.k@.zone_id as nat)),
     {
         let RwWriteGuard { handle, token } = self.lock.lock_write();
-        let tracked mut content: ZoneRwContent<M, P> = token.get();
+        let tracked mut content: ZoneRwContent<M, P, D> = token.get();
         let mem_set = self.iommu_mem_set.take(Tracked(&mut content.iommu_mem_set_perm));
         (mem_set, RwWriteGuard { handle, token: Tracked(content) })
     }
@@ -401,7 +422,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     pub fn unlock_write(
         &self,
         mem_set: M,
-        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P, I>>,
+        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
     )
         requires
             self.wf(),
@@ -415,6 +436,8 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
                 == self.lock.k@.alloc_inst_id,
             guard.token.iommu_mem_set_perm@.mem_contents->Init_0.pt_constants()
                 == self.lock.k@.pt_constants,
+            guard.token.payload_perm@.pcell == self.payload.id(),
+            guard.token.payload_perm.is_init(),
             // Linking invariant: the mem_set being stored back satisfies M's own wf.
             mem_set.invariants(),
             mem_set.inst_id() == self.lock.k@.alloc_inst_id,
@@ -441,7 +464,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             guard.token@.iommu_mmu_tok.value().coherent(VmId(self.lock.k@.zone_id as nat)),
     {
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, P> = token.get();
+        let tracked mut content: ZoneRwContent<M, P, D> = token.get();
         self.cpu_mem_set.put(Tracked(&mut content.cpu_mem_set_perm), mem_set);
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
     }
@@ -450,7 +473,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     pub fn unlock_write_iommu(
         &self,
         mem_set: M,
-        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P, I>>,
+        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
     )
         requires
             self.wf(),
@@ -464,6 +487,8 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
                 == self.lock.k@.pt_constants,
             guard.token.iommu_mem_set_perm@.pcell == self.iommu_mem_set.id(),
             !guard.token.iommu_mem_set_perm.is_init(),
+            guard.token.payload_perm@.pcell == self.payload.id(),
+            guard.token.payload_perm.is_init(),
             mem_set.invariants(),
             mem_set.inst_id() == self.lock.k@.alloc_inst_id,
             mem_set.pt_constants() == self.lock.k@.pt_constants,
@@ -487,7 +512,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
             guard.token@.iommu_mmu_tok.value().coherent(VmId(self.lock.k@.zone_id as nat)),
     {
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, P> = token.get();
+        let tracked mut content: ZoneRwContent<M, P, D> = token.get();
         self.iommu_mem_set.put(Tracked(&mut content.iommu_mem_set_perm), mem_set);
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
     }
@@ -495,8 +520,8 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     /// Acquire shared (read) access to this zone's state.
     pub fn lock_read(&self) -> (res: RwReadGuard<
         ZoneKey,
-        ZoneRwContent<M, P>,
-        ZonePred<PT, M, A, P, I>,
+        ZoneRwContent<M, P, D>,
+        ZonePred<PT, M, A, P, I, D>,
     >)
         requires
             self.wf(),
@@ -509,7 +534,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
     /// Release the read lock acquired by `lock_read`.
     pub fn unlock_read(
         &self,
-        guard: RwReadGuard<ZoneKey, ZoneRwContent<M, P>, ZonePred<PT, M, A, P, I>>,
+        guard: RwReadGuard<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
     )
         requires
             self.wf(),
@@ -579,7 +604,7 @@ impl<PT, M, A, P, I> Zone<PT, M, A, P, I> where
 /// `BudgetSpec` region transitions are zone-local: they only consume/produce the
 /// per-zone `zones[zid]` map-sharded token and access `BudgetSpecInstance`
 /// (constant-sharded) as a shared reference.
-impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
+impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
@@ -612,7 +637,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetProtocol> = token.get();
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
 
         if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -621,9 +646,10 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         // Pull this zone's CPU MMU slice token out of the lock content so it can be
         // threaded through `mem_set.insert` (which fires `map`/`map_dsb` per page).
 
-        let tracked ZoneRwContent::<M, BudgetProtocol> {
+        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
+            payload_perm,
             zone_state,
             cpu_mmu_tok,
             iommu_mmu_tok,
@@ -641,9 +667,10 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         proof {
             let tracked new_zone_state = BudgetProtocol::cpu_insert_region(gs, zone_state, region);
             content =
-            ZoneRwContent::<M, BudgetProtocol> {
+            ZoneRwContent::<M, BudgetProtocol, D> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
+                payload_perm,
                 zone_state: new_zone_state,
                 cpu_mmu_tok: new_cpu_mmu_tok,
                 iommu_mmu_tok,
@@ -679,7 +706,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetProtocol> = token.get();
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
 
         if !mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -690,9 +717,10 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         // invariant `cpu_mmu_tok.value().s2map == pt_s2map_inner(mem_set@.mappings)` is the
         // sync point, threaded through `mem_set.remove`, which fires
         // `unmap_invalidate` (forced `DSB`+`TLBI`) per page.
-        let tracked ZoneRwContent::<M, BudgetProtocol> {
+        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
+            payload_perm,
             zone_state,
             cpu_mmu_tok,
             iommu_mmu_tok,
@@ -716,9 +744,10 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
                 ghost_region,
             );
             content =
-            ZoneRwContent::<M, BudgetProtocol> {
+            ZoneRwContent::<M, BudgetProtocol, D> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
+                payload_perm,
                 zone_state: new_zone_state,
                 cpu_mmu_tok: new_cpu_mmu_tok,
                 iommu_mmu_tok,
@@ -727,6 +756,53 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
 
         self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
         Ok(())
+    }
+
+    /// Remove every CPU-visible region from this zone.
+    pub fn clear(
+        &self,
+        allocator: &GlobalAllocator<A>,
+        Tracked(gs): Tracked<&BudgetGlobalState>,
+        mmu: &MmuHardware<I>,
+    )
+        requires
+            self.wf(),
+            self.lock.k@.mem_inst_id == BudgetProtocol::mem_inst_id(gs),
+            self.lock.k@.alloc_inst_id == allocator.inst_id(),
+            self.lock.k@.mmu_inst_id == mmu.inst_id(),
+            allocator.invariants(),
+            mmu.wf(),
+        ensures
+            mmu.wf(),
+    {
+        let (mut mem_set, guard) = self.lock_write();
+        let RwWriteGuard { handle, token } = guard;
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
+        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
+            cpu_mem_set_perm,
+            iommu_mem_set_perm,
+            payload_perm,
+            zone_state,
+            cpu_mmu_tok,
+            iommu_mmu_tok,
+        } = content;
+        let s2_out = mem_set.clear(allocator, self.zone_id, mmu, Tracked(cpu_mmu_tok), false);
+        let tracked new_cpu_mmu_tok = s2_out.get();
+
+        proof {
+            let tracked new_zone_state = BudgetProtocol::cpu_clear(gs, zone_state);
+            content =
+            ZoneRwContent::<M, BudgetProtocol, D> {
+                cpu_mem_set_perm,
+                iommu_mem_set_perm,
+                payload_perm,
+                zone_state: new_zone_state,
+                cpu_mmu_tok: new_cpu_mmu_tok,
+                iommu_mmu_tok,
+            };
+        }
+
+        self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
     }
 
     /// Insert `region` into this zone's IOMMU-visible set, forcing the SMMU stage-2
@@ -755,7 +831,7 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         }
         let (mut mem_set, guard) = self.lock_write_iommu();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetProtocol> = token.get();
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
 
         if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -764,9 +840,10 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         // Pull the IOMMU slice token out and thread it through `mem_set.insert` with
         // `iommu = true`, which fires the SMMU `iommu_map_sync` per inserted page.
 
-        let tracked ZoneRwContent::<M, BudgetProtocol> {
+        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
+            payload_perm,
             zone_state,
             cpu_mmu_tok,
             iommu_mmu_tok,
@@ -788,9 +865,10 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
                 region,
             );
             content =
-            ZoneRwContent::<M, BudgetProtocol> {
+            ZoneRwContent::<M, BudgetProtocol, D> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
+                payload_perm,
                 zone_state: new_zone_state,
                 cpu_mmu_tok,
                 iommu_mmu_tok: new_iommu_mmu_tok,
@@ -825,16 +903,17 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
         }
         let (mut mem_set, guard) = self.lock_write_iommu();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetProtocol> = token.get();
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
 
         if !mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
         let ghost old_mem_set = mem_set@;
-        let tracked ZoneRwContent::<M, BudgetProtocol> {
+        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
+            payload_perm,
             zone_state,
             cpu_mmu_tok,
             iommu_mmu_tok,
@@ -858,9 +937,10 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
                 ghost_region,
             );
             content =
-            ZoneRwContent::<M, BudgetProtocol> {
+            ZoneRwContent::<M, BudgetProtocol, D> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
+                payload_perm,
                 zone_state: new_zone_state,
                 cpu_mmu_tok,
                 iommu_mmu_tok: new_iommu_mmu_tok,
@@ -869,6 +949,59 @@ impl<PT, M, A, I> Zone<PT, M, A, BudgetProtocol, I> where
 
         self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
         Ok(())
+    }
+
+    /// Remove every IOMMU-visible region from this zone.
+    pub fn clear_iommu(
+        &self,
+        allocator: &GlobalAllocator<A>,
+        Tracked(gs): Tracked<&BudgetGlobalState>,
+        iommu_mmu: &MmuHardware<I>,
+    )
+        requires
+            self.wf(),
+            self.lock.k@.mem_inst_id == BudgetProtocol::mem_inst_id(gs),
+            self.lock.k@.alloc_inst_id == allocator.inst_id(),
+            self.lock.k@.iommu_mmu_inst_id == iommu_mmu.inst_id(),
+            allocator.invariants(),
+            iommu_mmu.wf(),
+        ensures
+            iommu_mmu.wf(),
+    {
+        let (mut mem_set, guard) = self.lock_write_iommu();
+        let RwWriteGuard { handle, token } = guard;
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
+        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
+            cpu_mem_set_perm,
+            iommu_mem_set_perm,
+            payload_perm,
+            zone_state,
+            cpu_mmu_tok,
+            iommu_mmu_tok,
+        } = content;
+        let s2_out = mem_set.clear(
+            allocator,
+            self.zone_id,
+            iommu_mmu,
+            Tracked(iommu_mmu_tok),
+            true,
+        );
+        let tracked new_iommu_mmu_tok = s2_out.get();
+
+        proof {
+            let tracked new_zone_state = BudgetProtocol::iommu_clear(gs, zone_state);
+            content =
+            ZoneRwContent::<M, BudgetProtocol, D> {
+                cpu_mem_set_perm,
+                iommu_mem_set_perm,
+                payload_perm,
+                zone_state: new_zone_state,
+                cpu_mmu_tok,
+                iommu_mmu_tok: new_iommu_mmu_tok,
+            };
+        }
+
+        self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
     }
 }
 
