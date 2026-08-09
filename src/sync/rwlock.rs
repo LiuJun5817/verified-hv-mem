@@ -480,7 +480,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                     token: Tracked(value),
                 };
                 write_guard_opt = Some(write_guard);
-                break ;
+                break;
             }
         }
 
@@ -513,7 +513,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                 ghost g => { }
             );
             if rc_val >= u64::MAX {
-                continue ;
+                continue;
             }
             let tracked mut pending_reader_token: Option<RwPendingReaderToken<K, V, Pred>> = None;
             let rc_cas_result =
@@ -529,7 +529,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                 }
             );
             if rc_cas_result.is_err() {
-                continue ;
+                continue;
             }
             let tracked mut mock_reader_token_opt: Option<RwMockReaderToken<K, V, Pred>> = None;
             let exc_value =
@@ -571,7 +571,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                         ghost g => { }
                     );
                     if real_rc_val >= u64::MAX {
-                        continue ;
+                        continue;
                     }
                     let real_rc_cas_result =
                         atomic_with_ghost!(
@@ -604,13 +604,13 @@ impl<K, V, Pred: InvariantPredicate<K, V>> RwLock<K, V, Pred> {
                             }
                             let read_guard = RwReadGuard { handle: Tracked(reader_token) };
                             read_guard_opt = Some(read_guard);
-                            break ;
+                            break;
                         },
                         Err(_) => {},
                     }
                 }
 
-                break ;
+                break;
             } else {
                 let tracked pr_token = match pending_reader_token {
                     Some(t) => t,

@@ -1,10 +1,12 @@
 // #![verifier::deprecated_postcondition_mut_ref_style(true)]
 #![no_std]
+#![allow(unused)]
 use core::panic;
 use vstd::prelude::*;
 
 pub mod address;
 pub mod bitmap_allocator;
+pub mod constants;
 pub mod global_allocator;
 pub mod hardware;
 pub mod hv_mem;

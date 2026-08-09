@@ -29,12 +29,10 @@ impl HardwareView {
     ) -> bool {
         let tkey = TlbKey::new(cpu, vm, gpa);
         let skey = VmPageKey::new(vm, gpa);
-        &&& s1.active_vm.contains_key(cpu) && s1.active_vm[cpu] == vm
         &&& s1.s2map.contains_key(skey)
         &&& s2.s2map == s1.s2map
         &&& s2.iommu_s2map == s1.iommu_s2map
         &&& s2.iommu_tlb == s1.iommu_tlb
-        &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory
         &&& s2.tlb == s1.tlb.insert(
             tkey,
@@ -66,7 +64,6 @@ impl HardwareView {
         &&& s2.tlb == s1.tlb.remove_keys(targets)
         &&& s2.iommu_s2map == s1.iommu_s2map
         &&& s2.iommu_tlb == s1.iommu_tlb
-        &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory
     }
 
@@ -89,7 +86,6 @@ impl HardwareView {
         &&& s2.tlb == s1.tlb
         &&& s2.iommu_s2map == s1.iommu_s2map
         &&& s2.iommu_tlb == s1.iommu_tlb
-        &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory
     }
 
@@ -108,7 +104,6 @@ impl HardwareView {
         &&& s2.iommu_tlb == s1.iommu_tlb.remove_keys(targets)
         &&& s2.s2map == s1.s2map
         &&& s2.tlb == s1.tlb
-        &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory
     }
 
@@ -127,24 +122,6 @@ impl HardwareView {
         &&& s2.iommu_tlb == s1.iommu_tlb
         &&& s2.s2map == s1.s2map
         &&& s2.tlb == s1.tlb
-        &&& s2.active_vm == s1.active_vm
-        &&& s2.memory == s1.memory
-    }
-
-    /// Schedule `vm` onto `cpu`.
-    ///
-    /// On AArch64: writing `VTTBR_EL2` before `ERET`.
-    pub open spec fn context_switch_step(
-        s1: HardwareView,
-        s2: HardwareView,
-        cpu: CpuId,
-        vm: VmId,
-    ) -> bool {
-        &&& s2.active_vm == s1.active_vm.insert(cpu, vm)
-        &&& s2.tlb == s1.tlb
-        &&& s2.s2map == s1.s2map
-        &&& s2.iommu_tlb == s1.iommu_tlb
-        &&& s2.iommu_s2map == s1.iommu_s2map
         &&& s2.memory == s1.memory
     }
 
@@ -178,7 +155,6 @@ impl HardwareView {
         &&& s2.s2map == s1.s2map
         &&& s2.iommu_tlb == s1.iommu_tlb
         &&& s2.iommu_s2map == s1.iommu_s2map
-        &&& s2.active_vm == s1.active_vm
         &&& s2.memory == s1.memory.insert(pa, value)
     }
 }

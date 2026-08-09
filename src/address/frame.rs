@@ -2,7 +2,6 @@ use vstd::prelude::*;
 
 verus! {
 
-use core::prelude::rust_2021::derive;
 use core::cmp::{Eq, PartialEq};
 use core::marker::Copy;
 use core::clone::Clone;
@@ -97,25 +96,17 @@ pub struct MemAttr {
     pub writable: bool,
     /// Whether the memory is executable.
     pub executable: bool,
-    /// Whether the memory is user accessible.
-    pub user_accessible: bool,
     /// Whether the memory is used for device mapping.
     pub device: bool,
 }
 
 impl MemAttr {
     /// Constructor.
-    pub fn new(
-        readable: bool,
-        writable: bool,
-        executable: bool,
-        user_accessible: bool,
-        device: bool,
-    ) -> (res: Self)
+    pub fn new(readable: bool, writable: bool, executable: bool, device: bool) -> (res: Self)
         ensures
-            res == Self::spec_new(readable, writable, executable, user_accessible, device),
+            res == Self::spec_new(readable, writable, executable, device),
     {
-        Self { readable, writable, executable, user_accessible, device }
+        Self { readable, writable, executable, device }
     }
 
     /// Spec-mode constructor.
@@ -123,27 +114,26 @@ impl MemAttr {
         readable: bool,
         writable: bool,
         executable: bool,
-        user_accessible: bool,
         device: bool,
     ) -> Self {
-        Self { readable, writable, executable, user_accessible, device }
+        Self { readable, writable, executable, device }
     }
 
     /// Default attributes for a frame.
     ///
-    /// readable/writable/executable/user_accessible/non-device.
+    /// readable/writable/executable/non-device.
     pub fn default() -> (res: Self)
         ensures
             res == Self::spec_default(),
     {
-        Self::new(true, true, true, true, false)
+        Self::new(true, true, true, false)
     }
 
     /// Spec-mode default attributes for a frame.
     ///
-    /// readable/writable/executable/user_accessible/non-device.
+    /// readable/writable/executable/non-device.
     pub open spec fn spec_default() -> Self {
-        Self::spec_new(true, true, true, true, false)
+        Self::spec_new(true, true, true, false)
     }
 }
 
@@ -159,9 +149,9 @@ impl MemType {
     /// Spec-mode convert to MemAttr.
     pub open spec fn spec_to_attr(&self) -> MemAttr {
         match self {
-            MemType::Ram => MemAttr::spec_new(true, true, true, true, false),
-            MemType::Io => MemAttr::spec_new(true, true, false, true, true),
-            MemType::VirtIo => MemAttr::spec_new(true, true, false, true, true),
+            MemType::Ram => MemAttr::spec_new(true, true, true, false),
+            MemType::Io => MemAttr::spec_new(true, true, false, true),
+            MemType::VirtIo => MemAttr::spec_new(true, true, false, true),
         }
     }
 
@@ -174,9 +164,9 @@ impl MemType {
             res == self.spec_to_attr(),
     {
         match self {
-            MemType::Ram => MemAttr::new(true, true, true, true, false),
-            MemType::Io => MemAttr::new(true, true, false, true, true),
-            MemType::VirtIo => MemAttr::new(true, true, false, true, true),
+            MemType::Ram => MemAttr::new(true, true, true, false),
+            MemType::Io => MemAttr::new(true, true, false, true),
+            MemType::VirtIo => MemAttr::new(true, true, false, true),
         }
     }
 }

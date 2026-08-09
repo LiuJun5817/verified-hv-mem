@@ -1,12 +1,9 @@
+use crate::constants::*;
 use vstd::prelude::*;
 
 verus! {
 
 pub type DataWord = nat;
-
-/// Fixed page granularity for the sketch. A higher-fidelity model can later
-/// replace this with byte- or architecture-specific constants.
-pub spec const PAGE_WORDS: nat = 512;
 
 #[derive(PartialEq, Eq, Structural, Copy, Clone)]
 pub struct VmId(pub nat);
@@ -94,7 +91,6 @@ pub enum HypervisorOp {
     ReclaimPage(VmId, PhysPage),
     SharePage(VmId, VmId, PhysPage),
     UnsharePage(VmId, VmId, PhysPage),
-    ContextSwitch(CpuId, VmId),
     AddVm(VmId),
     RemoveVm(VmId),
     /// SMMU/IOMMU stage-2 map maintenance (the DMA counterpart of `Map`).

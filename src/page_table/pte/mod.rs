@@ -3,9 +3,11 @@ use crate::address::{
     addr::{PAddr, SpecPAddr},
     frame::{FrameSize, MemAttr},
 };
+use crate::constants::*;
 use vstd::prelude::*;
 
 mod aarch64;
+pub use aarch64::Aarch64PTE;
 
 verus! {
 
@@ -42,6 +44,7 @@ pub trait PageTableEntry: Sized {
     fn new(addr: PAddr, attr: MemAttr, huge: bool) -> (pte: Self)
         requires
             addr@.aligned(FrameSize::Size4K.as_nat()),
+            addr@.0 < PADDR_UPPER_BOUND,
         ensures
             pte.wf(),
             pte == Self::spec_new(addr@, attr, huge),
@@ -97,6 +100,7 @@ pub trait PageTableEntry: Sized {
     broadcast proof fn lemma_new_wf(addr: SpecPAddr, attr: MemAttr, huge: bool)
         requires
             addr.aligned(FrameSize::Size4K.as_nat()),
+            addr.0 < PADDR_UPPER_BOUND,
             addr.0 <= usize::MAX,
         ensures
             #![trigger Self::spec_new(addr, attr, huge)]
@@ -121,6 +125,7 @@ pub trait PageTableEntry: Sized {
     broadcast proof fn lemma_new_keeps_value(addr: SpecPAddr, attr: MemAttr, huge: bool)
         requires
             addr.aligned(FrameSize::Size4K.as_nat()),
+            addr.0 < PADDR_UPPER_BOUND,
             addr.0 <= usize::MAX,
         ensures
             ({

@@ -39,7 +39,6 @@ pub ghost struct MachineState {
     pub iommu_hw_s2map: Map<VmPageKey, S2Entry>,
     pub tlb: Map<TlbKey, TlbEntry>,
     pub iommu_tlb: Map<TlbKey, TlbEntry>,
-    pub active_vm: Map<CpuId, VmId>,
     pub memory: Map<PhysWordAddr, DataWord>,
 }
 
@@ -59,7 +58,6 @@ impl MachineState {
             iommu_hw_s2map: hw.iommu_s2map,
             tlb: hw.tlb,
             iommu_tlb: hw.iommu_tlb,
-            active_vm: hw.active_vm,
             memory: hw.memory,
         }
     }
@@ -85,10 +83,6 @@ impl MachineState {
 
     pub open spec fn private_pa(&self, vm: VmId, pa: PhysWordAddr) -> bool {
         self.private_page(vm, pa.page())
-    }
-
-    pub open spec fn cpu_runs(&self, cpu: CpuId, vm: VmId) -> bool {
-        self.active_vm.contains_key(cpu) && self.active_vm[cpu] == vm
     }
 
     pub open spec fn shared_with(&self, vm: VmId, page: PhysPage) -> bool {
@@ -160,7 +154,6 @@ impl MachineState {
         &&& self.iommu_s2_map == other.iommu_s2_map
         &&& self.iommu_hw_s2map == other.iommu_hw_s2map
         &&& self.iommu_tlb == other.iommu_tlb
-        &&& self.active_vm == other.active_vm
     }
 
     pub open spec fn same_memory_as(&self, other: &Self) -> bool {
@@ -337,17 +330,11 @@ impl MachineState {
         &&& self.iommu_translation_wf()
     }
 
-    pub open spec fn active_vm_wf(&self) -> bool {
-        forall|cpu: CpuId| #[trigger]
-            self.active_vm.contains_key(cpu) ==> self.all_vms().contains(self.active_vm[cpu])
-    }
-
     pub open spec fn wf(&self) -> bool {
         &&& self.ownership_wf()
         &&& self.sharing_wf()
         &&& self.translation_wf()
         &&& self.iommu_wf()
-        &&& self.active_vm_wf()
         &&& self.tlb_safe()
         &&& self.iommu_tlb_safe()
         &&& self.sync()

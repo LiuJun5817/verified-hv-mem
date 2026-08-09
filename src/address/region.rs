@@ -1,14 +1,9 @@
+use crate::constants::*;
 use vstd::prelude::*;
 
 verus! {
 
 use super::{addr::{PAddr, SpecPAddr, SpecVAddr, VAddr}, frame::{FrameSize, MemAttr, SpecFrame}};
-
-/// Page size in bytes (4KB).
-pub const PAGE_SIZE: usize = 0x1000;
-
-/// Page size in spec mode
-pub spec const SPEC_PAGE_SIZE: nat = 0x1000;
 
 /// A memory region represents a contiguous range of virtual addresses with specific properties.
 pub struct MemoryRegion {
@@ -30,6 +25,7 @@ impl MemoryRegion {
         &&& self.vstart@.0 + self.pages * SPEC_PAGE_SIZE <= usize::MAX
         &&& self.pstart@.aligned(SPEC_PAGE_SIZE)
         &&& self.pstart@.0 + self.pages * SPEC_PAGE_SIZE <= usize::MAX
+        &&& self.pstart@.0 + self.pages * SPEC_PAGE_SIZE <= PADDR_UPPER_BOUND
     }
 
     /// Spec-mode Calculate the end.
@@ -190,6 +186,10 @@ impl MemoryRegion {
             return false;
         }
         if self.pstart.0 > usize::MAX - self.pages * PAGE_SIZE {
+            return false;
+        }
+        if self.pages * PAGE_SIZE > PADDR_UPPER_BOUND || self.pstart.0 > PADDR_UPPER_BOUND
+            - self.pages * PAGE_SIZE {
             return false;
         }
         true

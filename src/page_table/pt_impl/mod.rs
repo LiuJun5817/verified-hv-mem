@@ -5,7 +5,10 @@ use super::{
     pte::PageTableEntry,
 };
 use crate::{
-    address::{addr::VAddr, frame::Frame},
+    address::{
+        addr::{PAddr, SpecPAddr, VAddr},
+        frame::Frame,
+    },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
 };
@@ -35,6 +38,25 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
         self.0.inst_id()
     }
 
+    open spec fn spec_root(&self) -> SpecPAddr {
+        self.0.pt_mem.root@
+    }
+
+    fn constants(&self) -> (res: PTConstants) {
+        let res = self.0.constants.clone();
+        proof {
+            let view = self.0.view();
+            view.construct_node_facts(view.pt_mem.root, 0);
+            let node = view.construct_node(view.pt_mem.root, 0);
+            assert(node.constants == view.constants);
+        }
+        res
+    }
+
+    fn root(&self) -> (root: PAddr) {
+        self.0.pt_mem.root
+    }
+
     fn new(allocator: &GlobalAllocator<A>, constants: PTConstants) -> (pt: Self) {
         broadcast use crate::page_table::pte::group_pte_lemmas;
 
@@ -44,6 +66,10 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
             assert(pt.view().view().view().mappings === Map::empty());
         }
         ExPageTable(pt)
+    }
+
+    fn drop(self, allocator: &GlobalAllocator<A>) {
+        self.0.drop(allocator)
     }
 
     fn map(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr, frame: Frame) -> (res: Result<
@@ -65,7 +91,7 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
         self.0.map(allocator, vbase, frame)
     }
 
-    fn unmap(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr) -> (res: Result<(), ()>) {
+    fn unmap(&mut self, allocator: &GlobalAllocator<A>, vbase: VAddr) -> (res: Result<Frame, ()>) {
         proof {
             let view = self.0.view();
             view.lemma_wf_implies_node_wf();

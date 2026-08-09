@@ -194,7 +194,7 @@ impl PTTreeNode {
     /// Removes a frame at `path` by setting it to `Empty`.
     ///
     /// Does nothing if the entry at `path` is already `Empty`.
-    pub open spec fn remove(self, path: PTTreePath) -> (Self, PagingResult)
+    pub open spec fn remove(self, path: PTTreePath) -> (Self, PagingResult<SpecFrame>)
         recommends
             self.wf(),
             path.valid(self.constants.arch, self.level),
@@ -204,7 +204,7 @@ impl PTTreeNode {
         let entry = self.entries[idx as int];
         if path.len() <= 1 {
             match entry {
-                NodeEntry::Frame(_) => (self.update(idx, NodeEntry::Empty), Ok(())),
+                NodeEntry::Frame(frame) => (self.update(idx, NodeEntry::Empty), Ok(frame)),
                 _ => (self, Err(())),
             }
         } else {
@@ -215,7 +215,7 @@ impl PTTreeNode {
                 },
                 NodeEntry::Frame(frame) => {
                     if remain.is_zero() {
-                        (self.update(idx, NodeEntry::Empty), Ok(()))
+                        (self.update(idx, NodeEntry::Empty), Ok(frame))
                     } else {
                         (self, Err(()))
                     }
@@ -281,16 +281,6 @@ impl PTTreeNode {
         Map::new(|path| self.is_frame_path(path), |path| self.visit(path).last()->Frame_0)
     }
 
-    /// Lemma. `new` implies wf.
-    pub proof fn lemma_new_implies_wf(constants: SpecPTConstants, level: nat)
-        requires
-            level < constants.arch.level_count(),
-            constants.arch.valid(),
-        ensures
-            Self::new(constants, level).wf(),
-    {
-    }
-
     /// Lemma. `update` preserves wf.
     pub proof fn lemma_update_preserves_wf(self, index: nat, entry: NodeEntry)
         requires
@@ -333,9 +323,7 @@ impl PTTreeNode {
             1 <= self.visit(path).len() <= path.len(),
         decreases path.len(),
     {
-        if path.len() <= 1 {
-            assert(self.visit(path).len() == 1);
-        } else {
+        if path.len() > 1 {
             let (idx, remain) = path.step();
             let entry = self.entries[idx as int];
             assert(self.entries.contains(entry));
@@ -343,7 +331,7 @@ impl PTTreeNode {
                 NodeEntry::Node(node) => {
                     node.lemma_visit_length_bounds(remain);
                 },
-                _ => assert(self.visit(path).len() == 1),
+                _ => (),
             }
         }
     }
@@ -395,7 +383,6 @@ impl PTTreeNode {
         if path.len() > 1 {
             match entry {
                 NodeEntry::Node(node) => {
-                    assert(self.visit(path) === Seq::new(1, |_i| entry).add(node.visit(remain)));
                     // Recursively prove `node.visit(remain)`
                     node.lemma_visited_entry_is_node_except_final(remain);
                 },
@@ -781,8 +768,6 @@ impl PTTreeNode {
                 },
                 NodeEntry::Empty => {
                     let new = PTTreeNode::new(self.constants, self.level + 1);
-                    // `new` satisfies wf by construction
-                    assert(new.wf());
                     // Recursively prove `new.insert(remain, frame)`
                     new.lemma_insert_preserves_wf(remain, frame);
                     // `new.insert(remain, frame)` satisfies wf,
@@ -833,8 +818,6 @@ impl PTTreeNode {
                 },
                 NodeEntry::Empty => {
                     let node = PTTreeNode::new(self.constants, self.level + 1);
-                    // `node` satisfies wf by construction
-                    assert(node.wf());
                     // Recursively prove `node.insert(remain, frame)`
                     node.lemma_path_mappings_after_insertion_contains_new_mapping(remain, frame);
                 },
@@ -1155,9 +1138,7 @@ impl PTTreeNode {
             self.insert(path, frame).1 is Ok,
         decreases path.len(),
     {
-        let (idx, remain) = path.step();
-        let entry = self.entries[idx as int];
-        assert(self.entries.contains(entry));
+        let (_, remain) = path.step();
         if path.len() > 1 {
             let node = PTTreeNode::new(self.constants, self.level + 1);
             node.lemma_empty_entry_implies_insert_ok(remain, frame);
@@ -1590,6 +1571,28 @@ impl PTTreeNode {
         }
     }
 
+    /// A successful removal returns the frame reached by the removal path.
+    pub proof fn lemma_remove_ok_result(self, path: PTTreePath)
+        requires
+            self.wf(),
+            path.valid(self.constants.arch, self.level),
+            self.remove(path).1 is Ok,
+        ensures
+            self.remove(path).1.unwrap() == self.visit(path).last()->Frame_0,
+        decreases path.len(),
+    {
+        let (idx, remain) = path.step();
+        let entry = self.entries[idx as int];
+        assert(self.entries.contains(entry));
+        if path.len() > 1 {
+            match entry {
+                NodeEntry::Node(node) => node.lemma_remove_ok_result(remain),
+                NodeEntry::Frame(_) => {},
+                NodeEntry::Empty => {},
+            }
+        }
+    }
+
     /// Lemma. `remove` always fails if `self` is empty.
     pub proof fn lemma_empty_implies_remove_fail(self, path: PTTreePath)
         requires
@@ -1944,10 +1947,7 @@ impl PTTreeModel {
 
     /// View the tree as `PageTableState`.
     pub open spec fn view(self) -> PageTableState {
-        PageTableState {
-            mappings: self.mappings(),
-            constants: SpecPTConstants { arch: self.arch() },
-        }
+        PageTableState { mappings: self.mappings(), constants: self.root.constants }
     }
 
     /// Map a virtual address to a physical frame.
@@ -1976,7 +1976,7 @@ impl PTTreeModel {
     /// Unmap a virtual address.
     ///
     /// If unmapping succeeds, return `Ok` and the updated tree.
-    pub open spec fn unmap(self, vbase: SpecVAddr) -> (Self, PagingResult)
+    pub open spec fn unmap(self, vbase: SpecVAddr) -> (Self, PagingResult<SpecFrame>)
         recommends
             self.wf(),
     {
@@ -1986,10 +1986,9 @@ impl PTTreeModel {
             (self.arch().level_count() - 1) as nat,
         );
         let (node, res) = self.root.remove(path);
-        if res is Ok {
-            (Self::new(node.prune(path)), Ok(()))
-        } else {
-            (self, Err(()))
+        match res {
+            Ok(frame) => (Self::new(node.prune(path)), Ok(frame)),
+            Err(()) => (self, Err(())),
         }
     }
 
@@ -2209,15 +2208,13 @@ impl PTTreeModel {
         ensures
             !self.overlaps_vmem(vbase, frame),
     {
-        let (new, res) = self.map(vbase, frame);
+        let (new, _) = self.map(vbase, frame);
         self.map_preserves_wf(vbase, frame);
 
         self.lemma_map_adds_mapping(vbase, frame);
-        assert(new.mappings() == self.mappings().insert(vbase, frame));
 
         // The newly added mapping is not in the original mappings
         self.lemma_map_ok_implies_vbase_nonexist(vbase, frame);
-        assert(!self.mappings().contains_key(vbase));
 
         // `self` and `new` both have non-overlapping mappings
         new.lemma_mappings_nonoverlap_in_vmem();
@@ -2254,7 +2251,6 @@ impl PTTreeModel {
             self.arch(),
             self.arch().level_of_frame_size(frame.size),
         );
-        assert(path.to_vaddr(self.arch()) == vbase);
 
         // `path_mappings` is updated according to lemma.
         self.root.lemma_insert_adds_path_mapping(path, frame);
@@ -2387,6 +2383,7 @@ impl PTTreeModel {
             self.unmap(vbase).1 is Ok,
         ensures
             self.mappings().contains_key(vbase),
+            self.unmap(vbase).1.unwrap() == self.mappings()[vbase],
     {
         let path = PTTreePath::from_vaddr_root(
             vbase,
@@ -2397,6 +2394,7 @@ impl PTTreeModel {
 
         // Prove `real_path` is a padded prefix of `path`.
         self.root.lemma_remove_ok_implies_visit_reaches_frame(path);
+        self.root.lemma_remove_ok_result(path);
         self.root.lemma_visit_length_bounds(path);
         self.root.lemma_real_path_valid(path);
         self.root.lemma_real_path_visits_same_entry(path);
@@ -2404,8 +2402,10 @@ impl PTTreeModel {
         assert(path.has_padded_prefix(real_path));
 
         PTTreePath::lemma_padded_prefix_implies_vaddr_eq(self.arch(), path, real_path);
-        assert(real_path.to_vaddr(self.arch()) == vbase);
-        assert(self.mappings().contains_key(vbase));
+        let frame = self.unmap(vbase).1.unwrap();
+        assert(self.root.path_mappings().contains_pair(real_path, frame));
+        self.lemma_mappings_consistent_with_path_mappings();
+        assert(self.mappings().contains_pair(vbase, frame));
     }
 
     /// Lemma. `vbase` in `mappings()` implies `unmap` succeeds.
@@ -2621,19 +2621,6 @@ impl PTTreeModel {
 
         self.root.lemma_path_mappings_valid();
         PTTreePath::lemma_vaddr_within_prefix_range(self.arch(), vaddr, path, real_path);
-        assert(frame.size == self.arch().frame_size((real_path.len() - 1) as nat));
-        assert(vaddr.within(vbase, frame.size.as_nat()));
-
-        // Prove there is only one mapped region that contains `vaddr`
-        assert forall|vbase2, frame2| #[trigger]
-            self.mappings().contains_pair(vbase2, frame2) && vaddr.within(
-                vbase2,
-                frame2.size.as_nat(),
-            ) implies vbase2 == vbase by {
-            // Prove by contradiction
-            assert(SpecVAddr::overlap(vbase, frame.size.as_nat(), vbase2, frame2.size.as_nat()));
-            self.lemma_mappings_nonoverlap_in_vmem();
-        }
     }
 
     /// Theorem. `map` refines `PageTableState::map`.
@@ -2670,13 +2657,9 @@ impl PTTreeModel {
                 PageTableState::unmap(self@, new@, vbase, res)
             }),
     {
-        let path = PTTreePath::from_vaddr_root(
-            vbase,
-            self.arch(),
-            (self.arch().level_count() - 1) as nat,
-        );
         if self.mappings().contains_key(vbase) {
             self.lemma_vbase_exist_implies_unmap_ok(vbase);
+            self.lemma_unmap_ok_implies_vbase_exist(vbase);
             self.lemma_unmap_removes_mapping(vbase);
         } else {
             if self.unmap(vbase).1 is Ok {
@@ -2694,7 +2677,7 @@ impl PTTreeModel {
         ensures
             self@.query(vaddr, self.query(vaddr)),
     {
-        assert(self.mappings() == self@.mappings);  // I don't know why this is necessary
+        assert(self.mappings() == self@.mappings);
 
         let res = self.query(vaddr);
         if self.has_mapping_for(vaddr) {
@@ -2706,20 +2689,6 @@ impl PTTreeModel {
             }
         }
     }
-}
-
-/// Lemma. The equality of two maps. Two maps are equal if
-/// - they have the same keys
-/// - they have the same values for the same keys
-pub proof fn lemma_map_eq_key_value<K, V>(m1: Map<K, V>, m2: Map<K, V>)
-    requires
-        forall|k| m1.contains_key(k) ==> m2.contains_key(k),
-        forall|k| m2.contains_key(k) ==> m1.contains_key(k),
-        forall|k| #[trigger] m1.contains_key(k) ==> m1[k] === m2[k],
-    ensures
-        m1 === m2,
-{
-    assert(m1 === m2)
 }
 
 /// Lemma. The equality of two maps. Two maps are equal if they have the same (key, value) pairs.
@@ -2741,9 +2710,7 @@ pub proof fn lemma_map_eq_pair<K, V>(m1: Map<K, V>, m2: Map<K, V>)
         assert(m1.contains_pair(k, v));
         assert(m2.contains_pair(k, v));
     }
-    assert(m1 === m2) by {
-        lemma_map_eq_key_value(m1, m2);
-    }
+    assert(m1 === m2);
 }
 
 /// Lemma. If two ranges are aligned, then their start and end are equal.

@@ -1,8 +1,6 @@
 use vstd::prelude::*;
 
-use crate::model::types::{
-    CpuId, DataWord, PhysWordAddr, S2Entry, TlbEntry, TlbKey, VmId, VmPageKey,
-};
+use crate::model::types::{DataWord, PhysWordAddr, S2Entry, TlbEntry, TlbKey, VmPageKey};
 
 verus! {
 
@@ -11,7 +9,7 @@ verus! {
 /// `HardwareView` holds the part of the machine a VM — or the security property —
 /// can *observe or perturb*: the **hardware-reachable** stage-2 map, the TLB that
 /// caches translations and may lag a mapping edit, the data memory reachable
-/// through translation, and the per-CPU VM schedule.  Everything *authoritative*
+/// through translation.  Everything *authoritative*
 /// (ownership, the intended mapping `SoftwareView::s2_map`, the memory partition) is
 /// policy and lives in [`crate::model::software::SoftwareView`].
 ///
@@ -57,8 +55,6 @@ pub ghost struct HardwareView {
     /// abstracted into `SoftwareView` (`s2_map`, ownership) and realized only in the
     /// implementation, tied back by the refinement layers.
     pub memory: Map<PhysWordAddr, DataWord>,
-    /// Which VM is currently scheduled on each CPU.
-    pub active_vm: Map<CpuId, VmId>,
 }
 
 impl HardwareView {

@@ -3,17 +3,19 @@
 //! insert, remove, and find memory areas.
 use crate::{
     address::{
-        addr::{SpecPAddr, SpecVAddr, VAddr},
-        frame::{FrameSize, SpecFrame},
+        addr::{PAddr, SpecPAddr, SpecVAddr, VAddr},
+        frame::{FrameSize, MemAttr, SpecFrame},
         region::MemoryRegion,
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
+    constants::*,
     global_allocator::GlobalAllocator,
-    hardware::spec::MmuS2MapToken,
+    hardware::spec::MmuVmToken,
     hardware::{HardwareInstr, MmuHardware},
     model::types::VmId,
     page_table::{PTConstants, PageTable, SpecPTConstants},
 };
+pub use vec::VecMemorySet;
 use vstd::prelude::*;
 
 mod vec;
@@ -91,6 +93,29 @@ impl SpecMemorySet {
         let r = choose|r: MemoryRegion|
             self.regions.contains(r) && #[trigger] r.spec_contains_vaddr(v);
         r.spec_translate(v)
+    }
+
+    /// Read-only region translation result for an arbitrary virtual address.
+    pub open spec fn query_vaddr(
+        &self,
+        vaddr: SpecVAddr,
+        res: Result<(SpecPAddr, MemAttr), ()>,
+    ) -> bool {
+        match res {
+            Ok((paddr, attr)) => {
+                exists|region: MemoryRegion|
+                    {
+                        &&& #[trigger] self.regions.contains(region)
+                        &&& region.spec_contains_vaddr(vaddr)
+                        &&& paddr == region.spec_translate(vaddr)
+                        &&& attr == region.attr
+                    }
+            },
+            Err(()) => {
+                !exists|region: MemoryRegion| #[trigger]
+                    self.regions.contains(region) && region.spec_contains_vaddr(vaddr)
+            },
+        }
     }
 
     /// Insert a new region into the memory set, returning the new memory set.
@@ -258,6 +283,17 @@ pub trait MemorySet<PT, A, I> where
     /// Page-table constants used by this memory set's backing page table.
     spec fn pt_constants(&self) -> SpecPTConstants;
 
+    /// Physical address of this memory set's backing page-table root.
+    spec fn spec_pt_root(&self) -> SpecPAddr;
+
+    /// Return the physical address of this memory set's backing page-table root.
+    fn pt_root(&self) -> (res: PAddr)
+        requires
+            self.invariants(),
+        ensures
+            res@ == self.spec_pt_root(),
+    ;
+
     /// Check whether the memory set contains no regions or mappings.
     fn is_empty(&self) -> (res: bool)
         requires
@@ -283,11 +319,27 @@ pub trait MemorySet<PT, A, I> where
             res == self@.has_region_starting_at(v@),
     ;
 
+    /// Translate `vaddr` through its containing region without consulting the page table.
+    fn query_vaddr(&self, vaddr: VAddr) -> (res: Result<(PAddr, MemAttr), ()>)
+        requires
+            self.invariants(),
+            vaddr@.0 < self.pt_constants().arch.vspace_size(),
+        ensures
+            self@.query_vaddr(
+                vaddr@,
+                match res {
+                    Ok((paddr, attr)) => Ok((paddr@, attr)),
+                    Err(()) => Err(()),
+                },
+            ),
+    ;
+
     /// Create an empty memory set with the given instance ID.
     fn new(allocator: &GlobalAllocator<A>, pt_constants: PTConstants) -> (res: Self)
         requires
             allocator.invariants(),
             pt_constants@.valid(),
+            pt_constants.hva_to_pa_offset_valid(allocator.base@, A::spec_cap() * SPEC_FRAME_SIZE),
             pt_constants@.arch.leaf_frame_size() == FrameSize::Size4K,
             forall|level: nat|
                 level < pt_constants.arch@.level_count() ==> pt_constants.arch@.entry_count(level)
@@ -300,19 +352,31 @@ pub trait MemorySet<PT, A, I> where
             res.invariants(),
     ;
 
-    /// Insert a new memory region, **forcing a per-page `DSB` (`map`)** via the
-    /// tokenized MMU so the vm's `s2map` slice token tracks the new mappings.  The
-    /// slice token is threaded in/out and ends equal to `pt_s2map_inner(self@.mappings)`
-    /// — the zone's sync point, re-established for the lock invariant.
+    /// Destroy an empty memory set and restore all resources owned by its implementation.
+    fn drop(self, allocator: &GlobalAllocator<A>)
+        requires
+            allocator.invariants(),
+            self.invariants(),
+            self.inst_id() == allocator.inst_id(),
+            self@.empty(),
+        ensures
+            allocator.invariants(),
+    ;
+
+    /// Insert a new memory region, forcing one `DSB`-ordered MMU transition per
+    /// concrete page-table block so the vm's dense 4 KiB `s2map` slice tracks the
+    /// mappings. The slice token is threaded in/out and ends equal to
+    /// `pt_s2map_inner(self@.mappings)` — the zone's sync point, re-established
+    /// for the lock invariant.
     fn insert(
         &mut self,
         allocator: &GlobalAllocator<A>,
         region: MemoryRegion,
-        vm: Ghost<VmId>,
-        mmu: &mut MmuHardware<I>,
-        s2_tok: Tracked<MmuS2MapToken>,
+        zone_id: usize,
+        mmu: &MmuHardware<I>,
+        s2_tok: Tracked<MmuVmToken>,
         iommu: bool,
-    ) -> (res: Tracked<MmuS2MapToken>)
+    ) -> (res: Tracked<MmuVmToken>)
         requires
             old(self).invariants(),
             allocator.invariants(),
@@ -320,26 +384,27 @@ pub trait MemorySet<PT, A, I> where
             region.spec_valid(),
             region.spec_within_vspace(old(self).pt_constants().arch.vspace_size()),
             !old(self)@.overlaps_vmem(region),
-            old(mmu).wf(),
-            s2_tok@.instance_id() == old(mmu).inst_id(),
-            s2_tok@.key() == vm@,
-            s2_tok@.value() == pt_s2map_inner(old(self)@.mappings),
+            mmu.wf(),
+            I::valid_zone_id(zone_id),
+            s2_tok@.instance_id() == mmu.inst_id(),
+            s2_tok@.key() == VmId(zone_id as nat),
+            s2_tok@.value().s2map == pt_s2map_inner(old(self)@.mappings),
+            s2_tok@.value().coherent(VmId(zone_id as nat)),
         ensures
             self.inst_id() == old(self).inst_id(),
             self.pt_constants() == old(self).pt_constants(),
             self@ == old(self)@.insert_region(region),
             self.invariants(),
             mmu.wf(),
-            mmu.inst_id() == old(mmu).inst_id(),
-            mmu.live_vms() == old(mmu).live_vms(),
             res@.instance_id() == mmu.inst_id(),
-            res@.key() == vm@,
-            res@.value() == pt_s2map_inner(self@.mappings),
+            res@.key() == VmId(zone_id as nat),
+            res@.value().s2map == pt_s2map_inner(self@.mappings),
+            res@.value().coherent(VmId(zone_id as nat)),
     ;
 
-    /// Remove a memory region by its starting virtual address, **forcing a per-page
-    /// `DSB`+`TLBI` (`unmap_invalidate`)** via the tokenized MMU.  `vm` is the owning
-    /// zone's id, `mmu` issues the maintenance instructions, and `s2_tok` is the
+    /// Remove a memory region by its starting virtual address, forcing one
+    /// `DSB`+`TLBI` transition per concrete page-table block. `zone_id` identifies
+    /// the owning zone, `mmu` issues the maintenance instructions, and `s2_tok` is the
     /// zone's `s2map` slice token (threaded in/out).  The slice token ends equal to
     /// `pt_s2map_inner(self@.mappings)` — provable only because the instructions run
     /// (the encapsulated instance is the sole way to advance the slice token), so the
@@ -348,31 +413,32 @@ pub trait MemorySet<PT, A, I> where
         &mut self,
         allocator: &GlobalAllocator<A>,
         start: VAddr,
-        vm: Ghost<VmId>,
-        mmu: &mut MmuHardware<I>,
-        s2_tok: Tracked<MmuS2MapToken>,
+        zone_id: usize,
+        mmu: &MmuHardware<I>,
+        s2_tok: Tracked<MmuVmToken>,
         iommu: bool,
-    ) -> (res: Tracked<MmuS2MapToken>)
+    ) -> (res: Tracked<MmuVmToken>)
         requires
             old(self).invariants(),
             allocator.invariants(),
             old(self).inst_id() == allocator.inst_id(),
             old(self)@.has_region_starting_at(start@),
-            old(mmu).wf(),
-            s2_tok@.instance_id() == old(mmu).inst_id(),
-            s2_tok@.key() == vm@,
-            s2_tok@.value() == pt_s2map_inner(old(self)@.mappings),
+            mmu.wf(),
+            I::valid_zone_id(zone_id),
+            s2_tok@.instance_id() == mmu.inst_id(),
+            s2_tok@.key() == VmId(zone_id as nat),
+            s2_tok@.value().s2map == pt_s2map_inner(old(self)@.mappings),
+            s2_tok@.value().coherent(VmId(zone_id as nat)),
         ensures
             self.inst_id() == old(self).inst_id(),
             self.pt_constants() == old(self).pt_constants(),
             self@ == old(self)@.remove_region(start@),
             self.invariants(),
             mmu.wf(),
-            mmu.inst_id() == old(mmu).inst_id(),
-            mmu.live_vms() == old(mmu).live_vms(),
             res@.instance_id() == mmu.inst_id(),
-            res@.key() == vm@,
-            res@.value() == pt_s2map_inner(self@.mappings),
+            res@.key() == VmId(zone_id as nat),
+            res@.value().s2map == pt_s2map_inner(self@.mappings),
+            res@.value().coherent(VmId(zone_id as nat)),
     ;
 
     /// Lemma. The invariants imply the well-formedness of the memory set.
