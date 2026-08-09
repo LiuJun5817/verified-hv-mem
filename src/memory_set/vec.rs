@@ -89,13 +89,6 @@ impl<PT, A, I> VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator
             }
     }
 
-    /// The abstract view of regions in this memory set.
-    pub open spec fn regions_view(&self) -> Set<MemoryRegion> {
-        Set::new(
-            |r: MemoryRegion| exists|i: int| 0 <= i < self.regions.len() && self.regions[i] == r,
-        )
-    }
-
     /// Select the unique region whose dense mapping contains `v`.
     pub open spec fn region_index_for_vaddr(&self, v: SpecVAddr) -> int
         recommends
@@ -262,6 +255,16 @@ impl<PT, A, I> VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator
         }
     }
 
+    /// The vector of regions has no duplicates (derived from the unique-start lemma).
+    proof fn lemma_regions_no_duplicates(self)
+        requires
+            self.invariants(),
+        ensures
+            self.regions@.no_duplicates(),
+    {
+        self.lemma_region_start_unique();
+    }
+
     /// Pick a supported frame size for the next part of `region`.
     /// The executable code scans levels greedily.
     fn select_frame_size(&self, vaddr: VAddr, paddr: PAddr, remaining_pages: usize) -> (res:
@@ -337,7 +340,7 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
     I: HardwareInstr,
  {
     open spec fn view(&self) -> SpecMemorySet {
-        SpecMemorySet { regions: self.regions_view(), mappings: self.mappings_view() }
+        SpecMemorySet { regions: self.regions@.to_set(), mappings: self.mappings_view() }
     }
 
     open spec fn inst_id(&self) -> InstanceId {
@@ -1507,6 +1510,62 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
             assert(self@ == old(self)@.remove_region(start@));
             assert(s2@.value().s2map == pt_s2map_inner(self@.mappings));
             assert(s2@.value().coherent(VmId(zone_id as nat)));
+        }
+        s2
+    }
+
+    fn clear(
+        &mut self,
+        allocator: &GlobalAllocator<A>,
+        zone_id: usize,
+        mmu: &MmuHardware<I>,
+        s2_tok: Tracked<MmuVmToken>,
+        iommu: bool,
+    ) -> (res: Tracked<MmuVmToken>) {
+        let ghost old_inst_id = self.inst_id();
+        let ghost old_pt_constants = self.pt_constants();
+        let mut s2 = s2_tok;
+        while !self.regions.is_empty()
+            invariant
+                self.invariants(),
+                self.inst_id() == old_inst_id,
+                self.pt_constants() == old_pt_constants,
+                allocator.invariants(),
+                self.inst_id() == allocator.inst_id(),
+                mmu.wf(),
+                I::valid_zone_id(zone_id),
+                s2@.instance_id() == mmu.inst_id(),
+                s2@.key() == VmId(zone_id as nat),
+                s2@.value().s2map == pt_s2map_inner(self@.mappings),
+                s2@.value().coherent(VmId(zone_id as nat)),
+            decreases self.regions.len(),
+        {
+            let start = self.regions[0].vstart;
+            let ghost region = self.regions@[0];
+            let ghost regions_before = self.regions@;
+            let ghost view_before = self@;
+            proof {
+                assert(self@.regions.contains(region));
+                assert(self@.has_region_starting_at(region.vstart@));
+                self.lemma_regions_no_duplicates();
+                regions_before.unique_seq_to_set();
+                self.lemma_invariants_implies_wf();
+            }
+            s2 = self.remove(allocator, start, zone_id, mmu, s2, iommu);
+            proof {
+                // Prove list removal is equivalent to the abstract set removal.
+                view_before.lemma_remove_region_eq_exact(region);
+                self.lemma_regions_no_duplicates();
+                self.regions@.unique_seq_to_set();
+                assert(self@.regions == view_before.regions.remove(region));
+                assert(self.regions.len() < regions_before.len());
+            }
+        }
+        proof {
+            assert(self@.regions =~= Set::<MemoryRegion>::empty());
+            self.lemma_pt_empty_if_regions_empty();
+            assert(self@.mappings =~= Map::<SpecVAddr, SpecFrame>::empty());
+            assert(self@ == old(self)@.clear());
         }
         s2
     }
