@@ -260,7 +260,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new_table(new_base).spec_to_u64(),
                 );
                 Self::new(pt_mem, self.constants).insert(
                     vbase,
@@ -812,7 +812,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new_table(new_base).spec_to_u64(),
                 );
                 Self::new(pt_mem, self.constants).wf()
             }),
@@ -823,7 +823,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         let pt_mem = pt_mem.write(
             base,
             idx,
-            E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+            E::spec_new_table(new_base).spec_to_u64(),
         );
         let s2 = Self::new(pt_mem, self.constants);
 
@@ -848,7 +848,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
 
             if base2 == base && idx2 == idx {
                 // `(base2, idx2)` is the entry just inserted
-                E::lemma_eq_by_u64(pte, E::spec_new(new_base, MemAttr::spec_default(), false));
+                E::lemma_eq_by_u64(pte, E::spec_new_table(new_base));
             } else {
                 if base2 == new_base {
                     // `base2` is the newly allocated table
@@ -948,7 +948,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new_table(new_base).spec_to_u64(),
                 );
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
                 // Ensures `pt_mem` after `alloc_table` satisfies the wf
@@ -1005,7 +1005,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new_table(new_base).spec_to_u64(),
                 );
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
@@ -1060,7 +1060,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new_table(new_base).spec_to_u64(),
                 );
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
@@ -1209,7 +1209,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let pt_mem3 = pt_mem2.write(
                     base,
                     idx,
-                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new_table(new_base).spec_to_u64(),
                 );
                 let allocated = Self::new(pt_mem3, self.constants);
                 // allocated.pt_mem.tables = self.pt_mem.tables.insert(new_base, level+1)
@@ -1427,7 +1427,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                     let pt_mem = pt_mem.write(
                         base,
                         idx,
-                        E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                        E::spec_new_table(new_base).spec_to_u64(),
                     );
                     // `allocated` is the state after allocating an intermediate table
                     let allocated = Self::new(pt_mem, self.constants);
@@ -1651,7 +1651,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
             let pt_mem = pt_mem.write(
                 base,
                 idx,
-                E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                E::spec_new_table(new_base).spec_to_u64(),
             );
             // `s2` is the state after allocating an intermediate table
             let s2 = Self::new(pt_mem, self.constants);
@@ -1733,13 +1733,13 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let pt_mem = pt_mem.write(
                     base,
                     idx,
-                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new_table(new_base).spec_to_u64(),
                 );
                 // `s2` is the state after allocating an intermediate table
                 let s2 = Self::new(pt_mem, self.constants);
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
 
-                let pte = E::spec_new(new_base, MemAttr::spec_default(), false);
+                let pte = E::spec_new_table(new_base);
                 let tables = s2.collect_table_chain(vbase, base, level);
                 let tables2 = s2.collect_table_chain(vbase, pte.spec_addr(), level + 1);
                 assert(s2.pt_mem.read(base, idx) == pte.spec_to_u64());
@@ -2009,7 +2009,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let written = allocated.write(
                     base,
                     idx,
-                    E::spec_new(new_base, MemAttr::spec_default(), false).spec_to_u64(),
+                    E::spec_new_table(new_base).spec_to_u64(),
                 );
                 let subtable_base = new_base;
                 self.lemma_alloc_intermediate_table_preserves_wf(base, level, idx);
@@ -2019,7 +2019,7 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
                 let subnode = PTTreeNode::new(self.constants, level + 1);
                 E::lemma_eq_by_u64(
                     E::spec_from_u64(sm.pt_mem.read(base, idx)),
-                    E::spec_new(new_base, MemAttr::spec_default(), false),
+                    E::spec_new_table(new_base),
                 );
                 let pte = E::spec_from_u64(sm.pt_mem.read(base, idx));
 

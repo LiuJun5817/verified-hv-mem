@@ -8,6 +8,8 @@ use vstd::prelude::*;
 
 mod aarch64;
 pub use aarch64::Aarch64PTE;
+mod x86;
+pub use x86::X86PTE;
 
 verus! {
 
@@ -18,6 +20,9 @@ pub trait PageTableEntry: Sized {
 
     /// Construct from address and attributes.
     spec fn spec_new(addr: SpecPAddr, attr: MemAttr, huge: bool) -> Self;
+
+    /// Construct an entry that references the next-level page table.
+    spec fn spec_new_table(addr: SpecPAddr) -> Self;
 
     /// Construct an empty entry.
     spec fn spec_empty() -> Self;
@@ -48,6 +53,16 @@ pub trait PageTableEntry: Sized {
         ensures
             pte.wf(),
             pte == Self::spec_new(addr@, attr, huge),
+    ;
+
+    /// Construct an entry that references the next-level page table.
+    fn new_table(addr: PAddr) -> (pte: Self)
+        requires
+            addr@.aligned(FrameSize::Size4K.as_nat()),
+            addr@.0 < PADDR_UPPER_BOUND,
+        ensures
+            pte.wf(),
+            pte == Self::spec_new_table(addr@),
     ;
 
     /// Construct an empty entry.
@@ -107,6 +122,17 @@ pub trait PageTableEntry: Sized {
             Self::spec_new(addr, attr, huge).wf(),
     ;
 
+    /// Lemma: `new_table` produces a well-formed entry.
+    broadcast proof fn lemma_new_table_wf(addr: SpecPAddr)
+        requires
+            addr.aligned(FrameSize::Size4K.as_nat()),
+            addr.0 < PADDR_UPPER_BOUND,
+            addr.0 <= usize::MAX,
+        ensures
+            #![trigger Self::spec_new_table(addr)]
+            Self::spec_new_table(addr).wf(),
+    ;
+
     /// Lemma: `from_u64` produces a well-formed entry.
     broadcast proof fn lemma_from_u64_wf(val: u64)
         ensures
@@ -132,6 +158,19 @@ pub trait PageTableEntry: Sized {
                 let pte = #[trigger] Self::spec_new(addr, attr, huge);
                 pte.spec_valid() && pte.spec_addr() == addr && pte.spec_attr() == attr
                     && pte.spec_huge() == huge
+            }),
+    ;
+
+    /// A table entry is valid, non-leaf, and keeps its table address.
+    broadcast proof fn lemma_new_table_keeps_value(addr: SpecPAddr)
+        requires
+            addr.aligned(FrameSize::Size4K.as_nat()),
+            addr.0 < PADDR_UPPER_BOUND,
+            addr.0 <= usize::MAX,
+        ensures
+            ({
+                let pte = #[trigger] Self::spec_new_table(addr);
+                pte.spec_valid() && pte.spec_addr() == addr && !pte.spec_huge()
             }),
     ;
 
@@ -179,6 +218,7 @@ pub trait PageTableEntry: Sized {
 /// Broadcasted lemmas for GhostPTE.
 pub broadcast group group_pte_lemmas {
     PageTableEntry::lemma_new_wf,
+    PageTableEntry::lemma_new_table_wf,
     PageTableEntry::lemma_from_u64_wf,
     PageTableEntry::lemma_empty_wf,
     PageTableEntry::lemma_from_0_invalid,
@@ -187,6 +227,7 @@ pub broadcast group group_pte_lemmas {
     PageTableEntry::lemma_from_to_u64_inverse,
     PageTableEntry::lemma_from_to_u64_inverse_alter,
     PageTableEntry::lemma_new_keeps_value,
+    PageTableEntry::lemma_new_table_keeps_value,
 }
 
 } // verus!
