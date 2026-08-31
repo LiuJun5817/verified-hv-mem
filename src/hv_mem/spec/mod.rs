@@ -1,7 +1,8 @@
 //! Ghost state machine specifications for the hypervisor memory manager.
 //!
-//! - [`closure`]: assumption-1 (`ClosureSpec`, global `all_regions`) state machine and tokens.
-//! - [`budget`]: assumption-2 (`BudgetSpec`, per-zone static budget) state machine and tokens.
+//! - [`closure`]: `ClosureSpec` with global `all_regions`, plus its state-machine tokens.
+//! - [`budget`]: `BudgetSpec` with zone-private and global-shared physical-page budgets,
+//!   plus its state-machine tokens.
 pub mod budget;
 pub mod closure;
 
@@ -68,10 +69,7 @@ impl GhostZone {
 
     /// Remove every CPU-visible region and mapping from this zone.
     pub open spec fn cpu_clear(&self) -> Self {
-        Self {
-            cpu_mem_set: self.cpu_mem_set.clear(),
-            iommu_mem_set: self.iommu_mem_set,
-        }
+        Self { cpu_mem_set: self.cpu_mem_set.clear(), iommu_mem_set: self.iommu_mem_set }
     }
 
     /// Insert a region into the IOMMU memory set of this zone.
@@ -95,10 +93,7 @@ impl GhostZone {
 
     /// Remove every IOMMU-visible region and mapping from this zone.
     pub open spec fn iommu_clear(&self) -> Self {
-        Self {
-            cpu_mem_set: self.cpu_mem_set,
-            iommu_mem_set: self.iommu_mem_set.clear(),
-        }
+        Self { cpu_mem_set: self.cpu_mem_set, iommu_mem_set: self.iommu_mem_set.clear() }
     }
 }
 

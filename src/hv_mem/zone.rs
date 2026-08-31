@@ -66,7 +66,7 @@ pub struct ZoneKey {
 /// Tracked content protected by a `Zone`'s `RwLock`.
 ///
 /// Generic over `P: ZoneGhostProtocol`: the concrete `ZoneToken` type depends on
-/// which spec assumption is in use (`BudgetZoneState` for BudgetProtocol).
+/// which protocol is in use (`BudgetZoneState` for `BudgetProtocol`).
 pub tracked struct ZoneRwContent<M, P, D = ()> where P: ZoneGhostProtocol {
     /// Permission to read/write the zone's exec CPU `mem_set` PCell.
     pub cpu_mem_set_perm: PointsTo<M>,
@@ -612,7 +612,8 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
  {
     /// Insert `region` into this zone's CPU set using only a shared borrow of the global state.
     ///
-    /// Returns `Err(())` if `region` is invalid or overlaps an existing mapping.
+    /// Returns `Err(())` if `region` is invalid or virtually/physically overlaps
+    /// an existing region in this CPU memory set.
     pub fn insert_region(
         &self,
         allocator: &GlobalAllocator<A>,
@@ -627,7 +628,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
             self.lock.k@.mmu_inst_id == mmu.inst_id(),
             allocator.invariants(),
             mmu.wf(),
-            zone_regions(self.zone_id as nat).contains(region),
+            region_in_budget(self.zone_id as nat, region),
             region.spec_within_vspace(self.vspace_size()),
         ensures
             mmu.wf(),
@@ -639,10 +640,12 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
 
-        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart) {
+        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
+            || mem_set.overlaps_pmem(&region) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
+        let ghost old_mem_set = mem_set@;
         // Pull this zone's CPU MMU slice token out of the lock content so it can be
         // threaded through `mem_set.insert` (which fires `map`/`map_dsb` per page).
 
@@ -665,6 +668,21 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         let tracked new_cpu_mmu_tok = s2_out.get();
 
         proof {
+            if region_in_zone_private_budget(self.zone_id as nat, region) {
+                assert(pmem_nonoverlap_with_zone_private_regions(
+                    self.zone_id as nat,
+                    zone_state.ghost_zone().cpu_mem_set,
+                    region,
+                )) by {
+                    assert forall|old_region: MemoryRegion| #[trigger]
+                        old_mem_set.regions.contains(old_region) && region_in_zone_private_budget(
+                            self.zone_id as nat,
+                            old_region,
+                        ) implies !old_region.spec_overlaps_pmem(region) by {
+                        assert(!old_mem_set.overlaps_pmem(region));
+                    }
+                }
+            }
             let tracked new_zone_state = BudgetProtocol::cpu_insert_region(gs, zone_state, region);
             content =
             ZoneRwContent::<M, BudgetProtocol, D> {
@@ -807,6 +825,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
 
     /// Insert `region` into this zone's IOMMU-visible set, forcing the SMMU stage-2
     /// maintenance instructions per page via the IOMMU `MmuHardware` instance.
+    /// Same-set virtual or physical overlaps are rejected before insertion.
     pub fn insert_iommu_region(
         &self,
         allocator: &GlobalAllocator<A>,
@@ -821,7 +840,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
             self.lock.k@.iommu_mmu_inst_id == iommu_mmu.inst_id(),
             allocator.invariants(),
             iommu_mmu.wf(),
-            zone_regions(self.zone_id as nat).contains(region) || region == gic_region(),
+            region_in_budget(self.zone_id as nat, region),
             region.spec_within_vspace(self.vspace_size()),
         ensures
             iommu_mmu.wf(),
@@ -833,10 +852,12 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
 
-        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart) {
+        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
+            || mem_set.overlaps_pmem(&region) {
             self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
+        let ghost old_mem_set = mem_set@;
         // Pull the IOMMU slice token out and thread it through `mem_set.insert` with
         // `iommu = true`, which fires the SMMU `iommu_map_sync` per inserted page.
 
@@ -859,6 +880,21 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         let tracked new_iommu_mmu_tok = s2_out.get();
 
         proof {
+            if region_in_zone_private_budget(self.zone_id as nat, region) {
+                assert(pmem_nonoverlap_with_zone_private_regions(
+                    self.zone_id as nat,
+                    zone_state.ghost_zone().iommu_mem_set,
+                    region,
+                )) by {
+                    assert forall|old_region: MemoryRegion| #[trigger]
+                        old_mem_set.regions.contains(old_region) && region_in_zone_private_budget(
+                            self.zone_id as nat,
+                            old_region,
+                        ) implies !old_region.spec_overlaps_pmem(region) by {
+                        assert(!old_mem_set.overlaps_pmem(region));
+                    }
+                }
+            }
             let tracked new_zone_state = BudgetProtocol::iommu_insert_region(
                 gs,
                 zone_state,

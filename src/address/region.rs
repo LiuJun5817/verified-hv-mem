@@ -256,6 +256,16 @@ impl MemoryRegion {
     {
     }
 
+    /// Lemma: physical overlap is symmetric.
+    pub proof fn lemma_overlaps_pmem_symmetric(self, other: MemoryRegion)
+        requires
+            self.spec_valid(),
+            other.spec_valid(),
+        ensures
+            self.spec_overlaps_pmem(other) == other.spec_overlaps_pmem(self),
+    {
+    }
+
     /// Lemma: If a region contains a virtual address, then it also contains the corresponding physical address.
     pub proof fn lemma_contains_vaddr_implies_contains_paddr(self, vaddr: SpecVAddr)
         requires
