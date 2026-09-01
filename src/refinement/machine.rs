@@ -64,7 +64,6 @@ pub proof fn lemma_sw_machine_wf_equiv(sw: SoftwareView, hw: HardwareView)
     let m = MachineState::assemble(sw, hw);
     assert(m.all_vms == sw.all_vms);
     assert(m.vm_owned == sw.vm_owned);
-    assert(m.hypervisor_owned == sw.hypervisor_owned);
     assert(m.vm_shared == sw.vm_shared);
     assert(m.s2_map == sw.s2_map);
     // `owned_or_shared` coincides because both private and shared page sets are copied.
@@ -556,7 +555,6 @@ pub open spec fn tlb_prefix_keys(region: Region, u: nat) -> Set<TlbKey> {
 pub open spec fn insert_partial(s1: SoftwareView, region: Region, a: nat, m: nat) -> SoftwareView {
     SoftwareView {
         all_vms: s1.all_vms,
-        hypervisor_owned: s1.hypervisor_owned.difference(phys_prefix(region, a)),
         vm_owned: s1.vm_owned.insert(
             region.vm,
             s1.vm_owned[region.vm].union(phys_prefix(region, a)),
@@ -569,8 +567,8 @@ pub open spec fn insert_partial(s1: SoftwareView, region: Region, a: nat, m: nat
     }
 }
 
-/// A prefix page is free in `s1`: held by the hypervisor and owned by no VM.
-proof fn lemma_prefix_pages_free(s1: SoftwareView, region: Region, a: nat, p: PhysPage)
+/// A prefix page is privately unowned and not shared in `s1`.
+proof fn lemma_prefix_pages_unowned(s1: SoftwareView, region: Region, a: nat, p: PhysPage)
     requires
         s1.wf(),
         SoftwareView::insert_region_enabled(s1, region),
@@ -578,8 +576,8 @@ proof fn lemma_prefix_pages_free(s1: SoftwareView, region: Region, a: nat, p: Ph
         phys_prefix(region, a).contains(p),
     ensures
         region.pages().contains(p),
-        s1.hypervisor_owned.contains(p),
         forall|w: VmId| #[trigger] s1.all_vms.contains(w) ==> !s1.vm_owned[w].contains(p),
+        !s1.vm_shared.contains(p),
 {
 }
 
@@ -612,25 +610,13 @@ pub proof fn lemma_insert_partial_wf(s1: SoftwareView, region: Region, a: nat, m
                 if !pp.contains(p) {
                     assert(s1.vm_owned[vm].contains(p));
                 } else {
-                    lemma_prefix_pages_free(s1, region, a, p);
+                    lemma_prefix_pages_unowned(s1, region, a, p);
                 }
             } else if y == vm {
                 assert(s1.vm_owned[x].contains(p));
                 if pp.contains(p) {
-                    lemma_prefix_pages_free(s1, region, a, p);
+                    lemma_prefix_pages_unowned(s1, region, a, p);
                 }
-            }
-        }
-    }
-    assert forall|w: VmId| #[trigger] sp.all_vms.contains(w) implies (forall|p: PhysPage|
-     #[trigger]
-        sp.vm_owned[w].contains(p) ==> !sp.hypervisor_owned.contains(p)) by {
-        assert forall|p: PhysPage| #[trigger]
-            sp.vm_owned[w].contains(p) implies !sp.hypervisor_owned.contains(p) by {
-            if w == vm && pp.contains(p) {
-                // p ∈ prefix ⟹ removed from hypervisor_owned by the difference.
-            } else {
-                assert(s1.vm_owned[w].contains(p));
             }
         }
     }
@@ -710,10 +696,6 @@ pub proof fn lemma_insert_assign_edge(s1: SoftwareView, region: Region, i: nat)
     let pp_i = phys_prefix(region, i);
     let pp_i1 = phys_prefix(region, (i + 1) as nat);
     lemma_phys_prefix_succ(region, i);  // pp_i1 == pp_i.insert(page); page ∉ pp_i
-    // hypervisor_owned: difference(prefix(i+1)) == difference(prefix(i)).remove(page)
-    assert(s1.hypervisor_owned.difference(pp_i1) =~= s1.hypervisor_owned.difference(pp_i).remove(
-        page,
-    ));
     // vm_owned: (s1[vm] ∪ prefix(i)).insert(page) == s1[vm] ∪ prefix(i+1)
     assert(s1.vm_owned[vm].union(pp_i).insert(page) =~= s1.vm_owned[vm].union(pp_i1));
     assert(from.vm_owned.insert(vm, from.vm_owned[vm].insert(page)) =~= insert_partial(
@@ -947,7 +929,6 @@ pub proof fn lemma_insert_region_machine_trace(
     assert(phys_prefix(region, n) =~= region.pages());
     assert(entry_prefix(region, n) =~= region.entries());
     assert(insert_partial(sw1, region, 0, 0) == sw1) by {
-        assert(sw1.hypervisor_owned.difference(phys_prefix(region, 0)) =~= sw1.hypervisor_owned);
         assert(sw1.vm_owned[region.vm].union(phys_prefix(region, 0)) =~= sw1.vm_owned[region.vm]);
         assert(sw1.vm_owned.insert(region.vm, sw1.vm_owned[region.vm]) =~= sw1.vm_owned);
         assert(sw1.s2_map.union_prefer_right(entry_prefix(region, 0)) =~= sw1.s2_map);
@@ -1025,7 +1006,6 @@ pub proof fn lemma_insert_region_machine_trace(
 pub open spec fn remove_partial(s1: SoftwareView, region: Region, u: nat, r: nat) -> SoftwareView {
     SoftwareView {
         all_vms: s1.all_vms,
-        hypervisor_owned: s1.hypervisor_owned.union(phys_prefix(region, r)),
         vm_owned: s1.vm_owned.insert(
             region.vm,
             s1.vm_owned[region.vm].difference(phys_prefix(region, r)),
@@ -1110,19 +1090,6 @@ pub proof fn lemma_remove_partial_wf(s1: SoftwareView, region: Region, u: nat, r
             assert(s1.vm_owned[x].contains(p));  // sp[x] ⊆ s1[x]
         }
     }
-    assert forall|w: VmId| #[trigger] sp.all_vms.contains(w) implies (forall|p: PhysPage|
-     #[trigger]
-        sp.vm_owned[w].contains(p) ==> !sp.hypervisor_owned.contains(p)) by {
-        assert forall|p: PhysPage| #[trigger]
-            sp.vm_owned[w].contains(p) implies !sp.hypervisor_owned.contains(p) by {
-            assert(s1.vm_owned[w].contains(p));  // sp[w] ⊆ s1[w], so p ∉ s1.hypervisor_owned
-            if pp.contains(p) {
-                // p is reclaimed: owned by `vm` alone in s1, so `w == vm`; but sp[vm]
-                // dropped the prefix, contradicting `sp.vm_owned[w].contains(p)`.
-                lemma_remove_prefix_owned(s1, region, r, p);
-            }
-        }
-    }
     // translation_wf: a surviving key targets an unreclaimed page, so ownership/sharing
     // (which only shrank by the reclaimed prefix) still covers it.
     assert forall|k: VmPageKey| #[trigger] sp.s2_map.contains_key(k) implies (sp.all_vms.contains(
@@ -1204,8 +1171,6 @@ pub proof fn lemma_remove_reclaim_edge(s1: SoftwareView, region: Region, i: nat)
     // `page` is owned by `vm` and not yet reclaimed, so `from` still has it.
     assert(region.pages().contains(page));
     assert(s1.vm_owned[vm].contains(page));  // enabled
-    // hypervisor_owned: union(prefix(i+1)) == union(prefix(i)).insert(page)
-    assert(s1.hypervisor_owned.union(pp_i1) =~= s1.hypervisor_owned.union(pp_i).insert(page));
     // vm_owned: (s1[vm].difference(prefix(i))).remove(page) == s1[vm].difference(prefix(i+1))
     assert(s1.vm_owned[vm].difference(pp_i).remove(page) =~= s1.vm_owned[vm].difference(pp_i1));
     assert(from.vm_owned.insert(vm, from.vm_owned[vm].remove(page)) =~= remove_partial(
@@ -1460,7 +1425,6 @@ pub proof fn lemma_remove_region_machine_trace(
     assert(entry_prefix(region, n).dom() =~= region.entries().dom());
     // trace[0]: empty prefixes ⟹ remove_partial(0,0)==sw1 and hw_unmapped(0)==hw.
     assert(trace[0] == MachineState::assemble(sw1, hw)) by {
-        assert(sw1.hypervisor_owned.union(phys_prefix(region, 0)) =~= sw1.hypervisor_owned);
         assert(sw1.vm_owned[region.vm].difference(phys_prefix(region, 0))
             =~= sw1.vm_owned[region.vm]);
         assert(sw1.vm_owned.insert(region.vm, sw1.vm_owned[region.vm]) =~= sw1.vm_owned);
@@ -1474,9 +1438,6 @@ pub proof fn lemma_remove_region_machine_trace(
     )) by {
         assert(trace.len() - 1 == 2 * n);
         assert((2 * n + 1) / 2 == n && (2 * n) / 2 == n) by (nonlinear_arith);
-        assert(sw1.hypervisor_owned.union(phys_prefix(region, n)) =~= sw1.hypervisor_owned.union(
-            region.pages(),
-        ));
         assert(sw1.vm_owned[region.vm].difference(phys_prefix(region, n))
             =~= sw1.vm_owned[region.vm].difference(region.pages()));
         assert(sw1.s2_map.remove_keys(entry_prefix(region, n).dom()) =~= sw1.s2_map.remove_keys(
@@ -1514,9 +1475,8 @@ pub proof fn lemma_remove_region_machine_trace(
 // §6  IOMMU `iommu_insert_region` → per-page machine trace
 //
 // The IOMMU mirror of §4, sharing the §3 machinery.  Substantially *shorter*
-// than the CPU version because the IOMMU region ops frame ALL CPU state and do
-// not touch the hypervisor pool: the CPU `wf` clauses carry by framing, and
-// there is no `hypervisor_owned` bookkeeping at all.  The ownership edges
+// than the CPU version because the IOMMU region ops frame all CPU state, so the
+// CPU `wf` clauses carry by framing. The ownership edges
 // (`hv_iommu_assign_page` / `hv_iommu_reclaim_page`) are SW-only machine steps
 // (hardware untouched), so they are proven directly between partials — no
 // SoftwareView per-page assign/reclaim steps are introduced.
@@ -1533,7 +1493,6 @@ pub open spec fn iommu_insert_partial(
 ) -> SoftwareView {
     SoftwareView {
         all_vms: s1.all_vms,
-        hypervisor_owned: s1.hypervisor_owned,
         vm_owned: s1.vm_owned,
         vm_shared: s1.vm_shared,
         s2_map: s1.s2_map,
@@ -2004,7 +1963,6 @@ pub open spec fn iommu_remove_partial(
 ) -> SoftwareView {
     SoftwareView {
         all_vms: s1.all_vms,
-        hypervisor_owned: s1.hypervisor_owned,
         vm_owned: s1.vm_owned,
         vm_shared: s1.vm_shared,
         s2_map: s1.s2_map,

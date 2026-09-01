@@ -25,7 +25,6 @@ impl SoftwareView {
         &&& s1.all_vms.contains(vm)
         &&& s1.owned_or_shared(vm, entry.page)
         &&& s2.all_vms == s1.all_vms
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.s2_map == s1.s2_map.insert(
@@ -48,7 +47,6 @@ impl SoftwareView {
         let key = VmPageKey::new(vm, gpa);
         &&& s1.s2_map.contains_key(key)
         &&& s2.all_vms == s1.all_vms
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.s2_map == s1.s2_map.remove(
@@ -78,7 +76,6 @@ impl SoftwareView {
         &&& s1.iommu_owned.contains_key(vm)
         &&& (s1.iommu_owned[vm].contains(entry.page) || s1.iommu_shared.contains(entry.page))
         &&& s2.all_vms == s1.all_vms
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.s2_map == s1.s2_map
@@ -99,7 +96,6 @@ impl SoftwareView {
         let key = VmPageKey::new(vm, gpa);
         &&& s1.iommu_s2_map.contains_key(key)
         &&& s2.all_vms == s1.all_vms
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.s2_map == s1.s2_map
@@ -108,7 +104,7 @@ impl SoftwareView {
         &&& s2.iommu_s2_map == s1.iommu_s2_map.remove(key)
     }
 
-    /// Transfer `page` from the hypervisor pool to `vm`.
+    /// Add the unowned, non-shared `page` to `vm`'s private CPU pages.
     pub open spec fn assign_page_step(
         s1: SoftwareView,
         s2: SoftwareView,
@@ -116,9 +112,9 @@ impl SoftwareView {
         page: PhysPage,
     ) -> bool {
         &&& s1.all_vms.contains(vm)
-        &&& s1.hypervisor_owned.contains(
-            page,
-        )
+        &&& forall|v: VmId| #[trigger]
+            s1.all_vms.contains(v) ==> !s1.vm_owned[v].contains(page)
+        &&& !s1.vm_shared.contains(page)
         // IOMMU-aware guard: the page handed to `vm`'s CPU ownership must not be another
         // VM's private DMA page (else `iommu_ownership_wf` clause (2) would break) nor
         // a global-shared page (else private/shared disjointness would break).
@@ -126,7 +122,6 @@ impl SoftwareView {
             s1.all_vms.contains(v1) && v1 != vm ==> !s1.iommu_owned[v1].contains(page)
         &&& !s1.iommu_shared.contains(page)
         &&& s2.all_vms == s1.all_vms
-        &&& s2.hypervisor_owned == s1.hypervisor_owned.remove(page)
         &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].insert(page))
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.s2_map
@@ -137,7 +132,7 @@ impl SoftwareView {
         &&& s2.iommu_shared == s1.iommu_shared
     }
 
-    /// Reclaim `page` from `vm` back to the hypervisor pool.
+    /// Remove `page` from `vm`'s private CPU pages.
     pub open spec fn reclaim_page_step(
         s1: SoftwareView,
         s2: SoftwareView,
@@ -147,7 +142,6 @@ impl SoftwareView {
         &&& s1.all_vms.contains(vm)
         &&& s1.vm_owned.contains_key(vm) && s1.vm_owned[vm].contains(page)
         &&& s2.all_vms == s1.all_vms
-        &&& s2.hypervisor_owned == s1.hypervisor_owned.insert(page)
         &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].remove(page))
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.s2_map
@@ -167,7 +161,6 @@ impl SoftwareView {
     /// Register a fresh, empty VM (counterpart of `HvMem::add_zone`).
     pub open spec fn add_vm_step(s1: SoftwareView, s2: SoftwareView, vm: VmId) -> bool {
         &&& s2.all_vms == s1.all_vms.insert(vm)
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned.insert(vm, Set::empty())
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.s2_map
@@ -181,7 +174,6 @@ impl SoftwareView {
     /// Deregister an empty VM (counterpart of `HvMem::remove_zone`).
     pub open spec fn remove_vm_step(s1: SoftwareView, s2: SoftwareView, vm: VmId) -> bool {
         &&& s2.all_vms == s1.all_vms.remove(vm)
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned.remove(vm)
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.s2_map
@@ -199,7 +191,6 @@ impl SoftwareView {
         region: Region,
     ) -> bool {
         &&& s2.all_vms == s1.all_vms
-        &&& s2.hypervisor_owned == s1.hypervisor_owned.difference(region.pages())
         &&& s2.vm_owned == s1.vm_owned.insert(
             region.vm,
             s1.vm_owned[region.vm].union(region.pages()),
@@ -221,7 +212,6 @@ impl SoftwareView {
         region: Region,
     ) -> bool {
         &&& s2.all_vms == s1.all_vms
-        &&& s2.hypervisor_owned == s1.hypervisor_owned.union(region.pages())
         &&& s2.vm_owned == s1.vm_owned.insert(
             region.vm,
             s1.vm_owned[region.vm].difference(region.pages()),
@@ -258,14 +248,17 @@ impl SoftwareView {
         &&& (forall|k: VmPageKey| #[trigger] s1.iommu_s2_map.contains_key(k) ==> k.vm != vm)
     }
 
-    /// `region` is an assignable unit for its VM in this state, its pages are free
-    /// (in the hypervisor pool), and its guest pages are not yet mapped.
+    /// `region` is an assignable unit for its VM in this state, its pages are not
+    /// privately owned or shared, and its guest pages are not yet mapped.
     pub open spec fn insert_region_enabled(s1: SoftwareView, region: Region) -> bool {
         &&& region.wf()
         &&& s1.all_vms.contains(region.vm)
         &&& s1.is_region_assignable(region)
+        &&& (forall|p: PhysPage, v: VmId| #[trigger]
+            region.pages().contains(p) && #[trigger] s1.all_vms.contains(v)
+                ==> !s1.vm_owned[v].contains(p))
         &&& (forall|p: PhysPage| #[trigger]
-            region.pages().contains(p) ==> s1.hypervisor_owned.contains(p))
+            region.pages().contains(p) ==> !s1.vm_shared.contains(p))
         &&& (forall|k: VmPageKey| #[trigger]
             region.entries().contains_key(k) ==> !s1.s2_map.contains_key(
                 k,
@@ -318,7 +311,6 @@ impl SoftwareView {
         region: Region,
     ) -> bool {
         &&& s2.all_vms == s1.all_vms
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.s2_map == s1.s2_map
@@ -338,7 +330,6 @@ impl SoftwareView {
         region: Region,
     ) -> bool {
         &&& s2.all_vms == s1.all_vms
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.s2_map == s1.s2_map

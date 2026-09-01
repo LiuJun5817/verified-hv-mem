@@ -13,8 +13,6 @@ verus! {
 pub ghost struct SoftwareView {
     /// Set of all VM identifiers currently managed by the hypervisor.
     pub all_vms: Set<VmId>,
-    /// Physical pages held by the hypervisor (not assigned to any VM).
-    pub hypervisor_owned: Set<PhysPage>,
     /// Per-VM CPU-mapped pages drawn from the zone's private budget.
     pub vm_owned: Map<VmId, Set<PhysPage>>,
     /// Physical pages currently targeted by at least one CPU mapping and drawn
@@ -51,9 +49,9 @@ impl SoftwareView {
         (self.vm_owned.contains_key(vm) && self.vm_owned[vm].contains(page))
             || self.vm_shared.contains(page)
     }
-    
+
     /// Per-VM private ownership sets cover exactly `all_vms`, are pairwise
-    /// disjoint, and do not overlap the hypervisor pool or CPU-shared pages.
+    /// disjoint, and do not overlap CPU-shared pages.
     pub open spec fn ownership_wf(&self) -> bool {
         &&& self.vm_owned.dom() == self.all_vms
         &&& forall|vm1: VmId, vm2: VmId| #[trigger]
@@ -62,12 +60,7 @@ impl SoftwareView {
                 self.vm_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(page)
         &&& forall|vm: VmId| #[trigger]
             self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.vm_owned[vm].contains(page) ==> !self.hypervisor_owned.contains(page)
-        &&& forall|vm: VmId| #[trigger]
-            self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
                 self.vm_owned[vm].contains(page) ==> !self.vm_shared.contains(page)
-        &&& forall|page: PhysPage| #[trigger]
-            self.vm_shared.contains(page) ==> !self.hypervisor_owned.contains(page)
     }
 
     /// Every stage-2 mapping targets a page owned or shared by the mapped VM.
@@ -110,9 +103,6 @@ impl SoftwareView {
         &&& forall|vm: VmId| #[trigger]
             self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
                 self.vm_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
-                // (5) Global-shared pages are outside the private hypervisor pool.
-        &&& forall|page: PhysPage| #[trigger]
-            self.iommu_shared.contains(page) ==> !self.hypervisor_owned.contains(page)
     }
 
     /// Every IOMMU stage-2 mapping targets a page the mapped VM is allowed to DMA: one

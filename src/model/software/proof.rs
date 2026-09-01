@@ -141,11 +141,10 @@ pub proof fn lemma_assign_page_step_preserves_wf(
     ensures
         s2.wf(),
 {
-    // `page` is free, so it lies in no VM's ownership set.
-    assert(s1.hypervisor_owned.contains(page));
+    // The step guard states that `page` lies in no VM's ownership set.
     assert(s2.vm_owned.dom() =~= s2.all_vms);
     assert(forall|w: VmId| #[trigger] s1.all_vms.contains(w) ==> !s1.vm_owned[w].contains(page));
-    // Pairwise disjointness: only `vm`'s set grows, and just by the free `page`.
+    // Pairwise disjointness: only `vm`'s set grows, and just by the unowned `page`.
     assert forall|a: VmId, b: VmId| #[trigger]
         s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies (forall|
         p: PhysPage,
@@ -164,24 +163,13 @@ pub proof fn lemma_assign_page_step_preserves_wf(
             }
         }
     }
-    // vm-vs-hypervisor: `vm` gained `page`, which left the pool.
-    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
-     #[trigger]
-        s2.vm_owned[w].contains(p) ==> !s2.hypervisor_owned.contains(p)) by {
-        assert forall|p: PhysPage| #[trigger]
-            s2.vm_owned[w].contains(p) implies !s2.hypervisor_owned.contains(p) by {
-            if w != vm || p != page {
-                assert(s1.vm_owned[w].contains(p));
-            }
-        }
-    }
     // `s2_map` unchanged; targets stay owned-or-shared since ownership only grew.
     assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
         k.vm,
     ) && s2.owned_or_shared(k.vm, s2.s2_map[k].page)) by {
         assert(s1.s2_map.contains_key(k));
     }
-    // IOMMU: only `vm_owned` grew (by the free `page`); `iommu_owned`/`iommu_shared`/
+    // IOMMU: only `vm_owned` grew (by the unowned `page`); `iommu_owned`/`iommu_shared`/
     // `iommu_s2_map` are unchanged, so translation_wf and clauses (1),(3) carry.  Clause
     // (2) (a VM's private DMA page is never another VM's CPU page) uses the step guard:
     // `page` is not any *other* VM's private DMA page.
@@ -243,16 +231,6 @@ pub proof fn lemma_reclaim_page_step_preserves_wf(
             assert(s1.vm_owned[a].contains(p));  // s2[a] ⊆ s1[a]
         }
     }
-    // vm-vs-hypervisor: `page` re-enters the pool but is owned by no one in `s2`.
-    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
-     #[trigger]
-        s2.vm_owned[w].contains(p) ==> !s2.hypervisor_owned.contains(p)) by {
-        assert forall|p: PhysPage| #[trigger]
-            s2.vm_owned[w].contains(p) implies !s2.hypervisor_owned.contains(p) by {
-            assert(s1.vm_owned[w].contains(p));  // s2[w] ⊆ s1[w]
-            assert(p != page);  // `page` is no longer owned by any VM
-        }
-    }
     // Quiescence: no surviving translation targets `page`, so all targets stay owned.
     assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
         k.vm,
@@ -300,16 +278,6 @@ pub proof fn lemma_add_vm_step_preserves_wf(s1: SoftwareView, s2: SoftwareView, 
             s2.vm_owned[a].contains(p) implies !s2.vm_owned[b].contains(p) by {
             if a != vm && b != vm {
                 assert(s1.vm_owned[a].contains(p));
-            }
-        }
-    }
-    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
-     #[trigger]
-        s2.vm_owned[w].contains(p) ==> !s2.hypervisor_owned.contains(p)) by {
-        assert forall|p: PhysPage| #[trigger]
-            s2.vm_owned[w].contains(p) implies !s2.hypervisor_owned.contains(p) by {
-            if w != vm {
-                assert(s1.vm_owned[w].contains(p));
             }
         }
     }
@@ -370,14 +338,6 @@ pub proof fn lemma_remove_vm_step_preserves_wf(s1: SoftwareView, s2: SoftwareVie
         assert forall|p: PhysPage| #[trigger]
             s2.vm_owned[a].contains(p) implies !s2.vm_owned[b].contains(p) by {
             assert(s1.vm_owned[a].contains(p));
-        }
-    }
-    assert forall|w: VmId| #[trigger] s2.all_vms.contains(w) implies (forall|p: PhysPage|
-     #[trigger]
-        s2.vm_owned[w].contains(p) ==> !s2.hypervisor_owned.contains(p)) by {
-        assert forall|p: PhysPage| #[trigger]
-            s2.vm_owned[w].contains(p) implies !s2.hypervisor_owned.contains(p) by {
-            assert(s1.vm_owned[w].contains(p));
         }
     }
     assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(

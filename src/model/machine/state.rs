@@ -18,7 +18,6 @@ verus! {
 /// [`crate::model::machine::security`], not here.
 pub ghost struct MachineState {
     pub all_vms: Set<VmId>,
-    pub hypervisor_owned: Set<PhysPage>,
     pub vm_owned: Map<VmId, Set<PhysPage>>,
     /// CPU-mapped global-shared pages, copied from `SoftwareView`.
     pub vm_shared: Set<PhysPage>,
@@ -48,7 +47,6 @@ impl MachineState {
     pub open spec fn assemble(sw: SoftwareView, hw: HardwareView) -> MachineState {
         MachineState {
             all_vms: sw.all_vms,
-            hypervisor_owned: sw.hypervisor_owned,
             vm_owned: sw.vm_owned,
             vm_shared: sw.vm_shared,
             s2_map: sw.s2_map,
@@ -96,9 +94,9 @@ impl MachineState {
 
     /// `page` is referenced by no `s2_map` entry or TLB entry and is not shared.
     ///
-    /// This is the model's *flush-before-free* gate: `hv_reclaim_page_step` requires
-    /// it, so a page cannot be returned to the pool while any CPU's TLB still caches
-    /// it.  Together with the synchronous flush in `hv_unmap_step`, it discharges the
+    /// This is the model's *flush-before-release* gate: `hv_reclaim_page_step` requires
+    /// it, so a page cannot lose its private ownership while any CPU's TLB still caches
+    /// it. Together with the synchronous flush in `hv_unmap_step`, it discharges the
     /// real asynchronous TLB-shootdown window without modelling stale state (see the
     /// note on `hv_unmap_step`).
     pub open spec fn page_is_quiescent(&self, page: PhysPage) -> bool {
@@ -108,7 +106,7 @@ impl MachineState {
         &&& !self.vm_shared.contains(page)
     }
 
-    /// IOMMU flush-before-free gate: `page` is referenced by no IOMMU stage-2 entry and
+    /// IOMMU flush-before-release gate: `page` is referenced by no IOMMU stage-2 entry and
     /// no SMMU TLB entry.  Required by `hv_iommu_reclaim_page_step` so a page cannot lose
     /// its DMA ownership while an SMMU translation to it still resolves (which would
     /// strand a mapping targeting neither `iommu_owned` nor `iommu_shared`).
@@ -124,7 +122,6 @@ impl MachineState {
     }
 
     pub open spec fn same_ownership_as(&self, other: &Self) -> bool {
-        &&& self.hypervisor_owned == other.hypervisor_owned
         &&& self.vm_owned == other.vm_owned
         &&& self.vm_shared == other.vm_shared
         &&& self.iommu_owned == other.iommu_owned
@@ -256,12 +253,7 @@ impl MachineState {
                 self.vm_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(page)
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.vm_owned[vm].contains(page) ==> !self.hypervisor_owned.contains(page)
-        &&& forall|vm: VmId| #[trigger]
-            self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
                 self.vm_owned[vm].contains(page) ==> !self.vm_shared.contains(page)
-        &&& forall|page: PhysPage| #[trigger]
-            self.vm_shared.contains(page) ==> !self.hypervisor_owned.contains(page)
     }
 
     pub open spec fn translation_wf(&self) -> bool {
@@ -292,9 +284,6 @@ impl MachineState {
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
                 self.vm_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
-                // Global-shared pages are outside the private hypervisor pool.
-        &&& forall|page: PhysPage| #[trigger]
-            self.iommu_shared.contains(page) ==> !self.hypervisor_owned.contains(page)
     }
 
     pub open spec fn iommu_translation_wf(&self) -> bool {

@@ -97,7 +97,7 @@ pub open spec fn region_s2_entries(zid: nat, region: MemoryRegion) -> Map<VmPage
 }
 
 /// `r`'s physical pages are backed by no *other* region in `gz` — the condition
-/// under which removing `r` actually frees its pages.
+/// under which removing `r` cannot strand another physical alias.
 pub open spec fn region_pmem_exclusive(gz: GhostZone, r: MemoryRegion) -> bool {
     forall|rr: MemoryRegion| #[trigger]
         gz.cpu_mem_set.regions.contains(rr) && rr != r ==> !rr.spec_overlaps_pmem(r)
@@ -336,8 +336,7 @@ pub open spec fn zone_s2_entries(zid: nat, gz: GhostZone) -> Map<VmPageKey, S2En
     )
 }
 
-/// Union of all static zone-private page budgets. Global-shared pages are not
-/// part of the hypervisor's private-page pool.
+/// Union of all static zone-private page budgets.
 pub open spec fn all_zone_private_pages() -> Set<PhysPage> {
     Set::new(|p: PhysPage| exists|zid: nat| #[trigger] zone_private_pages(zid).contains(p))
 }
@@ -350,11 +349,6 @@ pub open spec fn all_cpu_private_pages(zones: Map<nat, GhostZone>) -> Set<PhysPa
                 #![trigger zones.contains_key(zid)]
                 zones.contains_key(zid) && zone_cpu_private_pages(zid, zones[zid]).contains(p),
     )
-}
-
-/// Zone-private pages not currently CPU-mapped by any active zone.
-pub open spec fn hypervisor_pool(zones: Map<nat, GhostZone>) -> Set<PhysPage> {
-    all_zone_private_pages().difference(all_cpu_private_pages(zones))
 }
 
 /// Stage-2 map of the whole state: the union of each zone's `zone_s2_entries`.
@@ -463,7 +457,6 @@ impl View for SoftwareSpec {
     open spec fn view(&self) -> SoftwareView {
         SoftwareView {
             all_vms: Set::new(|vm: VmId| self.budget.zone_ids.contains(vm.0)),
-            hypervisor_owned: hypervisor_pool(self.budget.zones),
             vm_owned: Map::new(
                 |vm: VmId| self.budget.zone_ids.contains(vm.0),
                 |vm: VmId| zone_cpu_private_pages(vm.0, self.budget.zones[vm.0]),
@@ -797,7 +790,7 @@ pub proof fn lemma_state_iommu_proj_unchanged(s1: SoftwareSpec, s2: SoftwareSpec
 
 /// The dual of [`lemma_state_iommu_proj_unchanged`]: an op that leaves every zone's
 /// `cpu_mem_set` (and the zone set) untouched leaves the whole CPU projection
-/// (`all_vms`, `vm_owned`, `vm_shared`, `s2_map`, `hypervisor_owned`) unchanged.
+/// (`all_vms`, `vm_owned`, `vm_shared`, `s2_map`) unchanged.
 pub proof fn lemma_state_cpu_proj_unchanged(s1: SoftwareSpec, s2: SoftwareSpec)
     requires
         s1.budget.invariant(),
@@ -810,7 +803,6 @@ pub proof fn lemma_state_cpu_proj_unchanged(s1: SoftwareSpec, s2: SoftwareSpec)
         s2@.all_vms =~= s1@.all_vms,
         s2@.vm_owned =~= s1@.vm_owned,
         s2@.s2_map =~= s1@.s2_map,
-        s2@.hypervisor_owned =~= s1@.hypervisor_owned,
         s2@.vm_shared =~= s1@.vm_shared,
 {
     assert forall|vm: VmId|
@@ -819,29 +811,6 @@ pub proof fn lemma_state_cpu_proj_unchanged(s1: SoftwareSpec, s2: SoftwareSpec)
     assert forall|k: VmPageKey|
         s2@.s2_map.contains_key(k) == s1@.s2_map.contains_key(k) && (s1@.s2_map.contains_key(k)
             ==> s2@.s2_map[k] == s1@.s2_map[k]) by {}
-    // hypervisor_owned = all_budget \ all_owned; all_owned is the union of each zone's
-    // `zone_owned_pages` (a function of `cpu_mem_set` only), so it is unchanged.
-    assert(all_owned_pages(s2.budget.zones) =~= all_owned_pages(s1.budget.zones)) by {
-        assert forall|p: PhysPage|
-            all_owned_pages(s2.budget.zones).contains(p) <==> all_owned_pages(
-                s1.budget.zones,
-            ).contains(p) by {
-            if all_owned_pages(s2.budget.zones).contains(p) {
-                let z = choose|z: nat| #[trigger]
-                    s2.budget.zones.contains_key(z) && zone_owned_pages(
-                        s2.budget.zones[z],
-                    ).contains(p);
-                lemma_zone_owned_in_all_owned(s1.budget.zones, z, p);
-            }
-            if all_owned_pages(s1.budget.zones).contains(p) {
-                let z = choose|z: nat| #[trigger]
-                    s1.budget.zones.contains_key(z) && zone_owned_pages(
-                        s1.budget.zones[z],
-                    ).contains(p);
-                lemma_zone_owned_in_all_owned(s2.budget.zones, z, p);
-            }
-        }
-    }
 }
 
 /// **IOMMU memory separation + sharing for the implementation (step 3).** Every
@@ -1803,7 +1772,7 @@ pub trait SoftwareRefinement: View<V = SoftwareView> + Sized {
             SoftwareView::insert_region_step(self@, post@, region),
     ;
 
-    /// Unmap `region`'s entries and reclaim its pages back to the hypervisor pool.
+    /// Unmap `region`'s entries and remove its pages from the VM's private set.
     proof fn remove_region(self, region: Region) -> (post: Self)
         requires
             self.invariants(),
@@ -1845,16 +1814,9 @@ impl SoftwareRefinement for SoftwareSpec {
             #[trigger] self@.wf(),
     {
         let sw = self.view();
-        // ownership_wf: dom; cross-zone disjointness; vm-vs-hypervisor disjointness.
+        // ownership_wf: domain, cross-zone disjointness, and private/shared separation.
         assert(sw.vm_owned.dom() =~= sw.all_vms);
         lemma_state_owned_pages_disjoint(self.budget);
-        assert forall|vm: VmId, page: PhysPage|
-            sw.all_vms.contains(vm) && #[trigger] sw.vm_owned[vm].contains(
-                page,
-            ) implies !sw.hypervisor_owned.contains(page) by {
-            // vm.0 ∈ zones.dom (inv_zone_ids) and page ∈ zone_owned ⇒ all_owned ⇒ not in pool.
-            lemma_zone_owned_in_all_owned(self.budget.zones, vm.0, page);
-        }
         assert(sw.ownership_wf());
 
         // translation_wf.
@@ -1891,32 +1853,6 @@ impl SoftwareRefinement for SoftwareSpec {
         assert(post.budget.zones == self.budget.zones.insert(vm.0, empty_zone));
         lemma_zone_owned_pages_empty(empty_zone);
         lemma_zone_s2_entries_empty(vm.0, empty_zone);
-        // The new zone owns nothing, so all_owned is unchanged.
-        assert(all_owned_pages(post.budget.zones) =~= all_owned_pages(self.budget.zones)) by {
-            assert forall|pp: PhysPage|
-                all_owned_pages(post.budget.zones).contains(pp) implies all_owned_pages(
-                self.budget.zones,
-            ).contains(pp) by {
-                let zid = choose|zid: nat|
-                    #![auto]
-                    post.budget.zones.contains_key(zid) && zone_owned_pages(
-                        post.budget.zones[zid],
-                    ).contains(pp);
-                lemma_zone_owned_in_all_owned(self.budget.zones, zid, pp);
-            }
-            assert forall|pp: PhysPage|
-                all_owned_pages(self.budget.zones).contains(pp) implies all_owned_pages(
-                post.budget.zones,
-            ).contains(pp) by {
-                let zid = choose|zid: nat|
-                    #![auto]
-                    self.budget.zones.contains_key(zid) && zone_owned_pages(
-                        self.budget.zones[zid],
-                    ).contains(pp);
-                lemma_zone_owned_in_all_owned(post.budget.zones, zid, pp);
-            }
-        }
-        assert(post@.hypervisor_owned =~= self@.hypervisor_owned);
         assert(post@.all_vms =~= self@.all_vms.insert(vm));
         assert(post@.vm_owned =~= self@.vm_owned.insert(vm, Set::empty()));
         assert(post@.s2_map =~= self@.s2_map);
@@ -1934,33 +1870,8 @@ impl SoftwareRefinement for SoftwareSpec {
         let post = SoftwareSpec { budget: BudgetSpec::take_step::remove_zone(self.budget, vm.0) };
         assert(post.budget.zone_ids == self.budget.zone_ids.remove(vm.0));
         assert(post.budget.zones == self.budget.zones.remove(vm.0));
-        // The removed zone owned nothing (precondition), so all_owned is unchanged.
+        // The removed zone owns and maps nothing by the transition precondition.
         assert(zone_owned_pages(self.budget.zones[vm.0]) =~= Set::<PhysPage>::empty());
-        assert(all_owned_pages(post.budget.zones) =~= all_owned_pages(self.budget.zones)) by {
-            assert forall|pp: PhysPage|
-                all_owned_pages(self.budget.zones).contains(pp) implies all_owned_pages(
-                post.budget.zones,
-            ).contains(pp) by {
-                let zid = choose|zid: nat|
-                    #![auto]
-                    self.budget.zones.contains_key(zid) && zone_owned_pages(
-                        self.budget.zones[zid],
-                    ).contains(pp);
-                lemma_zone_owned_in_all_owned(post.budget.zones, zid, pp);
-            }
-            assert forall|pp: PhysPage|
-                all_owned_pages(post.budget.zones).contains(pp) implies all_owned_pages(
-                self.budget.zones,
-            ).contains(pp) by {
-                let zid = choose|zid: nat|
-                    #![auto]
-                    post.budget.zones.contains_key(zid) && zone_owned_pages(
-                        post.budget.zones[zid],
-                    ).contains(pp);
-                lemma_zone_owned_in_all_owned(self.budget.zones, zid, pp);
-            }
-        }
-        assert(post@.hypervisor_owned =~= self@.hypervisor_owned);
         assert(post@.all_vms =~= self@.all_vms.remove(vm));
         assert(post@.vm_owned =~= self@.vm_owned.remove(vm));
         assert(post@.s2_map =~= self@.s2_map);
@@ -1992,13 +1903,10 @@ impl SoftwareRefinement for SoftwareSpec {
         let p0 = region.phys_page(0);
         assert(region.wf());  // enabled ⇒ count > 0
         assert(region.pages().contains(p0));
-        // !contains_region(r): r's pages are free, but a contained region's pages are owned.
+        // !contains_region(r): an installed region cannot also satisfy insertion freshness.
         if gz.cpu_mem_set.regions.contains(r) {
             lemma_region_in_zone_owns_pages(gz, r);
             assert(zone_owned_pages(gz).contains(p0));
-            lemma_zone_owned_in_all_owned(self.budget.zones, zid, p0);  // p0 ∈ all_owned
-            assert(self@.hypervisor_owned.contains(p0));  // enabled
-            assert(self@.hypervisor_owned == hypervisor_pool(self.budget.zones));  // pool = budget \ owned
             assert(false);
         }
         // !overlaps_vmem(r): an overlapping zone region shares a gpa, which is mapped.
@@ -2038,7 +1946,6 @@ impl SoftwareRefinement for SoftwareSpec {
             self@.vm_owned[vm].union(region.pages()),
         ));
         assert(post@.s2_map =~= self@.s2_map.union_prefer_right(region.entries()));
-        assert(post@.hypervisor_owned =~= self@.hypervisor_owned.difference(region.pages()));
         // CPU insert leaves every zone's iommu_mem_set untouched ⇒ IOMMU view unchanged.
         lemma_state_iommu_proj_unchanged(self, post);
         post
@@ -2106,9 +2013,7 @@ impl SoftwareRefinement for SoftwareSpec {
         ));
 
         // (5) Projection deltas ⇒ the SoftwareView step.
-        lemma_region_pages_in_all_budget(zid, r);  // r's pages are budget pages (pool algebra)
         lemma_remove_region_owned_pages(self.budget.zones[zid], r);
-        lemma_remove_region_all_owned(self.budget, zid, r);
         lemma_remove_region_state_s2_map(self.budget, post.budget, zid, r);
         assert(post@.all_vms =~= self@.all_vms);
         assert(post@.vm_owned =~= self@.vm_owned.insert(
@@ -2116,7 +2021,6 @@ impl SoftwareRefinement for SoftwareSpec {
             self@.vm_owned[vm].difference(region.pages()),
         ));
         assert(post@.s2_map =~= self@.s2_map.remove_keys(region.entries().dom()));
-        assert(post@.hypervisor_owned =~= self@.hypervisor_owned.union(region.pages()));
         // CPU remove leaves every zone's iommu_mem_set untouched ⇒ IOMMU view unchanged.
         lemma_state_iommu_proj_unchanged(self, post);
         post

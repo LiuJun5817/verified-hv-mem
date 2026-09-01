@@ -176,9 +176,9 @@ impl MachineState {
     /// window in the model.
     ///
     /// Real hardware has an asynchronous shootdown window (invalidate, wait for all
-    /// CPUs to acknowledge, only then free the page).  That window is not modelled as
+    /// CPUs to acknowledge, only then release the page). That window is not modelled as
     /// stale state; it is discharged by two ordering facts instead: this synchronous
-    /// flush, and `page_is_quiescent` gating `hv_reclaim_page_step` (a page is freed
+    /// flush, and `page_is_quiescent` gating `hv_reclaim_page_step` (a page is released
     /// only when no `s2_map`/TLB reference to it remains and it is not shared). Soundness of the
     /// abstraction therefore pushes a *break-before-make* obligation onto the
     /// implementation: the abstract atomic step corresponds to "all CPUs have acked
@@ -252,9 +252,8 @@ impl MachineState {
 
     /// Grant `vm` **private DMA ownership** of `page` — the IOMMU counterpart of
     /// [`hv_assign_page_step`](Self::hv_assign_page_step).  Unlike the CPU assign it does
-    /// *not* move the page out of the hypervisor pool (a DMA-only page legitimately
-    /// projects into the pool): it only grows `iommu_owned[vm]`, leaving all CPU state and
-    /// the SMMU translation state untouched.  The guards mirror `iommu_ownership_wf`: the
+    /// only grows `iommu_owned[vm]`, leaving all CPU state and the SMMU translation
+    /// state untouched. The guards mirror `iommu_ownership_wf`: the
     /// page is not global-shared, not another VM's private DMA page, and not another VM's
     /// CPU-owned page — so DMA ownership stays cross-VM disjoint.
     pub open spec fn hv_iommu_assign_page_step(
@@ -274,7 +273,6 @@ impl MachineState {
         &&& s2.same_identity_as(&s1)
         &&& s2.same_translation_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.iommu_shared == s1.iommu_shared
@@ -299,7 +297,6 @@ impl MachineState {
         &&& s2.same_identity_as(&s1)
         &&& s2.same_translation_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.iommu_shared == s1.iommu_shared
@@ -309,12 +306,13 @@ impl MachineState {
     pub open spec fn hv_assign_page_step(s1: Self, s2: Self, vm: VmId, page: PhysPage) -> bool {
         &&& s1.wf()
         &&& s1.all_vms().contains(vm)
-        &&& s1.hypervisor_owned.contains(page)
+        &&& (forall|v: VmId| #[trigger]
+            s1.all_vms().contains(v) ==> !s1.vm_owned[v].contains(page))
+        &&& !s1.vm_shared.contains(page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_translation_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.hypervisor_owned == s1.hypervisor_owned.remove(page)
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.iommu_owned == s1.iommu_owned
         &&& s2.iommu_shared == s1.iommu_shared
@@ -333,7 +331,6 @@ impl MachineState {
         &&& s2.vm_shared == s1.vm_shared
         &&& s2.iommu_owned == s1.iommu_owned
         &&& s2.iommu_shared == s1.iommu_shared
-        &&& s2.hypervisor_owned == s1.hypervisor_owned.insert(page)
         &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].remove(page))
     }
 
@@ -343,7 +340,6 @@ impl MachineState {
         &&& !s1.all_vms().contains(vm)
         &&& s2.wf()
         &&& s2.all_vms == s1.all_vms.insert(vm)
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned.insert(vm, Set::empty())
         &&& s2.iommu_owned == s1.iommu_owned.insert(vm, Set::empty())
         &&& s2.iommu_shared == s1.iommu_shared
@@ -364,7 +360,6 @@ impl MachineState {
         &&& (forall|k: TlbKey| #[trigger] s1.iommu_tlb.contains_key(k) ==> k.vm != vm)
         &&& s2.wf()
         &&& s2.all_vms == s1.all_vms.remove(vm)
-        &&& s2.hypervisor_owned == s1.hypervisor_owned
         &&& s2.vm_owned == s1.vm_owned.remove(vm)
         &&& s2.iommu_owned == s1.iommu_owned.remove(vm)
         &&& s2.iommu_shared == s1.iommu_shared
@@ -404,9 +399,8 @@ impl MachineState {
     /// state rather than a transition.  At boot no guest exists yet, so the VM
     /// population, ownership maps, shared sets, stage-2 maps, and TLBs
     /// are all empty; every `wf` clause is then a `forall` over an empty domain and
-    /// holds vacuously (see `lemma_init_wf` in `security.rs`).  `hypervisor_owned`
-    /// (the free pool) and `memory` (initial DRAM) are left unconstrained — they are
-    /// platform data irrelevant to `wf`.  Guests and mappings are subsequently
+    /// holds vacuously (see `lemma_init_wf` in `security.rs`). `memory` (initial DRAM)
+    /// is left unconstrained as platform data irrelevant to `wf`. Guests and mappings are subsequently
     /// created by `hv_add_vm` / `hv_assign_page` / `hv_map`.
     pub open spec fn init(s: Self) -> bool {
         &&& s.all_vms == Set::<VmId>::empty()
