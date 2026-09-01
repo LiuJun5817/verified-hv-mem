@@ -20,7 +20,7 @@ verus! {
 // ───────────────────────────────────────────────────────────────────────────
 impl MachineState {
     /// The `init` configuration (`step.rs`) is `wf`.  In `init` the VM population,
-    /// ownership map, sharing graph, stage-2 map, and TLB are all empty,
+    /// ownership maps, shared sets, stage-2 maps, and TLBs are all empty,
     /// so every `wf` clause quantifies over an empty domain and holds vacuously.
     /// Base case of `reachable ⇒ wf`.
     pub proof fn lemma_init_wf(s: MachineState)
@@ -32,7 +32,6 @@ impl MachineState {
         // `vm_owned` and `all_vms` are both empty, so their domains coincide.
         assert(s.vm_owned.dom() =~= s.all_vms());
         assert(s.ownership_wf());
-        assert(s.sharing_wf());
         assert(s.translation_wf());
         assert(s.tlb_safe());
     }
@@ -72,8 +71,8 @@ impl MachineState {
         assert(s.translation_wf());
     }
 
-    /// A `subject`-private page is owned or shared by no *other* VM.  Owned: by
-    /// ownership disjointness; shared: a private page lies in no edge at all.
+    /// A `subject`-private page is neither owned by another VM nor in the
+    /// global-shared CPU projection.
     proof fn lemma_private_excludes_other(
         s: MachineState,
         subject: VmId,
@@ -96,13 +95,7 @@ impl MachineState {
                     assert(!s.vm_owned[subject].contains(page));
                     assert(false);
                 } else {
-                    // then `other` reaches `page` via a sharing edge — but a private
-                    // page is in no edge.
-                    assert(s.shared_with(other, page));
-                    let e = choose|e: SharedPage| #[trigger]
-                        s.shared_pages.contains(e) && e.page == page && (e.left == other || e.right
-                            == other);
-                    assert(s.shared_pages.contains(e) && e.page == page);
+                    assert(s.vm_shared.contains(page));
                     assert(false);
                 }
             }
@@ -304,9 +297,9 @@ impl MachineState {
     }
 
     // ───────────── §3 maintenance: privacy is a run invariant (solves (a)) ────
-    /// **Declassifying actions.** The actions that may legitimately
-    /// strip `page`'s privacy from `subject`: sharing `page` with anyone, reclaiming
-    /// `page` from the subject, or removing the subject VM.  Every *other* action —
+    /// **Declassifying actions.** The actions that may legitimately strip
+    /// `page`'s privacy from `subject`: reclaiming it from the subject or removing
+    /// the subject VM. Every other action —
     /// all guest steps and the remaining hypervisor ops — preserves
     /// `private_page(subject, page)` (see `lemma_step_preserves_private`).  This is
     /// the trusted-policy boundary: a secret stays secret until the hypervisor
@@ -314,7 +307,6 @@ impl MachineState {
     pub open spec fn declassifies(action: MachineAction, subject: VmId, page: PhysPage) -> bool {
         match action {
             MachineAction::Hypervisor(op) => match op {
-                HypervisorOp::SharePage(_l, _r, p) => p == page,
                 HypervisorOp::ReclaimPage(vm, p) => vm == subject && p == page,
                 HypervisorOp::RemoveVm(vm) => vm == subject,
                 _ => false,
@@ -326,10 +318,9 @@ impl MachineState {
     /// **Maintenance, all step kinds.** Any machine step whose action
     /// is not declassifying for `(subject, page)` preserves the subject's presence
     /// and the page's privacy.  Guest steps and `map`/`unmap`
-    /// preserve ownership and the sharing graph outright; `assign` cannot target an
+    /// preserve private ownership and the shared sets outright; `assign` cannot target an
     /// owned page (ownership disjointness, from `wf`); a non-declassifying
-    /// `reclaim`/`share`/`unshare`/`add_vm`/`remove_vm` touches only *other*
-    /// pages/VMs/edges.
+    /// `reclaim`/`add_vm`/`remove_vm` touches only other pages or VMs.
     pub proof fn lemma_step_preserves_private(
         s1: MachineState,
         s2: MachineState,
@@ -739,14 +730,13 @@ impl MachineState {
     /// **State-local DMA isolation.** In any `wf` state, a device operating for `vm`
     /// never resolves an SMMU translation onto a page that a *different* VM privately
     /// owns — CPU-owned (`vm_owned[subject]`) or DMA-owned (`iommu_owned[subject]`) —
-    /// **even when the shared GIC region is present** (`iommu_shared` non-empty).
+    /// even when `iommu_shared` is non-empty.
     ///
     /// Confinement (`lemma_dma_translation_confined`) lands the target in
     /// `iommu_owned[vm] ∪ iommu_shared`, and all four `iommu_ownership_wf` clauses keep
     /// both parts off `subject`'s private pages: a private-DMA target by clauses (1)/(2)
-    /// (cross-VM DMA disjoint; DMA never another VM's CPU page), and a shared (GIC)
-    /// target by clauses (3)/(4) (the shared region is disjoint from every VM's DMA and
-    /// CPU ownership — the GIC is a device region, never a VM's private RAM).
+    /// (cross-VM DMA disjoint; DMA never another VM's CPU page), and a shared
+    /// target by clauses (3)/(4).
     pub proof fn lemma_state_dma_isolation(
         s: MachineState,
         subject: VmId,
@@ -790,53 +780,9 @@ impl MachineState {
         }
     }
 
-    /// Every state along an execution from an `iommu_shared`-empty start has an empty
-    /// `iommu_shared`: every step frames it unchanged (the DMA-sharing set is static).
-    pub proof fn lemma_execution_iommu_shared_empty(
-        trace: Seq<MachineState>,
-        acts: Seq<MachineAction>,
-        k: int,
-    )
-        requires
-            MachineState::is_execution(trace, acts),
-            trace[0].iommu_shared == Set::<PhysPage>::empty(),
-            0 <= k < trace.len(),
-        ensures
-            trace[k].iommu_shared == Set::<PhysPage>::empty(),
-        decreases k,
-    {
-        if k > 0 {
-            Self::lemma_execution_iommu_shared_empty(trace, acts, k - 1);
-            let i = k - 1;
-            assert(0 <= i < acts.len());
-            assert(MachineState::step(trace[i], trace[i + 1], acts[i]));
-            assert(trace[i + 1].iommu_shared == trace[i].iommu_shared);
-            assert(trace[i + 1] == trace[k]);
-        }
-    }
-
-    /// **Reachable ⇒ no IOMMU-shared pages.** `init` starts with an empty `iommu_shared`
-    /// and every step frames it, so it is empty at every reachable state.
-    pub proof fn lemma_reachable_iommu_shared_empty(s: MachineState)
-        requires
-            MachineState::reachable(s),
-        ensures
-            s.iommu_shared == Set::<PhysPage>::empty(),
-    {
-        let (trace, acts) = choose|trace: Seq<MachineState>, acts: Seq<MachineAction>|
-            {
-                &&& MachineState::is_execution(trace, acts)
-                &&& MachineState::init(trace[0])
-                &&& trace[trace.len() - 1] == s
-            };
-        assert(trace.len() == acts.len() + 1);
-        assert(MachineState::init(trace[0]));
-        Self::lemma_execution_iommu_shared_empty(trace, acts, trace.len() - 1);
-    }
-
     /// **Reachable-state DMA isolation — the payoff.** From any state reachable from
     /// `init`, a device operating for `vm` cannot DMA into a page that a *different* VM
-    /// `subject` privately owns (CPU- or DMA-owned) — with the shared GIC present or not.
+    /// `subject` privately owns (CPU- or DMA-owned), whether shared mappings are present or not.
     /// `reachable ⇒ wf` plus the state-local DMA isolation.
     pub proof fn lemma_reachable_dma_isolation(
         s: MachineState,

@@ -38,12 +38,12 @@ use crate::page_table::PageTable;
 use crate::model::hardware::{proof::*, HardwareView};
 use crate::model::machine::MachineState;
 use crate::model::software::{proof::*, Region, SoftwareView};
-use crate::model::types::{CpuId, GuestPage, PhysPage, S2Entry, SharedPage, TlbKey, VmId, VmPageKey};
+use crate::model::types::{CpuId, GuestPage, PhysPage, S2Entry, TlbKey, VmId, VmPageKey};
 
 // ---------------------------------------------------------------------------
 // §1  `wf` bridges: view-level ⟺ machine-level well-formedness
 //
-// Decomposition of `MachineState::wf`: the ownership/sharing/translation (and
+// Decomposition of `MachineState::wf`: the ownership/translation (and
 // IOMMU) clauses are exactly `SoftwareView::wf` — `assemble` copies the SW
 // fields verbatim and both views define the predicates identically — so a
 // refinement only has to additionally re-establish the cross-cutting sync and
@@ -52,11 +52,10 @@ use crate::model::types::{CpuId, GuestPage, PhysPage, S2Entry, SharedPage, TlbKe
 /// Bridge: the assembled machine state's SW-side `wf` clauses *are* the software
 /// view's, because `assemble` copies the SW fields verbatim and both views define
 /// the predicates identically.  Lets each `refine_*` delegate the
-/// ownership/sharing/translation obligations to the SoftwareView `wf` proofs.
+/// ownership/translation obligations to the SoftwareView `wf` proofs.
 pub proof fn lemma_sw_machine_wf_equiv(sw: SoftwareView, hw: HardwareView)
     ensures
         MachineState::assemble(sw, hw).ownership_wf() == sw.ownership_wf(),
-        MachineState::assemble(sw, hw).sharing_wf() == sw.sharing_wf(),
         MachineState::assemble(sw, hw).translation_wf() == sw.translation_wf(),
         MachineState::assemble(sw, hw).iommu_ownership_wf() == sw.iommu_ownership_wf(),
         MachineState::assemble(sw, hw).iommu_translation_wf() == sw.iommu_translation_wf(),
@@ -66,14 +65,11 @@ pub proof fn lemma_sw_machine_wf_equiv(sw: SoftwareView, hw: HardwareView)
     assert(m.all_vms == sw.all_vms);
     assert(m.vm_owned == sw.vm_owned);
     assert(m.hypervisor_owned == sw.hypervisor_owned);
-    assert(m.shared_pages == sw.shared_pages);
+    assert(m.vm_shared == sw.vm_shared);
     assert(m.s2_map == sw.s2_map);
-    // `shared_with` — hence `owned_or_shared`, hence `translation_wf` — coincides,
-    // since both are `exists`/disjunctions over the same (copied) fields.
+    // `owned_or_shared` coincides because both private and shared page sets are copied.
     assert forall|vm: VmId, page: PhysPage| #[trigger]
-        m.owned_or_shared(vm, page) == sw.owned_or_shared(vm, page) by {
-        assert(m.shared_with(vm, page) == sw.shared_with(vm, page));
-    }
+        m.owned_or_shared(vm, page) == sw.owned_or_shared(vm, page) by {}
     assert(m.iommu_s2_map == sw.iommu_s2_map);
     assert(m.iommu_owned == sw.iommu_owned);
     assert(m.iommu_shared == sw.iommu_shared);
@@ -154,7 +150,7 @@ proof fn lemma_pure_sw_assembled_wf(sw1: SoftwareView, sw2: SoftwareView, hw: Ha
 // §2  Per-operation refinement: (SW step + HW step) ⟹ machine step
 //
 // One lemma per hypervisor operation.  Stage-2 maintenance ops pair a SW step
-// with a HW step; the pure-SW ops (ownership, sharing, VM lifecycle) leave the
+// with a HW step; the pure-SW ops (ownership and VM lifecycle) leave the
 // hardware view unchanged.
 // ---------------------------------------------------------------------------
 // ── stage-2 maintenance (SW + HW step) ──────────────────────────────────────
@@ -400,99 +396,13 @@ pub proof fn refine_hv_reclaim_page(
     let s2 = MachineState::assemble(sw2, hw);
     lemma_sw_machine_wf_equiv(sw1, hw);
     // The machine-level `page_is_quiescent` supplies the SoftwareView reclaim lemma's
-    // premises (no surviving mapping or sharing edge targets `page`); `sw1` shares
-    // `s1`'s `s2_map`/`shared_pages`.
+    // premises (no surviving mapping targets `page`, and the page is private).
     assert forall|k: VmPageKey| #[trigger] sw1.s2_map.contains_key(k) implies sw1.s2_map[k].page
         != page by {
         assert(s1.s2_map.contains_key(k));
     }
-    assert forall|e: SharedPage| #[trigger] sw1.shared_pages.contains(e) implies e.page != page by {
-        assert(s1.shared_pages.contains(e));
-    }
+    assert(!sw1.vm_shared.contains(page));
     lemma_reclaim_page_step_preserves_wf(sw1, sw2, vm, page);
-    lemma_sw_machine_wf_equiv(sw2, hw);
-    assert(s2.all_vms == s1.all_vms);
-    assert(s2.tlb == s1.tlb);
-    assert(s2.s2_map == s1.s2_map);
-    assert(s1.tlb_safe());
-    assert(sw2.s2_map == sw1.s2_map);
-    assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
-    lemma_pure_sw_assembled_wf(sw1, sw2, hw);
-}
-
-// ── page sharing (pure SW — HW unchanged) ───────────────────────────────────
-pub proof fn refine_hv_share_page(
-    sw1: SoftwareView,
-    sw2: SoftwareView,
-    hw: HardwareView,
-    left: VmId,
-    right: VmId,
-    page: PhysPage,
-)
-    requires
-        SoftwareView::share_page_step(sw1, sw2, left, right, page),
-        MachineState::assemble(sw1, hw).wf(),
-    ensures
-        MachineState::hv_share_page_step(
-            MachineState::assemble(sw1, hw),
-            MachineState::assemble(sw2, hw),
-            left,
-            right,
-            page,
-        ),
-{
-    let s1 = MachineState::assemble(sw1, hw);
-    let s2 = MachineState::assemble(sw2, hw);
-    lemma_sw_machine_wf_equiv(sw1, hw);
-    lemma_share_page_step_preserves_wf(sw1, sw2, left, right, page);
-    lemma_sw_machine_wf_equiv(sw2, hw);
-    // Translation state is unchanged, so cross-cutting clauses
-    // carry over.
-    assert(s2.all_vms == s1.all_vms);
-    assert(s2.tlb == s1.tlb);
-    assert(s2.s2_map == s1.s2_map);
-    assert(s1.tlb_safe());
-    assert(sw2.s2_map == sw1.s2_map);
-    assert(sw2.iommu_s2_map == sw1.iommu_s2_map);
-    lemma_pure_sw_assembled_wf(sw1, sw2, hw);
-}
-
-pub proof fn refine_hv_unshare_page(
-    sw1: SoftwareView,
-    sw2: SoftwareView,
-    hw: HardwareView,
-    left: VmId,
-    right: VmId,
-    page: PhysPage,
-)
-    requires
-        SoftwareView::unshare_page_step(sw1, sw2, left, right, page),
-        MachineState::assemble(sw1, hw).wf(),
-        // No-dangling guard (cf. `hv_unshare_page_step`): an endpoint that maps
-        // `page` must own it, so dropping the share strands no translation.
-        forall|k: VmPageKey| #[trigger]
-            MachineState::assemble(sw1, hw).s2_map.contains_key(k) && (k.vm == left || k.vm
-                == right) && MachineState::assemble(sw1, hw).s2_map[k].page == page
-                ==> MachineState::assemble(sw1, hw).vm_owned[k.vm].contains(page),
-    ensures
-        MachineState::hv_unshare_page_step(
-            MachineState::assemble(sw1, hw),
-            MachineState::assemble(sw2, hw),
-            left,
-            right,
-            page,
-        ),
-{
-    let s1 = MachineState::assemble(sw1, hw);
-    let s2 = MachineState::assemble(sw2, hw);
-    lemma_sw_machine_wf_equiv(sw1, hw);
-    // The guard transfers to `sw1` (same `s2_map`/`vm_owned` as `s1`).
-    assert forall|k: VmPageKey| #[trigger]
-        sw1.s2_map.contains_key(k) && (k.vm == left || k.vm == right) && sw1.s2_map[k].page
-            == page implies sw1.vm_owned[k.vm].contains(page) by {
-        assert(s1.s2_map.contains_key(k));
-    }
-    lemma_unshare_page_step_preserves_wf(sw1, sw2, left, right, page);
     lemma_sw_machine_wf_equiv(sw2, hw);
     assert(s2.all_vms == s1.all_vms);
     assert(s2.tlb == s1.tlb);
@@ -651,7 +561,7 @@ pub open spec fn insert_partial(s1: SoftwareView, region: Region, a: nat, m: nat
             region.vm,
             s1.vm_owned[region.vm].union(phys_prefix(region, a)),
         ),
-        shared_pages: s1.shared_pages,
+        vm_shared: s1.vm_shared,
         s2_map: s1.s2_map.union_prefer_right(entry_prefix(region, m)),
         iommu_s2_map: s1.iommu_s2_map,
         iommu_owned: s1.iommu_owned,
@@ -735,11 +645,8 @@ pub proof fn lemma_insert_partial_wf(s1: SoftwareView, region: Region, a: nat, m
             // surviving entry: still owned-or-shared (ownership only grew).
             assert(s1.s2_map.contains_key(k));
             assert(s1.owned_or_shared(k.vm, s1.s2_map[k].page));
-            if s1.shared_with(k.vm, s1.s2_map[k].page) {
-                let w = choose|w: SharedPage| #[trigger]
-                    s1.shared_pages.contains(w) && w.page == s1.s2_map[k].page && (w.left == k.vm
-                        || w.right == k.vm);
-                assert(sp.shared_pages.contains(w));
+            if s1.vm_shared.contains(s1.s2_map[k].page) {
+                assert(sp.vm_shared.contains(s1.s2_map[k].page));
             }
         }
     }
@@ -1123,7 +1030,7 @@ pub open spec fn remove_partial(s1: SoftwareView, region: Region, u: nat, r: nat
             region.vm,
             s1.vm_owned[region.vm].difference(phys_prefix(region, r)),
         ),
-        shared_pages: s1.shared_pages,
+        vm_shared: s1.vm_shared,
         s2_map: s1.s2_map.remove_keys(entry_prefix(region, u).dom()),
         iommu_s2_map: s1.iommu_s2_map,
         iommu_owned: s1.iommu_owned,
@@ -1224,11 +1131,8 @@ pub proof fn lemma_remove_partial_wf(s1: SoftwareView, region: Region, u: nat, r
         assert(s1.s2_map.contains_key(k) && !entry_prefix(region, u).dom().contains(k));
         lemma_remove_survivor_unreclaimed(s1, region, u, r, k);
         assert(s1.owned_or_shared(k.vm, s1.s2_map[k].page));
-        if s1.shared_with(k.vm, s1.s2_map[k].page) {
-            let w = choose|w: SharedPage| #[trigger]
-                s1.shared_pages.contains(w) && w.page == s1.s2_map[k].page && (w.left == k.vm
-                    || w.right == k.vm);
-            assert(sp.shared_pages.contains(w));
+        if s1.vm_shared.contains(s1.s2_map[k].page) {
+            assert(sp.vm_shared.contains(s1.s2_map[k].page));
         }
     }
     // IOMMU: `iommu_*` are framed from `s1`; `vm_owned[vm]` only shrinks, so clause (2)
@@ -1494,11 +1398,8 @@ pub proof fn lemma_remove_reclaim_machine_edge(
             let sk = VmPageKey::new(kt.vm, kt.gpa);
             assert(s1.s2_map.contains_key(sk) && s1.tlb[kt].as_s2_entry() == s1.s2_map[sk]);
         }
-        // (3) no sharing edge targets `page` (the unshared `remove_region_enabled` clause).
-        assert forall|e: SharedPage| #[trigger] s1.shared_pages.contains(e) implies e.page
-            != page by {
-            assert(sw1.shared_pages.contains(e));
-        }
+        // (3) the private region page is absent from the CPU-shared projection.
+        assert(!s1.vm_shared.contains(page));
     }
 }
 
@@ -1634,7 +1535,7 @@ pub open spec fn iommu_insert_partial(
         all_vms: s1.all_vms,
         hypervisor_owned: s1.hypervisor_owned,
         vm_owned: s1.vm_owned,
-        shared_pages: s1.shared_pages,
+        vm_shared: s1.vm_shared,
         s2_map: s1.s2_map,
         iommu_s2_map: s1.iommu_s2_map.union_prefer_right(entry_prefix(region, m)),
         iommu_owned: s1.iommu_owned.insert(
@@ -1665,17 +1566,13 @@ pub proof fn lemma_iommu_insert_partial_wf(s1: SoftwareView, region: Region, a: 
     assert forall|k: VmPageKey| #[trigger] ep.contains_key(k) implies pp.contains(ep[k].page) by {}
     // CPU clauses: every CPU field is framed from `s1`.
     assert(sp.ownership_wf());
-    assert(sp.sharing_wf());
     assert forall|k: VmPageKey| #[trigger] sp.s2_map.contains_key(k) implies (sp.all_vms.contains(
         k.vm,
     ) && sp.owned_or_shared(k.vm, sp.s2_map[k].page)) by {
         assert(s1.s2_map.contains_key(k));
         assert(s1.owned_or_shared(k.vm, s1.s2_map[k].page));
-        if s1.shared_with(k.vm, s1.s2_map[k].page) {
-            let w = choose|w: SharedPage| #[trigger]
-                s1.shared_pages.contains(w) && w.page == s1.s2_map[k].page && (w.left == k.vm
-                    || w.right == k.vm);
-            assert(sp.shared_pages.contains(w));
+        if s1.vm_shared.contains(s1.s2_map[k].page) {
+            assert(sp.vm_shared.contains(s1.s2_map[k].page));
         }
     }
     assert(sp.translation_wf());
@@ -2109,7 +2006,7 @@ pub open spec fn iommu_remove_partial(
         all_vms: s1.all_vms,
         hypervisor_owned: s1.hypervisor_owned,
         vm_owned: s1.vm_owned,
-        shared_pages: s1.shared_pages,
+        vm_shared: s1.vm_shared,
         s2_map: s1.s2_map,
         iommu_s2_map: s1.iommu_s2_map.remove_keys(entry_prefix(region, u).dom()),
         iommu_owned: s1.iommu_owned.insert(
@@ -2168,17 +2065,13 @@ pub proof fn lemma_iommu_remove_partial_wf(s1: SoftwareView, region: Region, u: 
     let pp = phys_prefix(region, r);
     // CPU clauses: framed.
     assert(sp.ownership_wf());
-    assert(sp.sharing_wf());
     assert forall|k: VmPageKey| #[trigger] sp.s2_map.contains_key(k) implies (sp.all_vms.contains(
         k.vm,
     ) && sp.owned_or_shared(k.vm, sp.s2_map[k].page)) by {
         assert(s1.s2_map.contains_key(k));
         assert(s1.owned_or_shared(k.vm, s1.s2_map[k].page));
-        if s1.shared_with(k.vm, s1.s2_map[k].page) {
-            let w = choose|w: SharedPage| #[trigger]
-                s1.shared_pages.contains(w) && w.page == s1.s2_map[k].page && (w.left == k.vm
-                    || w.right == k.vm);
-            assert(sp.shared_pages.contains(w));
+        if s1.vm_shared.contains(s1.s2_map[k].page) {
+            assert(sp.vm_shared.contains(s1.s2_map[k].page));
         }
     }
     assert(sp.translation_wf());
@@ -2721,7 +2614,7 @@ pub proof fn lemma_impl_synced_implies_wf_machine(hw: HardwareSpec, sw: Software
 /// **DMA isolation for the implementation** In any implementation state whose zones
 /// are lock-synced ([`impl_synced`]), a device operating for `vm` cannot resolve an
 /// SMMU translation onto a page privately owned (CPU- or DMA-) by a *different* VM
-/// `subject` — with the shared GIC present. Instantiates the machine-model DMA
+/// `subject`, including when global-shared mappings are present. Instantiates the machine-model DMA
 /// isolation at the projected state, so the guarantee now reads on the running system
 /// rather than on an abstractly synced spec pair.
 pub proof fn lemma_impl_synced_dma_isolation(

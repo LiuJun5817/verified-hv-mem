@@ -10,7 +10,7 @@
 use vstd::prelude::*;
 
 use super::SoftwareView;
-use crate::model::types::{GuestPage, PhysPage, S2Entry, SharedPage, VmId, VmPageKey};
+use crate::model::types::{GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 
 verus! {
 
@@ -28,7 +28,7 @@ pub proof fn lemma_map_step_preserves_wf(
     ensures
         s2.wf(),
 {
-    // Only `s2_map` changes: `ownership_wf` / `sharing_wf` carry over unchanged.
+    // Only `s2_map` changes; ownership and both shared sets are unchanged.
     let key = VmPageKey::new(vm, gpa);
     assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
         k.vm,
@@ -222,9 +222,9 @@ pub proof fn lemma_reclaim_page_step_preserves_wf(
     requires
         s1.wf(),
         SoftwareView::reclaim_page_step(s1, s2, vm, page),
-        // Quiescence: no surviving translation or sharing edge targets `page`.
+        // Quiescence: no surviving translation targets this private page.
         forall|k: VmPageKey| #[trigger] s1.s2_map.contains_key(k) ==> s1.s2_map[k].page != page,
-        forall|e: SharedPage| #[trigger] s1.shared_pages.contains(e) ==> e.page != page,
+        !s1.vm_shared.contains(page),
     ensures
         s2.wf(),
 {
@@ -280,114 +280,6 @@ pub proof fn lemma_reclaim_page_step_preserves_wf(
     assert(s2.wf());
 }
 
-// ─────────────────────────── sharing wf-preservation ────────────────────────
-pub proof fn lemma_share_page_step_preserves_wf(
-    s1: SoftwareView,
-    s2: SoftwareView,
-    left: VmId,
-    right: VmId,
-    page: PhysPage,
-)
-    requires
-        s1.wf(),
-        SoftwareView::share_page_step(s1, s2, left, right, page),
-    ensures
-        s2.wf(),
-{
-    let edge = SharedPage { left, right, page };
-    let rev = edge.reverse();
-    // Ownership and `all_vms` are untouched.
-    assert(s2.ownership_wf());
-    // sharing_wf: the two new edges are valid and mutually symmetric; old edges persist.
-    assert forall|e: SharedPage| #[trigger] s2.shared_pages.contains(e) implies (e.left != e.right
-        && s2.all_vms.contains(e.left) && s2.all_vms.contains(e.right) && s2.shared_pages.contains(
-        e.reverse(),
-    )) by {
-        if e != edge && e != rev {
-            assert(s1.shared_pages.contains(e));
-        }
-    }
-    // translation_wf: `s2_map` is unchanged and `owned_or_shared` only grew (a sharing
-    // edge was added, ownership is the same), so every target stays owned-or-shared.
-    assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
-        k.vm,
-    ) && s2.owned_or_shared(k.vm, s2.s2_map[k].page)) by {
-        assert(s1.s2_map.contains_key(k));
-        assert(s1.owned_or_shared(k.vm, s1.s2_map[k].page));
-        if s1.shared_with(k.vm, s1.s2_map[k].page) {
-            let w = choose|w: SharedPage| #[trigger]
-                s1.shared_pages.contains(w) && w.page == s1.s2_map[k].page && (w.left == k.vm
-                    || w.right == k.vm);
-            assert(s2.shared_pages.contains(w));
-        }
-    }
-    // IOMMU contexts and `vm_owned` are unchanged, so `iommu_wf` carries over verbatim.
-    assert(s1.iommu_wf());
-    assert(s2.iommu_wf());
-    assert(s2.wf());
-}
-
-pub proof fn lemma_unshare_page_step_preserves_wf(
-    s1: SoftwareView,
-    s2: SoftwareView,
-    left: VmId,
-    right: VmId,
-    page: PhysPage,
-)
-    requires
-        s1.wf(),
-        SoftwareView::unshare_page_step(s1, s2, left, right, page),
-        // No dangling: any mapping of `page` by an endpoint of the removed edge is
-        // backed by *ownership*, so losing the share leaves no stranded translation.
-        // (The analogue of `reclaim`'s quiescence, scoped to the edge's endpoints.)
-        forall|k: VmPageKey| #[trigger]
-            s1.s2_map.contains_key(k) && (k.vm == left || k.vm == right) && s1.s2_map[k].page
-                == page ==> s1.vm_owned[k.vm].contains(page),
-    ensures
-        s2.wf(),
-{
-    let edge = SharedPage { left, right, page };
-    let rev = edge.reverse();
-    // Ownership and `all_vms` are untouched.
-    assert(s2.ownership_wf());
-    // sharing_wf: a surviving edge's reverse can't be one of the two removed (else
-    // the edge itself would be removed), so symmetry is preserved.
-    assert forall|e: SharedPage| #[trigger] s2.shared_pages.contains(e) implies (e.left != e.right
-        && s2.all_vms.contains(e.left) && s2.all_vms.contains(e.right) && s2.shared_pages.contains(
-        e.reverse(),
-    )) by {
-        assert(s1.shared_pages.contains(e));
-    }
-    // translation_wf: `s2_map` is unchanged; each target stays owned-or-shared.
-    assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
-        k.vm,
-    ) && s2.owned_or_shared(k.vm, s2.s2_map[k].page)) by {
-        assert(s1.s2_map.contains_key(k));
-        assert(s1.owned_or_shared(k.vm, s1.s2_map[k].page));
-        let p = s1.s2_map[k].page;
-        if !s1.vm_owned[k.vm].contains(p) {
-            // Then `k.vm` reaches `p` through some sharing edge `w`, which survives:
-            // were `w` one of the removed edges, we'd have `p == page` and
-            // `k.vm ∈ {left, right}`, so the no-dangling premise would force
-            // `vm_owned[k.vm].contains(page)` — contradicting this branch.
-            assert(s1.shared_with(k.vm, p));
-            let w = choose|w: SharedPage| #[trigger]
-                s1.shared_pages.contains(w) && w.page == p && (w.left == k.vm || w.right == k.vm);
-            assert(w != edge && w != rev) by {
-                if w == edge || w == rev {
-                    assert(s1.vm_owned[k.vm].contains(page));
-                    assert(false);
-                }
-            }
-            assert(s2.shared_pages.contains(w));
-        }
-    }
-    // IOMMU contexts and `vm_owned` are unchanged, so `iommu_wf` carries over verbatim.
-    assert(s1.iommu_wf());
-    assert(s2.iommu_wf());
-    assert(s2.wf());
-}
-
 // ─────────────────────────── lifecycle wf-preservation ──────────────────────
 pub proof fn lemma_add_vm_step_preserves_wf(s1: SoftwareView, s2: SoftwareView, vm: VmId)
     requires
@@ -420,12 +312,6 @@ pub proof fn lemma_add_vm_step_preserves_wf(s1: SoftwareView, s2: SoftwareView, 
                 assert(s1.vm_owned[w].contains(p));
             }
         }
-    }
-    assert forall|e: SharedPage| #[trigger] s2.shared_pages.contains(e) implies (e.left != e.right
-        && s2.all_vms.contains(e.left) && s2.all_vms.contains(e.right) && s2.shared_pages.contains(
-        e.reverse(),
-    )) by {
-        assert(s1.shared_pages.contains(e));
     }
     assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
         k.vm,
@@ -473,7 +359,7 @@ pub proof fn lemma_remove_vm_step_preserves_wf(s1: SoftwareView, s2: SoftwareVie
     ensures
         s2.wf(),
 {
-    // `vm` (owning nothing, mapping nothing, sharing nothing) is dropped; the rest
+    // `vm` (owning and mapping nothing) is dropped; the rest
     // of the state is unchanged, so every clause carries over to the smaller `all_vms`.
     assert(s2.vm_owned.dom() =~= s2.all_vms);
     assert forall|a: VmId, b: VmId| #[trigger]
@@ -493,12 +379,6 @@ pub proof fn lemma_remove_vm_step_preserves_wf(s1: SoftwareView, s2: SoftwareVie
             s2.vm_owned[w].contains(p) implies !s2.hypervisor_owned.contains(p) by {
             assert(s1.vm_owned[w].contains(p));
         }
-    }
-    assert forall|e: SharedPage| #[trigger] s2.shared_pages.contains(e) implies (e.left != e.right
-        && s2.all_vms.contains(e.left) && s2.all_vms.contains(e.right) && s2.shared_pages.contains(
-        e.reverse(),
-    )) by {
-        assert(s1.shared_pages.contains(e));
     }
     assert forall|k: VmPageKey| #[trigger] s2.s2_map.contains_key(k) implies (s2.all_vms.contains(
         k.vm,

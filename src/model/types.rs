@@ -59,19 +59,11 @@ pub struct TlbKey {
     pub gpa: GuestPage,
 }
 
-#[derive(PartialEq, Eq, Structural, Copy, Clone)]
-pub struct SharedPage {
-    pub left: VmId,
-    pub right: VmId,
-    pub page: PhysPage,
-}
-
 /// Guest-originated requests that the hypervisor may later service.
 #[derive(PartialEq, Eq, Structural, Copy, Clone)]
 pub enum HyperCallReq {
     RequestMap(GuestPage, PhysPage, AccessPerms),
     RequestUnmap(GuestPage),
-    RequestShare(PhysPage, VmId),
     RequestReclaim(PhysPage),
     RequestFlush(GuestPage),
 }
@@ -89,8 +81,6 @@ pub enum HypervisorOp {
     Unmap(VmId, GuestPage),
     AssignPage(VmId, PhysPage),
     ReclaimPage(VmId, PhysPage),
-    SharePage(VmId, VmId, PhysPage),
-    UnsharePage(VmId, VmId, PhysPage),
     AddVm(VmId),
     RemoveVm(VmId),
     /// SMMU/IOMMU stage-2 map maintenance (the DMA counterpart of `Map`).
@@ -159,12 +149,6 @@ impl VmPageKey {
 impl TlbKey {
     pub open spec fn new(cpu: CpuId, vm: VmId, gpa: GuestPage) -> Self {
         Self { cpu, vm, gpa }
-    }
-}
-
-impl SharedPage {
-    pub open spec fn reverse(self) -> SharedPage {
-        SharedPage { left: self.right, right: self.left, page: self.page }
     }
 }
 

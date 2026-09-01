@@ -42,7 +42,7 @@ use crate::hv_mem::spec::budget::*;
 use crate::hv_mem::spec::GhostZone;
 use crate::model::convert::*;
 use crate::model::software::{Region, SoftwareView};
-use crate::model::types::{GuestPage, PhysPage, S2Entry, SharedPage, VmId, VmPageKey};
+use crate::model::types::{GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 use crate::memory_set::SpecMemorySet;
 use crate::constants::*;
 
@@ -301,13 +301,13 @@ pub axiom fn axiom_assignable_from_budget(s: SoftwareSpec, region: Region)
 // ---------------------------------------------------------------------------
 // §3  State projections
 //
-// Per-zone and whole-state projections of `BudgetSpec::State`: CPU ownership
-// (`zone_owned_pages` / `all_owned_pages` / `hypervisor_pool`) and stage-2 maps
-// (`zone_s2_entries` / `state_s2_map`), plus their IOMMU counterparts and the
-// static GIC sharing set.
+// Per-zone and whole-state projections of `BudgetSpec::State`. CPU and IOMMU
+// mapped pages are each classified by the static page budget that authorizes
+// them. The two shared projections are dynamic: they contain only pages targeted
+// by current mappings, and neither is required to equal the other.
 // ---------------------------------------------------------------------------
-/// Physical pages owned by a zone: the frames its page table maps, in page units.
-pub open spec fn zone_owned_pages(gz: GhostZone) -> Set<PhysPage> {
+/// Physical pages targeted by a zone's current CPU mappings.
+pub open spec fn zone_cpu_mapped_pages(gz: GhostZone) -> Set<PhysPage> {
     Set::new(
         |p: PhysPage|
             exists|v: SpecVAddr| #[trigger]
@@ -315,6 +315,16 @@ pub open spec fn zone_owned_pages(gz: GhostZone) -> Set<PhysPage> {
                     gz.cpu_mem_set.mappings[v],
                 ) == p,
     )
+}
+
+/// CPU-mapped pages drawn from zone `zid`'s private budget.
+pub open spec fn zone_cpu_private_pages(zid: nat, gz: GhostZone) -> Set<PhysPage> {
+    zone_cpu_mapped_pages(gz).intersect(zone_private_pages(zid))
+}
+
+/// CPU-mapped pages drawn from the global-shared budget.
+pub open spec fn zone_cpu_shared_pages(gz: GhostZone) -> Set<PhysPage> {
+    zone_cpu_mapped_pages(gz).intersect(global_shared_pages())
 }
 
 /// Stage-2 entries installed by a zone: one per mapped guest page.
@@ -326,30 +336,25 @@ pub open spec fn zone_s2_entries(zid: nat, gz: GhostZone) -> Map<VmPageKey, S2En
     )
 }
 
-/// All physical pages that lie within *some* zone's static budget.
-pub open spec fn all_budget_pages() -> Set<PhysPage> {
-    Set::new(
-        |pp: PhysPage|
-            exists|zid: nat, r: MemoryRegion|
-                #![trigger zone_regions(zid).contains(r), region_owns_page(r, pp)]
-                zone_regions(zid).contains(r) && region_owns_page(r, pp),
-    )
+/// Union of all static zone-private page budgets. Global-shared pages are not
+/// part of the hypervisor's private-page pool.
+pub open spec fn all_zone_private_pages() -> Set<PhysPage> {
+    Set::new(|p: PhysPage| exists|zid: nat| #[trigger] zone_private_pages(zid).contains(p))
 }
 
-/// Physical pages currently owned by some active zone.
-pub open spec fn all_owned_pages(zones: Map<nat, GhostZone>) -> Set<PhysPage> {
+/// Zone-private pages currently targeted by a CPU mapping of an active zone.
+pub open spec fn all_cpu_private_pages(zones: Map<nat, GhostZone>) -> Set<PhysPage> {
     Set::new(
-        |pp: PhysPage|
+        |p: PhysPage|
             exists|zid: nat|
                 #![trigger zones.contains_key(zid)]
-                zones.contains_key(zid) && zone_owned_pages(zones[zid]).contains(pp),
+                zones.contains_key(zid) && zone_cpu_private_pages(zid, zones[zid]).contains(p),
     )
 }
 
-/// Physical pages that belong to no zone (the hypervisor pool): budget pages not
-/// currently owned by any active zone.
+/// Zone-private pages not currently CPU-mapped by any active zone.
 pub open spec fn hypervisor_pool(zones: Map<nat, GhostZone>) -> Set<PhysPage> {
-    all_budget_pages().difference(all_owned_pages(zones))
+    all_zone_private_pages().difference(all_cpu_private_pages(zones))
 }
 
 /// Stage-2 map of the whole state: the union of each zone's `zone_s2_entries`.
@@ -361,19 +366,25 @@ pub open spec fn state_s2_map(s: BudgetSpec::State) -> Map<VmPageKey, S2Entry> {
     )
 }
 
-/// Physical pages a zone owns **privately** for IOMMU/DMA: pages mapped by its
-/// `iommu_mem_set` that are *not* part of the shared GIC region.  The shared GIC pages
-/// are tracked separately (`gic_shared_pages_set` / `iommu_shared`), so a VM's private
-/// DMA set is exactly its zone-disjoint DMA memory — genuinely private, with no GIC
-/// overlap.
-pub open spec fn zone_iommu_private_pages(gz: GhostZone) -> Set<PhysPage> {
+/// Physical pages targeted by a zone's current IOMMU mappings.
+pub open spec fn zone_iommu_mapped_pages(gz: GhostZone) -> Set<PhysPage> {
     Set::new(
         |p: PhysPage|
-            !is_gic_page(p) && exists|v: SpecVAddr| #[trigger]
+            exists|v: SpecVAddr| #[trigger]
                 gz.iommu_mem_set.mappings.contains_key(v) && frame_phys_page(
                     gz.iommu_mem_set.mappings[v],
                 ) == p,
     )
+}
+
+/// IOMMU-mapped pages drawn from zone `zid`'s private budget.
+pub open spec fn zone_iommu_private_pages(zid: nat, gz: GhostZone) -> Set<PhysPage> {
+    zone_iommu_mapped_pages(gz).intersect(zone_private_pages(zid))
+}
+
+/// IOMMU-mapped pages drawn from the global-shared budget.
+pub open spec fn zone_iommu_shared_pages(gz: GhostZone) -> Set<PhysPage> {
+    zone_iommu_mapped_pages(gz).intersect(global_shared_pages())
 }
 
 /// IOMMU stage-2 entries installed by a zone: one per mapped guest page.
@@ -397,16 +408,38 @@ pub open spec fn state_iommu_s2_map(s: BudgetSpec::State) -> Map<VmPageKey, S2En
     )
 }
 
-/// Whether `p` is a page of the (shared) GIC region.
-pub open spec fn is_gic_page(p: PhysPage) -> bool {
-    region_owns_page(gic_region(), p)
+/// Global-shared pages currently targeted by at least one active zone's CPU map.
+pub open spec fn state_vm_shared(s: BudgetSpec::State) -> Set<PhysPage> {
+    Set::new(
+        |p: PhysPage|
+            exists|zid: nat|
+                #![trigger s.zone_ids.contains(zid)]
+                s.zone_ids.contains(zid) && zone_cpu_shared_pages(s.zones[zid]).contains(p),
+    )
 }
 
-/// The pages that may be IOMMU-shared across all VMs: exactly the GIC region's
-/// pages.  VM-independent (does not grow/shrink as VMs come and go), so it is a
-/// stable projection target.
-pub open spec fn gic_shared_pages_set() -> Set<PhysPage> {
-    Set::new(|p: PhysPage| is_gic_page(p))
+/// Global-shared pages currently targeted by at least one active zone's IOMMU map.
+pub open spec fn state_iommu_shared(s: BudgetSpec::State) -> Set<PhysPage> {
+    Set::new(
+        |p: PhysPage|
+            exists|zid: nat|
+                #![trigger s.zone_ids.contains(zid)]
+                s.zone_ids.contains(zid) && zone_iommu_shared_pages(s.zones[zid]).contains(p),
+    )
+}
+
+/// CPU-shared projection pages are authorized by the global-shared budget.
+pub proof fn lemma_state_vm_shared_subset_global_shared(s: BudgetSpec::State)
+    ensures
+        state_vm_shared(s).subset_of(global_shared_pages()),
+{
+}
+
+/// IOMMU-shared projection pages are authorized by the global-shared budget.
+pub proof fn lemma_state_iommu_shared_subset_global_shared(s: BudgetSpec::State)
+    ensures
+        state_iommu_shared(s).subset_of(global_shared_pages()),
+{
 }
 
 // ---------------------------------------------------------------------------
@@ -424,25 +457,25 @@ pub ghost struct SoftwareSpec {
 impl View for SoftwareSpec {
     type V = SoftwareView;
 
-    /// R: project the budget state to the abstract `SoftwareView`.  `vm_owned` and
-    /// `s2_map` come from the zones; `hypervisor_owned` is the unowned budget;
-    /// `shared_pages` is empty (cross-VM sharing is out of scope).
+    /// R: project current CPU/IOMMU mappings into zone-private and
+    /// global-shared page sets. `vm_shared` and `iommu_shared` are independent
+    /// dynamic subsets of `global_shared_pages()`.
     open spec fn view(&self) -> SoftwareView {
         SoftwareView {
             all_vms: Set::new(|vm: VmId| self.budget.zone_ids.contains(vm.0)),
             hypervisor_owned: hypervisor_pool(self.budget.zones),
             vm_owned: Map::new(
                 |vm: VmId| self.budget.zone_ids.contains(vm.0),
-                |vm: VmId| zone_owned_pages(self.budget.zones[vm.0]),
+                |vm: VmId| zone_cpu_private_pages(vm.0, self.budget.zones[vm.0]),
             ),
-            shared_pages: Set::empty(),
+            vm_shared: state_vm_shared(self.budget),
             s2_map: state_s2_map(self.budget),
             iommu_s2_map: state_iommu_s2_map(self.budget),
             iommu_owned: Map::new(
                 |vm: VmId| self.budget.zone_ids.contains(vm.0),
-                |vm: VmId| zone_iommu_private_pages(self.budget.zones[vm.0]),
+                |vm: VmId| zone_iommu_private_pages(vm.0, self.budget.zones[vm.0]),
             ),
-            iommu_shared: gic_shared_pages_set(),
+            iommu_shared: state_iommu_shared(self.budget),
         }
     }
 }
@@ -764,7 +797,7 @@ pub proof fn lemma_state_iommu_proj_unchanged(s1: SoftwareSpec, s2: SoftwareSpec
 
 /// The dual of [`lemma_state_iommu_proj_unchanged`]: an op that leaves every zone's
 /// `cpu_mem_set` (and the zone set) untouched leaves the whole CPU projection
-/// (`all_vms`, `vm_owned`, `s2_map`, `hypervisor_owned`, `shared_pages`) unchanged.
+/// (`all_vms`, `vm_owned`, `vm_shared`, `s2_map`, `hypervisor_owned`) unchanged.
 pub proof fn lemma_state_cpu_proj_unchanged(s1: SoftwareSpec, s2: SoftwareSpec)
     requires
         s1.budget.invariant(),
@@ -778,7 +811,7 @@ pub proof fn lemma_state_cpu_proj_unchanged(s1: SoftwareSpec, s2: SoftwareSpec)
         s2@.vm_owned =~= s1@.vm_owned,
         s2@.s2_map =~= s1@.s2_map,
         s2@.hypervisor_owned =~= s1@.hypervisor_owned,
-        s2@.shared_pages =~= s1@.shared_pages,
+        s2@.vm_shared =~= s1@.vm_shared,
 {
     assert forall|vm: VmId|
         s2@.vm_owned.contains_key(vm) == s1@.vm_owned.contains_key(vm) && (
@@ -1812,11 +1845,6 @@ impl SoftwareRefinement for SoftwareSpec {
             #[trigger] self@.wf(),
     {
         let sw = self.view();
-        // sharing_wf: vacuous (the CPU sharing graph is empty; GIC sharing is modeled
-        // separately via `iommu_shared`, see `lemma_reachable_iommu_separation`).
-        assert(sw.shared_pages =~= Set::<SharedPage>::empty());
-        assert(sw.sharing_wf());
-
         // ownership_wf: dom; cross-zone disjointness; vm-vs-hypervisor disjointness.
         assert(sw.vm_owned.dom() =~= sw.all_vms);
         lemma_state_owned_pages_disjoint(self.budget);
