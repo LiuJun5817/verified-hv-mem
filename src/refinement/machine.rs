@@ -207,38 +207,6 @@ pub proof fn lemma_zonewise_maps_synced_implies_wf_machine(hw: HardwareSpec, sw:
     lemma_global_maps_synced_implies_wf_machine(hw, sw);
 }
 
-/// Under zonewise map synchronization, a device for one VM cannot translate to
-/// a page privately owned, for CPU or DMA, by a different VM.
-pub proof fn lemma_zonewise_maps_synced_dma_isolation(
-    hw: HardwareSpec,
-    sw: SoftwareSpec,
-    subject: VmId,
-    page: PhysPage,
-    vm: VmId,
-    stream: CpuId,
-    gpa: GuestPage,
-)
-    requires
-        hw.invariants(),
-        sw.invariants(),
-        zonewise_maps_synced(hw, sw),
-        MachineState::assemble(sw.view(), hw.view()).all_vms().contains(subject),
-        vm != subject,
-        MachineState::assemble(sw.view(), hw.view()).vm_owned[subject].contains(page)
-            || MachineState::assemble(sw.view(), hw.view()).iommu_owned[subject].contains(page),
-        MachineState::assemble(sw.view(), hw.view()).iommu_effective_entry(stream, vm, gpa) is Some,
-    ensures
-        MachineState::assemble(sw.view(), hw.view()).iommu_effective_entry(
-            stream,
-            vm,
-            gpa,
-        )->Some_0.page != page,
-{
-    let s = MachineState::assemble(sw.view(), hw.view());
-    lemma_zonewise_maps_synced_implies_wf_machine(hw, sw);
-    MachineState::lemma_state_dma_isolation(s, subject, page, vm, stream, gpa);
-}
-
 // ---------------------------------------------------------------------------
 // §2  Per-operation refinement: (SW step + HW step) ⟹ machine step
 //

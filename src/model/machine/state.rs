@@ -65,15 +65,35 @@ impl MachineState {
         self.all_vms
     }
 
-    /// `page` is private to `vm`: it belongs to `vm`'s private projection and is
-    /// absent from the global-shared CPU projection.
-    pub open spec fn private_page(&self, vm: VmId, page: PhysPage) -> bool {
+    /// Paper-level `S2Private(self, vm, page)`: `vm` is live and `page` belongs to
+    /// its private CPU stage-2 projection, not to the installed all-VM-shared
+    /// projection.
+    pub open spec fn s2_private(&self, vm: VmId, page: PhysPage) -> bool {
+        &&& self.all_vms().contains(vm)
         &&& self.vm_owned[vm].contains(page)
         &&& !self.vm_shared.contains(page)
     }
 
-    pub open spec fn private_pa(&self, vm: VmId, pa: PhysWordAddr) -> bool {
-        self.private_page(vm, pa.page())
+    /// Paper-level `S2Shared(self, page)`.  This is the dynamic projection of
+    /// installed global-shared CPU mappings.  The lower-level
+    /// `global_shared_pages()` set is the separate static authorization universe.
+    pub open spec fn s2_shared(&self, page: PhysPage) -> bool {
+        self.vm_shared.contains(page)
+    }
+
+    /// Paper-level `IOMMUPrivate(self, vm, page)`: `vm` is live and `page` belongs
+    /// to its private IOMMU projection, not to the installed all-VM-shared IOMMU
+    /// projection.
+    pub open spec fn iommu_private(&self, vm: VmId, page: PhysPage) -> bool {
+        &&& self.all_vms().contains(vm)
+        &&& self.iommu_owned[vm].contains(page)
+        &&& !self.iommu_shared.contains(page)
+    }
+
+    /// Paper-level `IOMMUShared(self, page)`, using the dynamic projection of
+    /// installed global-shared IOMMU mappings.
+    pub open spec fn iommu_shared_page(&self, page: PhysPage) -> bool {
+        self.iommu_shared.contains(page)
     }
 
     pub open spec fn owned_or_shared(&self, vm: VmId, page: PhysPage) -> bool {
@@ -133,6 +153,20 @@ impl MachineState {
         }
     }
 
+    /// Paper-level successful CPU translation `CPU(self, vm, gpa) = page`.
+    /// `cpu` makes the model's per-CPU TLB index explicit; the isolation theorem
+    /// quantifies over it.
+    pub open spec fn cpu_translates_to(
+        &self,
+        cpu: CpuId,
+        vm: VmId,
+        gpa: GuestPage,
+        page: PhysPage,
+    ) -> bool {
+        let entry = self.effective_entry(cpu, vm, gpa);
+        entry is Some && entry->Some_0.page == page
+    }
+
     pub open spec fn translated_word(&self, cpu: CpuId, vm: VmId, gva: GuestWordAddr) -> Option<
         PhysWordAddr,
     > {
@@ -142,16 +176,6 @@ impl MachineState {
         } else {
             Option::None
         }
-    }
-
-    pub open spec fn can_read(&self, cpu: CpuId, vm: VmId, gva: GuestWordAddr) -> bool {
-        let entry = self.effective_entry(cpu, vm, gva.page());
-        entry is Some && entry->Some_0.access.read
-    }
-
-    pub open spec fn can_write(&self, cpu: CpuId, vm: VmId, gva: GuestWordAddr) -> bool {
-        let entry = self.effective_entry(cpu, vm, gva.page());
-        entry is Some && entry->Some_0.access.write
     }
 
     /// Effective IOMMU translation.  The `stream` parameter reuses `CpuId` as the
@@ -174,15 +198,19 @@ impl MachineState {
         }
     }
 
-    pub open spec fn read_observation(&self, cpu: CpuId, vm: VmId, gva: GuestWordAddr) -> Option<
-        DataWord,
-    > {
-        let paddr = self.translated_word(cpu, vm, gva);
-        if paddr is Some && self.can_read(cpu, vm, gva) && self.memory.contains_key(paddr->Some_0) {
-            Option::Some(self.memory[paddr->Some_0])
-        } else {
-            Option::None
-        }
+    /// Paper-level successful DMA translation `DMA(self, vm, iova) = page`.
+    /// `stream` makes the model's per-stream SMMU-TLB index explicit; the theorem
+    /// quantifies over it. `GuestPage` is reused as the regime-neutral IOVA-page
+    /// representation.
+    pub open spec fn dma_translates_to(
+        &self,
+        stream: CpuId,
+        vm: VmId,
+        iova: GuestPage,
+        page: PhysPage,
+    ) -> bool {
+        let entry = self.iommu_effective_entry(stream, vm, iova);
+        entry is Some && entry->Some_0.page == page
     }
 
     /// Every cached TLB entry agrees with the **hardware-reachable** map (the TLB

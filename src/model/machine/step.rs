@@ -32,8 +32,13 @@ impl MachineState {
         cpu: CpuId,
         gva: GuestWordAddr,
     ) -> bool {
+        let entry = s1.effective_entry(cpu, vm, gva.page());
+        let paddr = s1.translated_word(cpu, vm, gva);
         &&& s1.wf()
-        &&& s1.read_observation(cpu, vm, gva) is Some
+        &&& entry is Some
+        &&& entry->Some_0.access.read
+        &&& paddr is Some
+        &&& s1.memory.contains_key(paddr->Some_0)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_ownership_as(&s1)
@@ -49,10 +54,12 @@ impl MachineState {
         gva: GuestWordAddr,
         value: DataWord,
     ) -> bool {
+        let entry = s1.effective_entry(cpu, vm, gva.page());
         let paddr = s1.translated_word(cpu, vm, gva);
         &&& s1.wf()
+        &&& entry is Some
+        &&& entry->Some_0.access.write
         &&& paddr is Some
-        &&& s1.can_write(cpu, vm, gva)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_ownership_as(&s1)
@@ -98,9 +105,10 @@ impl MachineState {
     ///   property, but it means no program-order- or data-flow-dependent guest
     ///   property may be stated against this model.
     ///
-    /// The isolation theorems (`security::lemma_read_isolation`/`lemma_write_isolation`)
-    /// are per-state access-right invariants over a *single* step, so they are
-    /// order-agnostic by construction and need none of the dropped guarantees.
+    /// The CPU isolation theorem (`security::lemma_cpu_isolation`) is a
+    /// permission-independent invariant over every effective translation in a
+    /// reachable state, so it is order-agnostic by construction and needs none of
+    /// the dropped guarantees.
     /// Capturing program order would require adding per-CPU sequencing — a genuine
     /// memory-model refinement, out of scope for this access-control proof.
     pub open spec fn vm_step(s1: Self, s2: Self, vm: VmId, op: VmMemOp) -> bool {
