@@ -92,31 +92,6 @@ impl MachineState {
         Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa && self.iommu_tlb.contains_key(key))
     }
 
-    /// `page` is referenced by no `s2_map` entry or TLB entry and is not shared.
-    ///
-    /// This is the model's *flush-before-release* gate: `hv_reclaim_page_step` requires
-    /// it, so a page cannot lose its private ownership while any CPU's TLB still caches
-    /// it. Together with the synchronous flush in `hv_unmap_step`, it discharges the
-    /// real asynchronous TLB-shootdown window without modelling stale state (see the
-    /// note on `hv_unmap_step`).
-    pub open spec fn page_is_quiescent(&self, page: PhysPage) -> bool {
-        &&& forall|key: VmPageKey| #[trigger]
-            self.s2_map.contains_key(key) ==> self.s2_map[key].page != page
-        &&& forall|key: TlbKey| #[trigger] self.tlb.contains_key(key) ==> self.tlb[key].page != page
-        &&& !self.vm_shared.contains(page)
-    }
-
-    /// IOMMU flush-before-release gate: `page` is referenced by no IOMMU stage-2 entry and
-    /// no SMMU TLB entry.  Required by `hv_iommu_reclaim_page_step` so a page cannot lose
-    /// its DMA ownership while an SMMU translation to it still resolves (which would
-    /// strand a mapping targeting neither `iommu_owned` nor `iommu_shared`).
-    pub open spec fn iommu_page_is_quiescent(&self, page: PhysPage) -> bool {
-        &&& forall|key: VmPageKey| #[trigger]
-            self.iommu_s2_map.contains_key(key) ==> self.iommu_s2_map[key].page != page
-        &&& forall|key: TlbKey| #[trigger]
-            self.iommu_tlb.contains_key(key) ==> self.iommu_tlb[key].page != page
-    }
-
     pub open spec fn same_identity_as(&self, other: &Self) -> bool {
         self.all_vms == other.all_vms
     }

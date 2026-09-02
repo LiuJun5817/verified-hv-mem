@@ -36,13 +36,6 @@ pub ghost struct SoftwareView {
 }
 
 impl SoftwareView {
-    /// Whether `region` is a unit assignable to its VM *in this state*.
-    /// Uninterpreted at the machine level — an implementation characterizes it (via
-    /// its region budget, a runtime check, …) with a refinement axiom (see
-    /// `crate::refinement::software::axiom_assignable_from_budget`).  Being
-    /// state-dependent, the machine model makes no region-budget assumption of its own.
-    pub uninterp spec fn is_region_assignable(self, region: Region) -> bool;
-
     /// `page` is accessible to `vm` either because it is CPU-mapped private
     /// memory of `vm` or because it is currently mapped global-shared memory.
     pub open spec fn owned_or_shared(&self, vm: VmId, page: PhysPage) -> bool {

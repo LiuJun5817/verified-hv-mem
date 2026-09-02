@@ -169,9 +169,6 @@ impl MachineState {
             VmMemOp::Write(c, g, v) => {
                 assert(MachineState::vm_write_step(s1, s2, vm, c, g, v));
             },
-            VmMemOp::HyperCall(c, r) => {
-                assert(MachineState::vm_hypercall_step(s1, s2, vm, c, r));
-            },
         }
     }
 
@@ -264,15 +261,6 @@ impl MachineState {
                     gva,
                 ));
             },
-            VmMemOp::HyperCall(c, r) => {
-                assert(MachineState::vm_hypercall_step(s1, s2, vmE, c, r));
-                assert(s2.memory == s1.memory);
-                assert(s2.read_observation(cpu, subject, gva) == s1.read_observation(
-                    cpu,
-                    subject,
-                    gva,
-                ));
-            },
             VmMemOp::Write(cE, gE, v) => {
                 assert(MachineState::vm_write_step(s1, s2, vmE, cE, gE, v));
                 let paddrE = s1.translated_word(cE, vmE, gE)->Some_0;
@@ -298,16 +286,17 @@ impl MachineState {
 
     // ───────────── §3 maintenance: privacy is a run invariant (solves (a)) ────
     /// **Declassifying actions.** The actions that may legitimately strip
-    /// `page`'s privacy from `subject`: reclaiming it from the subject or removing
-    /// the subject VM. Every other action —
-    /// all guest steps and the remaining hypervisor ops — preserves
-    /// `private_page(subject, page)` (see `lemma_step_preserves_private`).  This is
+    /// `page`'s privacy from `subject`: unmapping and releasing that VM-private
+    /// page, or removing the subject VM. Every other action —
+    /// all guest steps and the remaining private or global-shared mapping ops —
+    /// preserves `private_page(subject, page)` (see
+    /// `lemma_step_preserves_private`).  This is
     /// the trusted-policy boundary: a secret stays secret until the hypervisor
     /// deliberately crosses it.
     pub open spec fn declassifies(action: MachineAction, subject: VmId, page: PhysPage) -> bool {
         match action {
             MachineAction::Hypervisor(op) => match op {
-                HypervisorOp::ReclaimPage(vm, p) => vm == subject && p == page,
+                HypervisorOp::UnmapVmPrivate(vm, _gpa, p) => vm == subject && p == page,
                 HypervisorOp::RemoveVm(vm) => vm == subject,
                 _ => false,
             },
@@ -317,10 +306,11 @@ impl MachineState {
 
     /// **Maintenance, all step kinds.** Any machine step whose action
     /// is not declassifying for `(subject, page)` preserves the subject's presence
-    /// and the page's privacy.  Guest steps and `map`/`unmap`
-    /// preserve private ownership and the shared sets outright; `assign` cannot target an
-    /// owned page (ownership disjointness, from `wf`); a non-declassifying
-    /// `reclaim`/`add_vm`/`remove_vm` touches only other pages or VMs.
+    /// and the page's privacy. VM-private operations frame the shared
+    /// sets; a global-shared map may add only a page absent from every private
+    /// set, while a global-shared unmap only shrinks its shared projection.
+    /// A non-declassifying VM-private unmap or lifecycle operation touches only
+    /// other pages or VMs.
     pub proof fn lemma_step_preserves_private(
         s1: MachineState,
         s2: MachineState,

@@ -30,7 +30,9 @@ pub uninterp spec fn global_shared_pages() -> Set<PhysPage>;
 pub axiom fn zone_private_pages_pairwise_disjoint()
     ensures
         forall|zid1: nat, zid2: nat, page: PhysPage|
-            zid1 != zid2 && #[trigger] zone_private_pages(zid1).contains(page)
+            #![trigger zone_private_pages(zid1).contains(page),
+                zone_private_pages(zid2).contains(page)]
+            zid1 != zid2 && zone_private_pages(zid1).contains(page)
                 ==> !zone_private_pages(zid2).contains(page),
 ;
 
@@ -110,6 +112,27 @@ pub proof fn lemma_global_shared_region_not_zone_private(zid: nat, region: Memor
     };
     zone_private_pages_disjoint_from_global_shared();
     if region_in_zone_private_budget(zid, region) {
+        assert(zone_private_pages(zid).contains(page));
+        assert(global_shared_pages().contains(page));
+        assert(!global_shared_pages().contains(page));
+        assert(false);
+    }
+}
+
+/// A valid zone-private region cannot also lie in the global-shared budget.
+pub proof fn lemma_zone_private_region_not_global_shared(zid: nat, region: MemoryRegion)
+    requires
+        region.spec_valid(),
+        region_in_zone_private_budget(zid, region),
+    ensures
+        !region_in_global_shared_budget(region),
+{
+    let page = region_phys_page(region, 0);
+    assert(region_phys_pages(region).contains(page)) by {
+        assert(0 < region.pages);
+    };
+    zone_private_pages_disjoint_from_global_shared();
+    if region_in_global_shared_budget(region) {
         assert(zone_private_pages(zid).contains(page));
         assert(global_shared_pages().contains(page));
         assert(!global_shared_pages().contains(page));
@@ -453,6 +476,10 @@ tokenized_state_machine! {
             let old_zone = pre.zones[zid];
             let new_zone = post.zones[zid];
             assert(post.zones.dom() == post.zone_ids);
+            assert(pre.zones.contains_key(zid));
+            assert(old_zone.wf());
+            assert(all_regions_in_budget(zid, old_zone.cpu_mem_set));
+            assert(private_regions_pmem_nonoverlap(zid, old_zone.cpu_mem_set));
             old_zone.cpu_mem_set.lemma_insert_region_wf(region);
             lemma_insert_region_preserves_budget_policy(zid, old_zone.cpu_mem_set, region);
             assert forall|zid2: nat| post.zones.contains_key(zid2)
@@ -509,6 +536,10 @@ tokenized_state_machine! {
             let old_zone = pre.zones[zid];
             let new_zone = post.zones[zid];
             assert(post.zones.dom() == post.zone_ids);
+            assert(pre.zones.contains_key(zid));
+            assert(old_zone.wf());
+            assert(all_regions_in_budget(zid, old_zone.cpu_mem_set));
+            assert(private_regions_pmem_nonoverlap(zid, old_zone.cpu_mem_set));
             old_zone.cpu_mem_set.lemma_remove_region_exact_wf(region);
             lemma_remove_region_preserves_budget_policy(zid, old_zone.cpu_mem_set, region);
             assert forall|zid2: nat| post.zones.contains_key(zid2)
@@ -565,6 +596,8 @@ tokenized_state_machine! {
             let old_zone = pre.zones[zid];
             let new_zone = post.zones[zid];
             assert(post.zones.dom() == post.zone_ids);
+            assert(pre.zones.contains_key(zid));
+            assert(old_zone.wf());
             lemma_empty_memory_set_budget_policy(zid);
             assert forall|zid2: nat| post.zones.contains_key(zid2)
                 implies #[trigger] post.zones[zid2].wf() by {
@@ -627,6 +660,10 @@ tokenized_state_machine! {
             let old_zone = pre.zones[zid];
             let new_zone = post.zones[zid];
             assert(post.zones.dom() == post.zone_ids);
+            assert(pre.zones.contains_key(zid));
+            assert(old_zone.wf());
+            assert(all_regions_in_budget(zid, old_zone.iommu_mem_set));
+            assert(private_regions_pmem_nonoverlap(zid, old_zone.iommu_mem_set));
             old_zone.iommu_mem_set.lemma_insert_region_wf(region);
             lemma_insert_region_preserves_budget_policy(zid, old_zone.iommu_mem_set, region);
             assert forall|zid2: nat| post.zones.contains_key(zid2)
@@ -683,6 +720,10 @@ tokenized_state_machine! {
             let old_zone = pre.zones[zid];
             let new_zone = post.zones[zid];
             assert(post.zones.dom() == post.zone_ids);
+            assert(pre.zones.contains_key(zid));
+            assert(old_zone.wf());
+            assert(all_regions_in_budget(zid, old_zone.iommu_mem_set));
+            assert(private_regions_pmem_nonoverlap(zid, old_zone.iommu_mem_set));
             old_zone.iommu_mem_set.lemma_remove_region_exact_wf(region);
             lemma_remove_region_preserves_budget_policy(zid, old_zone.iommu_mem_set, region);
             assert forall|zid2: nat| post.zones.contains_key(zid2)
@@ -739,6 +780,8 @@ tokenized_state_machine! {
             let old_zone = pre.zones[zid];
             let new_zone = post.zones[zid];
             assert(post.zones.dom() == post.zone_ids);
+            assert(pre.zones.contains_key(zid));
+            assert(old_zone.wf());
             lemma_empty_memory_set_budget_policy(zid);
             assert forall|zid2: nat| post.zones.contains_key(zid2)
                 implies #[trigger] post.zones[zid2].wf() by {
