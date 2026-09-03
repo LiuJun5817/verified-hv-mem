@@ -147,6 +147,11 @@ impl SpecMemorySet {
         }
     }
 
+    /// Remove every region and mapping from the memory set.
+    pub open spec fn clear(&self) -> Self {
+        Self { regions: Set::empty(), mappings: Map::empty() }
+    }
+
     /// Inserting a fresh non-overlapping valid region keeps the memory set well-formed:
     /// the page table grows by exactly the region's dense mappings, and the new
     /// region's pages are vmem-disjoint from all old ones, so the exact-dense
@@ -260,6 +265,24 @@ impl SpecMemorySet {
                 region.lemma_mappings_contains_pair(i);  // ⇒ v ∈ region's keys: contradiction
             }
             assert(new.regions.contains(r));
+        }
+    }
+
+    /// Removing by a present region's start address removes that exact region.
+    pub proof fn lemma_remove_region_eq_exact(self, region: MemoryRegion)
+        requires
+            self.wf(),
+            self.regions.contains(region),
+        ensures
+            self.remove_region(region.vstart@) == self.remove_region_exact(region),
+    {
+        let removed = choose|r: MemoryRegion| #[trigger]
+            self.regions.contains(r) && r.vstart@ == region.vstart@;
+        assert(removed == region) by {
+            if removed != region {
+                assert(!removed.spec_overlaps_vmem(region));
+                assert(removed.spec_overlaps_vmem(region));
+            }
         }
     }
 }
@@ -433,6 +456,39 @@ pub trait MemorySet<PT, A, I> where
             self.inst_id() == old(self).inst_id(),
             self.pt_constants() == old(self).pt_constants(),
             self@ == old(self)@.remove_region(start@),
+            self.invariants(),
+            mmu.wf(),
+            res@.instance_id() == mmu.inst_id(),
+            res@.key() == VmId(zone_id as nat),
+            res@.value().s2map == pt_s2map_inner(self@.mappings),
+            res@.value().coherent(VmId(zone_id as nat)),
+    ;
+
+    /// Unmap every region, issuing the required MMU maintenance for each
+    /// page-table block and returning the synchronized VM token.
+    fn clear(
+        &mut self,
+        allocator: &GlobalAllocator<A>,
+        zone_id: usize,
+        mmu: &MmuHardware<I>,
+        s2_tok: Tracked<MmuVmToken>,
+        iommu: bool,
+    ) -> (res: Tracked<MmuVmToken>)
+        requires
+            old(self).invariants(),
+            allocator.invariants(),
+            old(self).inst_id() == allocator.inst_id(),
+            mmu.wf(),
+            I::valid_zone_id(zone_id),
+            s2_tok@.instance_id() == mmu.inst_id(),
+            s2_tok@.key() == VmId(zone_id as nat),
+            s2_tok@.value().s2map == pt_s2map_inner(old(self)@.mappings),
+            s2_tok@.value().coherent(VmId(zone_id as nat)),
+        ensures
+            self.inst_id() == old(self).inst_id(),
+            self.pt_constants() == old(self).pt_constants(),
+            self@ == old(self)@.clear(),
+            self@.regions.is_empty(),
             self.invariants(),
             mmu.wf(),
             res@.instance_id() == mmu.inst_id(),

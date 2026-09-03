@@ -142,6 +142,10 @@ impl PageTableEntry for Aarch64PTE {
         Self { value: ((addr.0 as u64) & PHYS_ADDR_MASK) | Self::spec_descriptor_flags(attr, huge) }
     }
 
+    open spec fn spec_new_table(addr: SpecPAddr) -> Self {
+        Self::spec_new(addr, MemAttr::spec_default(), false)
+    }
+
     open spec fn spec_empty() -> Self {
         Self { value: 0 }
     }
@@ -182,6 +186,10 @@ impl PageTableEntry for Aarch64PTE {
         Self { value }
     }
 
+    fn new_table(addr: PAddr) -> (pte: Self) {
+        Self::new(addr, MemAttr::default(), false)
+    }
+
     fn empty() -> (pte: Self) {
         Self { value: 0 }
     }
@@ -216,6 +224,10 @@ impl PageTableEntry for Aarch64PTE {
     }
 
     proof fn lemma_new_wf(addr: SpecPAddr, attr: MemAttr, huge: bool) {
+    }
+
+    proof fn lemma_new_table_wf(addr: SpecPAddr) {
+        Self::lemma_new_wf(addr, MemAttr::spec_default(), false);
     }
 
     proof fn lemma_from_u64_wf(val: u64) {
@@ -423,6 +435,10 @@ impl PageTableEntry for Aarch64PTE {
         assert(pte.spec_attr().executable == attr.executable);
         assert(pte.spec_attr().device == attr.device);
         assert(pte.spec_attr() == attr);
+    }
+
+    proof fn lemma_new_table_keeps_value(addr: SpecPAddr) {
+        Self::lemma_new_keeps_value(addr, MemAttr::spec_default(), false);
     }
 
     proof fn lemma_empty_invalid() {

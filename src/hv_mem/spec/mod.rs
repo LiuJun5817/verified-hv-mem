@@ -66,6 +66,14 @@ impl GhostZone {
         }
     }
 
+    /// Remove every CPU-visible region and mapping from this zone.
+    pub open spec fn cpu_clear(&self) -> Self {
+        Self {
+            cpu_mem_set: self.cpu_mem_set.clear(),
+            iommu_mem_set: self.iommu_mem_set,
+        }
+    }
+
     /// Insert a region into the IOMMU memory set of this zone.
     pub open spec fn iommu_insert_region(&self, region: MemoryRegion) -> Self {
         Self {
@@ -82,6 +90,14 @@ impl GhostZone {
         Self {
             cpu_mem_set: self.cpu_mem_set,
             iommu_mem_set: self.iommu_mem_set.remove_region_exact(region),
+        }
+    }
+
+    /// Remove every IOMMU-visible region and mapping from this zone.
+    pub open spec fn iommu_clear(&self) -> Self {
+        Self {
+            cpu_mem_set: self.cpu_mem_set,
+            iommu_mem_set: self.iommu_mem_set.clear(),
         }
     }
 }

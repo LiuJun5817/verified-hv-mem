@@ -255,7 +255,7 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
                 let table_base = self.pt_mem.alloc_table(allocator, level + 1);
 
                 // Write entry
-                let pte = E::new(table_base, MemAttr::default(), false);
+                let pte = E::new_table(table_base);
                 self.pt_mem.write(base, idx, pte.to_u64());
 
                 // Insert at next level

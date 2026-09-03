@@ -160,6 +160,23 @@ impl BudgetProtocol {
         BudgetZoneState { zone_tok: new_tok }
     }
 
+    /// Clear every CPU-visible region using BudgetSpec's zone-local shard.
+    pub proof fn cpu_clear(
+        tracked gs: &BudgetGlobalState,
+        tracked zt: BudgetZoneState,
+    ) -> (tracked new_zt: BudgetZoneState)
+        requires
+            zt.wf(gs.mem_inst_id()),
+        ensures
+            new_zt.zone_id() == zt.zone_id(),
+            new_zt.wf(gs.mem_inst_id()),
+            new_zt.ghost_zone() == zt.ghost_zone().cpu_clear(),
+    {
+        let zid = zt.zone_id();
+        let tracked new_tok = gs.inst.cpu_clear(zid, zt.zone_tok);
+        BudgetZoneState { zone_tok: new_tok }
+    }
+
     /// Insert a region into a zone's IOMMU mappings.
     pub proof fn iommu_insert_region(
         tracked gs: &BudgetGlobalState,
@@ -197,6 +214,23 @@ impl BudgetProtocol {
     {
         let zid = zt.zone_id();
         let tracked new_tok = gs.inst.iommu_remove_region(zid, region, zt.zone_tok);
+        BudgetZoneState { zone_tok: new_tok }
+    }
+
+    /// Clear every IOMMU-visible region using BudgetSpec's zone-local shard.
+    pub proof fn iommu_clear(
+        tracked gs: &BudgetGlobalState,
+        tracked zt: BudgetZoneState,
+    ) -> (tracked new_zt: BudgetZoneState)
+        requires
+            zt.wf(gs.mem_inst_id()),
+        ensures
+            new_zt.zone_id() == zt.zone_id(),
+            new_zt.wf(gs.mem_inst_id()),
+            new_zt.ghost_zone() == zt.ghost_zone().iommu_clear(),
+    {
+        let zid = zt.zone_id();
+        let tracked new_tok = gs.inst.iommu_clear(zid, zt.zone_tok);
         BudgetZoneState { zone_tok: new_tok }
     }
 }

@@ -89,13 +89,6 @@ impl<PT, A, I> VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator
             }
     }
 
-    /// The abstract view of regions in this memory set.
-    pub open spec fn regions_view(&self) -> Set<MemoryRegion> {
-        Set::new(
-            |r: MemoryRegion| exists|i: int| 0 <= i < self.regions.len() && self.regions[i] == r,
-        )
-    }
-
     /// Select the unique region whose dense mapping contains `v`.
     pub open spec fn region_index_for_vaddr(&self, v: SpecVAddr) -> int
         recommends
@@ -239,22 +232,19 @@ impl<PT, A, I> VecMemorySet<PT, A, I> where PT: PageTable<A>, A: BitmapAllocator
         assert(lhs =~= rhs);
     }
 
-    /// Non-overlapping valid regions cannot share a starting virtual address.
-    proof fn lemma_region_start_unique(self)
+    /// Pairwise virtual disjointness makes the region vector duplicate-free.
+    proof fn lemma_regions_no_duplicates(self)
         requires
             self.invariants(),
         ensures
-            forall|i: int, j: int|
-                #![auto]
-                0 <= i < self.regions.len() && 0 <= j < self.regions.len() && i != j
-                    ==> self.regions[i].vstart@ != self.regions[j].vstart@,
+            self.regions@.no_duplicates(),
     {
-        // Prove the quantified unique-start postcondition from the non-overlap invariant.
+        // Equal entries describe the same nonempty virtual range, contradicting disjointness.
         assert forall|i: int, j: int|
             #![auto]
             0 <= i < self.regions.len() && 0 <= j < self.regions.len() && i
-                != j implies self.regions[i].vstart@ != self.regions[j].vstart@ by {
-            if self.regions[i].vstart@ == self.regions[j].vstart@ {
+                != j implies self.regions[i] != self.regions[j] by {
+            if self.regions[i] == self.regions[j] {
                 assert(self.regions[i].spec_valid());
                 assert(self.regions[j].spec_valid());
                 assert(self.regions[i].spec_overlaps_vmem(self.regions[j]));
@@ -337,7 +327,7 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
     I: HardwareInstr,
  {
     open spec fn view(&self) -> SpecMemorySet {
-        SpecMemorySet { regions: self.regions_view(), mappings: self.mappings_view() }
+        SpecMemorySet { regions: self.regions@.to_set(), mappings: self.mappings_view() }
     }
 
     open spec fn inst_id(&self) -> InstanceId {
@@ -1005,10 +995,9 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         }
         // `has_region_starting_at` ensures that the region exists.
         proof {
-            // Instantiate existence and uniqueness to identify `ridx` with the requested region.
+            // Instantiate existence to identify `ridx` with the requested region.
             assert(self@.has_region_starting_at(start@));
             assert(ridx < self.regions.len());
-            self.lemma_region_start_unique();
         }
 
         let region = &self.regions[ridx];
@@ -1022,29 +1011,6 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 self.regions[j],
             ) by {
                 assert(self.regions@.contains(self.regions[j]));
-            }
-            // Prove each mapping is owned by another region or starts in the target suffix.
-            assert forall|vb: SpecVAddr, fr: SpecFrame| #[trigger]
-                self.pt@.mappings.contains_pair(vb, fr) implies self.has_region_for_mapping_except(
-                vb,
-                fr,
-                ridx as int,
-            ) || region.vstart@.0 <= vb.0 by {
-                assert(self.has_region_for_mapping(vb, fr));
-                let owner = choose|owner: int|
-                    #![auto]
-                    0 <= owner < self.regions.len() && self.regions[owner].vstart@.0 <= vb.0 && vb.0
-                        + fr.size.as_nat() <= self.regions[owner].vstart@.0
-                        + self.regions[owner].pages * SPEC_PAGE_SIZE
-                        && self.regions[owner].pstart@.0 <= fr.base.0 && fr.base.0
-                        + fr.size.as_nat() <= self.regions[owner].pstart@.0
-                        + self.regions[owner].pages * SPEC_PAGE_SIZE && fr.attr
-                        == self.regions[owner].attr;
-                if owner != ridx as int {
-                    assert(self.has_region_for_mapping_except(vb, fr, ridx as int));
-                } else {
-                    assert(self.regions[owner] == *region);
-                }
             }
             // Prove the removal loop's S2 equation for the empty removed prefix.
             assert(s2@.value().s2map == pt_s2map_inner(old(self)@.mappings).remove_keys(
@@ -1115,6 +1081,8 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                         covering_frame.base,
                         covering_frame.size.as_nat(),
                     ) && covering_frame.attr == region.attr;
+                assert(region.spec_page_vaddr(i as nat).0 >= mapped_vbase.0);
+                assert(vbase@ == region.spec_page_vaddr(i as nat));
                 assert(mapped_vbase.0 <= vbase@.0);
                 if self.has_region_for_mapping_except(mapped_vbase, covering_frame, ridx as int) {
                     let owner = choose|owner: int|
@@ -1442,7 +1410,15 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                         };
                         assert(old(self).regions[old_idx] == r);
                         assert(old_idx != ridx as int);
-                        assert(r != removed_region);
+                        assert(r != removed_region) by {
+                            if r == removed_region {
+                                assert(old(self).regions[old_idx].spec_valid());
+                                assert(old(self).regions[ridx as int].spec_valid());
+                                assert(old(self).regions[old_idx].spec_overlaps_vmem(
+                                    old(self).regions[ridx as int],
+                                ));
+                            }
+                        }
                     }
                     if old(self)@.regions.remove(removed_region).contains(r) {
                         let old_idx = choose|old_idx: int|
@@ -1501,12 +1477,76 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                     0 <= j < old(self).regions.len() && old(self).regions[j] == removed;
                 assert(old(self).regions[removed_idx].vstart@ == start@);
                 assert(old(self).regions[ridx as int].vstart@ == start@);
-                assert(removed_idx == ridx as int);
+                assert(removed_idx == ridx as int) by {
+                    if removed_idx != ridx as int {
+                        assert(old(self).regions[removed_idx].spec_valid());
+                        assert(old(self).regions[ridx as int].spec_valid());
+                        assert(old(self).regions[removed_idx].spec_overlaps_vmem(
+                            old(self).regions[ridx as int],
+                        ));
+                    }
+                }
             }
             assert(old(self)@.remove_region(start@) == expected);
             assert(self@ == old(self)@.remove_region(start@));
             assert(s2@.value().s2map == pt_s2map_inner(self@.mappings));
             assert(s2@.value().coherent(VmId(zone_id as nat)));
+        }
+        s2
+    }
+
+    fn clear(
+        &mut self,
+        allocator: &GlobalAllocator<A>,
+        zone_id: usize,
+        mmu: &MmuHardware<I>,
+        s2_tok: Tracked<MmuVmToken>,
+        iommu: bool,
+    ) -> (res: Tracked<MmuVmToken>) {
+        let ghost old_inst_id = self.inst_id();
+        let ghost old_pt_constants = self.pt_constants();
+        let mut s2 = s2_tok;
+        while !self.regions.is_empty()
+            invariant
+                self.invariants(),
+                self.inst_id() == old_inst_id,
+                self.pt_constants() == old_pt_constants,
+                allocator.invariants(),
+                self.inst_id() == allocator.inst_id(),
+                mmu.wf(),
+                I::valid_zone_id(zone_id),
+                s2@.instance_id() == mmu.inst_id(),
+                s2@.key() == VmId(zone_id as nat),
+                s2@.value().s2map == pt_s2map_inner(self@.mappings),
+                s2@.value().coherent(VmId(zone_id as nat)),
+            decreases self.regions.len(),
+        {
+            let start = self.regions[0].vstart;
+            let ghost region = self.regions@[0];
+            let ghost regions_before = self.regions@;
+            let ghost view_before = self@;
+            proof {
+                assert(self@.regions.contains(region));
+                assert(self@.has_region_starting_at(region.vstart@));
+                self.lemma_regions_no_duplicates();
+                regions_before.unique_seq_to_set();
+                self.lemma_invariants_implies_wf();
+            }
+            s2 = self.remove(allocator, start, zone_id, mmu, s2, iommu);
+            proof {
+                // Prove list removal is equivalent to the abstract set removal.
+                view_before.lemma_remove_region_eq_exact(region);
+                self.lemma_regions_no_duplicates();
+                self.regions@.unique_seq_to_set();
+                assert(self@.regions == view_before.regions.remove(region));
+                assert(self.regions.len() < regions_before.len());
+            }
+        }
+        proof {
+            assert(self@.regions =~= Set::<MemoryRegion>::empty());
+            self.lemma_pt_empty_if_regions_empty();
+            assert(self@.mappings =~= Map::<SpecVAddr, SpecFrame>::empty());
+            assert(self@ == old(self)@.clear());
         }
         s2
     }

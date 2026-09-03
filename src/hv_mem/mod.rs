@@ -29,7 +29,7 @@ use crate::{
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     constants::*,
     global_allocator::GlobalAllocator,
-    hardware::spec::{MmuVmToken, MmuVmIdsToken},
+    hardware::spec::{MmuVmIdsToken, MmuVmToken},
     hardware::{HardwareInstr, MmuHardware},
     memory_set::{MemorySet, SpecMemorySet},
     model::types::{GuestPage, S2Entry, VmId},
@@ -38,7 +38,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 use core::marker::PhantomData;
-use protocol::{BudgetGlobalState, BudgetProtocol, ZoneGhostProtocol};
+use protocol::{BudgetGlobalState, BudgetProtocol, ZoneGhostProtocol, ZoneStateOps};
 use vstd::invariant::InvariantPredicate;
 use vstd::{
     cell::{CellId, PCell, PointsTo},
@@ -79,7 +79,7 @@ pub struct HvMemKey {
 ///
 /// Bundles the `PointsTo<Vec<Zone<...>>>` cell-permission for the zone list
 /// together with the protocol-specific global ghost state (`P::GlobalState`).
-pub tracked struct HvMemRwContent<PT, M, A, P, I> where
+pub tracked struct HvMemRwContent<PT, M, A, P, I, D = ()> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
@@ -87,7 +87,7 @@ pub tracked struct HvMemRwContent<PT, M, A, P, I> where
     I: HardwareInstr,
  {
     /// Permission to read/write the zone-list PCell.
-    pub zone_list_perm: PointsTo<Vec<Zone<PT, M, A, P, I>>>,
+    pub zone_list_perm: PointsTo<Vec<Zone<PT, M, A, P, I, D>>>,
     /// Protocol-specific global ghost state (e.g. `ClosureGlobalState` for ClosureProtocol).
     pub global_state: P::GlobalState,
     /// CPU MMU live-VM registry token.
@@ -97,23 +97,20 @@ pub tracked struct HvMemRwContent<PT, M, A, P, I> where
 }
 
 /// Phantom struct that carries the `HvMem`-level `InvariantPredicate`.
-pub struct HvMemPred<PT, M, A, P, I> where
+pub struct HvMemPred<PT, M, A, P, I, D = ()> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
     I: HardwareInstr,
  {
-    pub _phantom: PhantomData<(PT, M, A, P, I)>,
+    pub _phantom: PhantomData<(PT, M, A, P, I, D)>,
 }
 
-impl<PT, M, A, P, I> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P, I>> for HvMemPred<
-    PT,
-    M,
-    A,
-    P,
-    I,
-> where
+impl<PT, M, A, P, I, D> InvariantPredicate<
+    HvMemKey,
+    HvMemRwContent<PT, M, A, P, I, D>,
+> for HvMemPred<PT, M, A, P, I, D> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
@@ -126,7 +123,7 @@ impl<PT, M, A, P, I> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P, I>
     /// - the exec zone list and the ghost state agree: every ghost zone ID has
     ///   exactly one corresponding exec `Zone`, all zones share the same
     ///   spec instance, and exec zone IDs are pairwise distinct.
-    open spec fn inv(k: HvMemKey, v: HvMemRwContent<PT, M, A, P, I>) -> bool {
+    open spec fn inv(k: HvMemKey, v: HvMemRwContent<PT, M, A, P, I, D>) -> bool {
         &&& v.zone_list_perm.is_init()
         &&& v.zone_list_perm@.pcell === k.cell_id
         &&& P::mem_inst_id(&v.global_state) == k.mem_inst_id
@@ -198,7 +195,7 @@ impl<PT, M, A, P, I> InvariantPredicate<HvMemKey, HvMemRwContent<PT, M, A, P, I>
 /// the same time (e.g., to look up their zone).  The outer `RwLock` allows
 /// concurrent reads of the list while serialising structural changes
 /// (`add_zone` / `remove_zone`).
-pub struct HvMem<PT, M, A, P, I> where
+pub struct HvMem<PT, M, A, P, I, D = ()> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
@@ -206,9 +203,9 @@ pub struct HvMem<PT, M, A, P, I> where
     I: HardwareInstr,
  {
     /// Zone list — written only while the HvMem write guard is held.
-    pub zone_list: PCell<Vec<Zone<PT, M, A, P, I>>>,
+    pub zone_list: PCell<Vec<Zone<PT, M, A, P, I, D>>>,
     /// RwLock protecting `HvMemRwContent<PT,M,A,P>` with `HvMemKey` predicate.
-    pub lock: RwLock<HvMemKey, HvMemRwContent<PT, M, A, P, I>, HvMemPred<PT, M, A, P, I>>,
+    pub lock: RwLock<HvMemKey, HvMemRwContent<PT, M, A, P, I, D>, HvMemPred<PT, M, A, P, I, D>>,
     /// Global allocator — already protected by its own `Mutex`.
     pub allocator: GlobalAllocator<A>,
     /// Persistent CPU MMU state-machine instance; it contains no mutable shard.
@@ -219,7 +216,7 @@ pub struct HvMem<PT, M, A, P, I> where
     pub pt_constants: PTConstants,
 }
 
-impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
+impl<PT, M, A, P, I, D> HvMem<PT, M, A, P, I, D> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
@@ -250,13 +247,14 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             A::spec_cap() * SPEC_FRAME_SIZE,
         )
         &&& forall|level: nat|
-            level < self.pt_constants.arch@.level_count()
-                ==> self.pt_constants.arch@.entry_count(level) == 512
+            level < self.pt_constants.arch@.level_count() ==> self.pt_constants.arch@.entry_count(
+                level,
+            ) == 512
         &&& self.pt_constants.arch@.leaf_frame_size() == FrameSize::Size4K
     }
 
     /// Return the index of `zid` in a well-formed zone list, if present.
-    fn find_zone_index(zones: &Vec<Zone<PT, M, A, P, I>>, zid: usize) -> (res: Option<usize>)
+    fn find_zone_index(zones: &Vec<Zone<PT, M, A, P, I, D>>, zid: usize) -> (res: Option<usize>)
         requires
             forall|j: int| 0 <= j < zones@.len() ==> #[trigger] zones@[j].wf(),
         ensures
@@ -295,7 +293,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     /// 3. Delegate Zone assembly to `Zone::new` (infallible).
     /// 4. Push the new `Zone`, return the zone list to its `PCell`, and release
     ///    the write lock.
-    pub fn add_zone(&self, zid: usize) -> (res: Result<(), ()>)
+    pub fn add_zone(&self, zid: usize, payload: D) -> (res: Result<(), ()>)
         requires
             self.invariants(),
             I::valid_zone_id(zid),
@@ -305,7 +303,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         // ── Step 1: acquire HvMem write lock ──────────────────────────────────
         let guard = self.lock.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: HvMemRwContent<PT, M, A, P, I> = token.get();
+        let tracked mut content: HvMemRwContent<PT, M, A, P, I, D> = token.get();
         let mut zones = self.zone_list.take(Tracked(&mut content.zone_list_perm));
 
         // ── Step 1b: reject duplicate zone IDs ────────────────────────────────
@@ -342,15 +340,9 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             // Mint this zone's CPU MMU `s2map` slice token (empty, keyed by the vm); the
             // forced sync clause holds at birth because an empty mem_set projects to an
             // empty `s2map`.
-            cpu_mmu_tok = self.cpu_mmu.add_vm(
-                zid,
-                &mut content.cpu_vm_ids_tok,
-            );
+            cpu_mmu_tok = self.cpu_mmu.add_vm(zid, &mut content.cpu_vm_ids_tok);
             // Mint this zone's IOMMU slice token (empty) on the separate IOMMU instance.
-            iommu_mmu_tok = self.iommu_mmu.add_vm(
-                zid,
-                &mut content.iommu_vm_ids_tok,
-            );
+            iommu_mmu_tok = self.iommu_mmu.add_vm(zid, &mut content.iommu_vm_ids_tok);
         }
 
         proof {
@@ -362,9 +354,10 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                 mappings: Map::empty(),
             });
         }
-        let new_zone = Zone::<PT, M, A, P, I>::new(
+        let new_zone = Zone::<PT, M, A, P, I, D>::new(
             cpu_mem_set,
             iommu_mem_set,
+            payload,
             zid,
             Ghost(mem_inst_id),
             Ghost(self.allocator.inst_id()),
@@ -382,10 +375,12 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         self.zone_list.put(Tracked(&mut content.zone_list_perm), zones);
         proof {
             // lemma_mmu_vm_ids_insert(pre_add_zone_ids, zid as nat);
-            assert(content.cpu_vm_ids_tok.value()
-                =~= mmu_vm_ids(P::zone_ids(&content.global_state)));
-            assert(content.iommu_vm_ids_tok.value()
-                =~= mmu_vm_ids(P::zone_ids(&content.global_state)));
+            assert(content.cpu_vm_ids_tok.value() =~= mmu_vm_ids(
+                P::zone_ids(&content.global_state),
+            ));
+            assert(content.iommu_vm_ids_tok.value() =~= mmu_vm_ids(
+                P::zone_ids(&content.global_state),
+            ));
             let zone_list = content.zone_list_perm@.mem_contents->Init_0;
             // After push+put: zone_list@ = old_zones.push(new_zone).
             let new_zones = zone_list@;
@@ -395,7 +390,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             assert(new_zones[old_len] == new_zone);
             assert(P::zone_ids(&content.global_state) =~= pre_add_zone_ids.insert(zid as nat));
             assert(P::mem_inst_id(&content.global_state) == mem_inst_id);
-            assert(HvMemPred::<PT, M, A, P, I>::inv(self.lock.k@, content)) by {
+            assert(HvMemPred::<PT, M, A, P, I, D>::inv(self.lock.k@, content)) by {
                 // 1. zone_list_perm.is_init() — from put.
                 // 2. pcell matches — from loop invariant.
                 // 3. global_wf — from P::add_zone postcondition.
@@ -432,8 +427,8 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     /// 3. Acquire the zone write lock and reject removal unless both its CPU and
     ///    IOMMU memory sets are empty.
     /// 4. Deregister the VM from both hardware translation regimes.
-    /// 5. Drop both memory sets, restoring their implementation-owned resources.
-    /// 6. Swap-remove the empty zone from the list.
+    /// 5. Drop both empty memory sets, restoring their implementation-owned resources.
+    /// 6. Swap-remove the zone from the list.
     /// 7. Advance the protocol's `remove_zone` transition to drop the zone token.
     /// 8. Restore the zone list and release the HvMem write lock.
     ///
@@ -448,7 +443,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         // ── Step 1: acquire HvMem write lock ─────────────────────────────────
         let guard = self.lock.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: HvMemRwContent<PT, M, A, P, I> = token.get();
+        let tracked mut content: HvMemRwContent<PT, M, A, P, I, D> = token.get();
         let ghost pre_remove_zone_ids = P::zone_ids(&content.global_state);
         let mut zones = self.zone_list.take(Tracked(&mut content.zone_list_perm));
 
@@ -462,10 +457,10 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
                 return Err(());
             },
         };
-        // ── Step 3: lock the zone and require both memory sets to be empty ─────
+        // ── Step 3: lock the zone and require both memory sets to be empty ────
         let zone_guard = zones[i].lock.lock_write();
         let RwWriteGuard { handle: zone_handle, token: zone_token } = zone_guard;
-        let tracked mut zone_content: ZoneRwContent<M, P> = zone_token.get();
+        let tracked mut zone_content: ZoneRwContent<M, P, D> = zone_token.get();
         let cpu_mem_set: M = zones[i].cpu_mem_set.take(Tracked(&mut zone_content.cpu_mem_set_perm));
         let iommu_mem_set: M = zones[i].iommu_mem_set.take(
             Tracked(&mut zone_content.iommu_mem_set_perm),
@@ -493,24 +488,17 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
             assert(pt_s2map_inner(cpu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
             assert(pt_s2map_inner(iommu_mem_set@.mappings) =~= Map::<GuestPage, S2Entry>::empty());
         }
-        let tracked ZoneRwContent::<M, P> {
+        let tracked ZoneRwContent::<M, P, D> {
             cpu_mem_set_perm: _,
             iommu_mem_set_perm: _,
+            payload_perm: _,
             zone_state,
             cpu_mmu_tok,
             iommu_mmu_tok,
         } = zone_content;
         proof {
-            self.cpu_mmu.remove_vm(
-                zid,
-                &mut content.cpu_vm_ids_tok,
-                cpu_mmu_tok,
-            );
-            self.iommu_mmu.remove_vm(
-                zid,
-                &mut content.iommu_vm_ids_tok,
-                iommu_mmu_tok,
-            );
+            self.cpu_mmu.remove_vm(zid, &mut content.cpu_vm_ids_tok, cpu_mmu_tok);
+            self.iommu_mmu.remove_vm(zid, &mut content.iommu_vm_ids_tok, iommu_mmu_tok);
         }
 
         // ── Step 5: restore resources owned by both memory sets ──────────────
@@ -526,11 +514,12 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         // ── Step 7: advance protocol ghost state ───────────────────────────────
         proof {
             P::remove_zone(&mut content.global_state, zone_state);
-            // lemma_mmu_vm_ids_remove(pre_remove_zone_ids, zid as nat);
-            assert(content.cpu_vm_ids_tok.value()
-                =~= mmu_vm_ids(P::zone_ids(&content.global_state)));
-            assert(content.iommu_vm_ids_tok.value()
-                =~= mmu_vm_ids(P::zone_ids(&content.global_state)));
+            assert(content.cpu_vm_ids_tok.value() =~= mmu_vm_ids(
+                P::zone_ids(&content.global_state),
+            ));
+            assert(content.iommu_vm_ids_tok.value() =~= mmu_vm_ids(
+                P::zone_ids(&content.global_state),
+            ));
             // The writer token and empty exec memory sets are destroyed with the zone;
             // there is no zone lock to release afterwards.
         }
@@ -548,7 +537,15 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
 
         Ok(())
     }
+}
 
+impl<PT, M, A, P, I, D> HvMem<PT, M, A, P, I, D> where
+    PT: PageTable<A>,
+    M: MemorySet<PT, A, I>,
+    A: BitmapAllocator,
+    P: ZoneGhostProtocol,
+    I: HardwareInstr,
+ {
     /// Access the zone identified by `zid` via a scoped callback.
     ///
     /// Holds the HvMem **read** lock for the entire duration of the callback:
@@ -558,18 +555,18 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     ///
     /// Returns `None` if no zone with `zid` is registered; otherwise calls `f`
     /// with a shared reference to the matching zone and returns `Some(f(zone))`.
-    pub fn with_zone<R, F: FnOnce(&Zone<PT, M, A, P, I>) -> R>(&self, zid: usize, f: F) -> (res:
+    pub fn with_zone<R, F: FnOnce(&Zone<PT, M, A, P, I, D>) -> R>(&self, zid: usize, f: F) -> (res:
         Option<R>)
         requires
             self.invariants(),
-            forall|zone: &Zone<PT, M, A, P, I>| #[trigger] f.requires((zone,)) == zone.wf(),
+            forall|zone: &Zone<PT, M, A, P, I, D>| #[trigger] f.requires((zone,)) == zone.wf(),
     {
         // ── Acquire HvMem read lock ───────────────────────────────────────────
         let guard = self.lock.lock_read();
 
         // ── Borrow the zone list via the lock's ghost predicate ───────────────
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, P, I> { zone_list_perm, .. } = content;
+        let tracked HvMemRwContent::<PT, M, A, P, I, D> { zone_list_perm, .. } = content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
         // ── Invoke callback while the read lock is held ───────────────────────
@@ -584,6 +581,64 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
         result
     }
 
+    /// Read a zone's integration payload while holding both lock levels.
+    pub fn with_zone_payload<R, F: FnOnce(&D) -> R>(&self, zid: usize, f: F) -> (res: Option<R>)
+        requires
+            self.invariants(),
+            forall|payload: &D| #[trigger] f.requires((payload,)),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, P, I, D> { zone_list_perm, .. } = content;
+        let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
+
+        let result = match Self::find_zone_index(zones, zid) {
+            Some(i) => {
+                let zone_guard = zones[i].lock.lock_read();
+                let Tracked(zone_content) = zone_guard.borrow(&zones[i].lock);
+                let payload = zones[i].payload.borrow(Tracked(&zone_content.payload_perm));
+                let value = f(payload);
+                zones[i].lock.unlock_read(zone_guard);
+                Some(value)
+            },
+            None => None,
+        };
+
+        self.lock.unlock_read(guard);
+        result
+    }
+
+    /// Mutate a zone's integration payload while holding the outer read lock and
+    /// the zone's inner write lock.
+    pub fn with_zone_payload_mut<R, F: FnOnce(D) -> (D, R)>(&self, zid: usize, f: F) -> (res:
+        Option<R>)
+        requires
+            self.invariants(),
+            forall|payload: D| #[trigger] f.requires((payload,)),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, P, I, D> { zone_list_perm, .. } = content;
+        let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
+
+        let result = match Self::find_zone_index(zones, zid) {
+            Some(i) => {
+                let zone_guard = zones[i].lock.lock_write();
+                let RwWriteGuard { handle, token } = zone_guard;
+                let tracked mut zone_content: ZoneRwContent<M, P, D> = token.get();
+                let payload = zones[i].payload.take(Tracked(&mut zone_content.payload_perm));
+                let (payload, value) = f(payload);
+                zones[i].payload.put(Tracked(&mut zone_content.payload_perm), payload);
+                zones[i].lock.unlock_write(RwWriteGuard { handle, token: Tracked(zone_content) });
+                Some(value)
+            },
+            None => None,
+        };
+
+        self.lock.unlock_read(guard);
+        result
+    }
+
     /// Return zone `zid`'s CPU stage-2 page-table root physical address.
     pub fn pt_root(&self, zid: usize) -> (res: Result<PAddr, ()>)
         requires
@@ -591,7 +646,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, P, I> { zone_list_perm, .. } = content;
+        let tracked HvMemRwContent::<PT, M, A, P, I, D> { zone_list_perm, .. } = content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
         let res = match Self::find_zone_index(zones, zid) {
@@ -610,7 +665,7 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, P, I> { zone_list_perm, .. } = content;
+        let tracked HvMemRwContent::<PT, M, A, P, I, D> { zone_list_perm, .. } = content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
         let res = match Self::find_zone_index(zones, zid) {
@@ -623,8 +678,8 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
     }
 }
 
-/// Concrete `BudgetProtocol` specialisation: both `insert_region` and
-/// `remove_region` acquire only the HvMem **read** lock.
+/// Concrete `BudgetProtocol` specialisation: mapping operations acquire only
+/// the HvMem **read** lock.
 ///
 /// `BudgetSpec::insert_region` / `remove_region` are zone-local transitions:
 /// they only touch the per-zone `zones[zid]` map-sharded token and access the
@@ -632,27 +687,21 @@ impl<PT, M, A, P, I> HvMem<PT, M, A, P, I> where
 /// `zone_ids_tok` is never modified, so no HvMem write lock is required.
 ///
 /// Locking order: HvMem read lock → zone write lock.
-impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
+impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
     A: BitmapAllocator,
     I: HardwareInstr,
  {
     /// Create a new `HvMem` with an empty zone list and a global allocator.
-    pub fn new(
-        allocator: GlobalAllocator<A>,
-        pt_constants: PTConstants,
-    ) -> (res: Self)
+    pub fn new(allocator: GlobalAllocator<A>, pt_constants: PTConstants) -> (res: Self)
         requires
             allocator.invariants(),
             pt_constants@.valid(),
-            pt_constants.hva_to_pa_offset_valid(
-                allocator.base@,
-                A::spec_cap() * SPEC_FRAME_SIZE,
-            ),
+            pt_constants.hva_to_pa_offset_valid(allocator.base@, A::spec_cap() * SPEC_FRAME_SIZE),
             forall|level: nat|
-                level < pt_constants.arch@.level_count()
-                    ==> pt_constants.arch@.entry_count(level) == 512,
+                level < pt_constants.arch@.level_count() ==> pt_constants.arch@.entry_count(level)
+                    == 512,
             pt_constants.arch@.leaf_frame_size() == FrameSize::Size4K,
         ensures
             res.invariants(),
@@ -670,7 +719,7 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         let ghost inst_id = inst.id();
 
         let tracked budget_global_state = BudgetGlobalState { inst, zone_ids_tok };
-        let tracked content = HvMemRwContent::<PT, M, A, BudgetProtocol, I> {
+        let tracked content = HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
             zone_list_perm,
             global_state: budget_global_state,
             cpu_vm_ids_tok,
@@ -689,10 +738,68 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
 
         proof {
             assert(mmu_vm_ids(Set::<nat>::empty()) =~= Set::<VmId>::empty());
-            assert(HvMemPred::<PT, M, A, BudgetProtocol, I>::inv(key@, content));
+            assert(HvMemPred::<PT, M, A, BudgetProtocol, I, D>::inv(key@, content));
         }
         let lock = RwLock::new(key, Tracked(content));
         Self { zone_list, lock, allocator, cpu_mmu, iommu_mmu, pt_constants }
+    }
+
+    /// Remove every CPU-visible region from zone `zid`.
+    pub fn clear(&self, zid: usize) -> (res: Result<(), ()>)
+        requires
+            self.invariants(),
+        ensures
+            res is Ok ==> self.invariants(),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(hv_content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+            zone_list_perm,
+            global_state,
+            ..
+        } = hv_content;
+        let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
+
+        let i = match Self::find_zone_index(zones, zid) {
+            Some(i) => i,
+            None => {
+                self.lock.unlock_read(guard);
+                return Err(());
+            },
+        };
+
+        zones[i].clear(&self.allocator, Tracked(&global_state), &self.cpu_mmu);
+        self.lock.unlock_read(guard);
+        Ok(())
+    }
+
+    /// Remove every IOMMU-visible region from zone `zid`.
+    pub fn clear_iommu(&self, zid: usize) -> (res: Result<(), ()>)
+        requires
+            self.invariants(),
+        ensures
+            res is Ok ==> self.invariants(),
+    {
+        let guard = self.lock.lock_read();
+        let Tracked(hv_content) = guard.borrow(&self.lock);
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+            zone_list_perm,
+            global_state,
+            ..
+        } = hv_content;
+        let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
+
+        let i = match Self::find_zone_index(zones, zid) {
+            Some(i) => i,
+            None => {
+                self.lock.unlock_read(guard);
+                return Err(());
+            },
+        };
+
+        zones[i].clear_iommu(&self.allocator, Tracked(&global_state), &self.iommu_mmu);
+        self.lock.unlock_read(guard);
+        Ok(())
     }
 
     /// Translate `vaddr` through zone `zid`'s CPU region set under shared locks.
@@ -703,7 +810,8 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I> { zone_list_perm, .. } = content;
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> { zone_list_perm, .. } =
+            content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
         let res = match Self::find_zone_index(zones, zid) {
@@ -723,7 +831,8 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I> { zone_list_perm, .. } = content;
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> { zone_list_perm, .. } =
+            content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
         let res = match Self::find_zone_index(zones, zid) {
@@ -759,8 +868,10 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
 
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I> {
-            zone_list_perm, global_state, ..
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+            zone_list_perm,
+            global_state,
+            ..
         } = content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
@@ -809,8 +920,10 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
 
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I> {
-            zone_list_perm, global_state, ..
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+            zone_list_perm,
+            global_state,
+            ..
         } = content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
@@ -849,8 +962,10 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         }
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I> {
-            zone_list_perm, global_state, ..
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+            zone_list_perm,
+            global_state,
+            ..
         } = content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
@@ -883,8 +998,10 @@ impl<PT, M, A, I> HvMem<PT, M, A, BudgetProtocol, I> where
         }
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I> {
-            zone_list_perm, global_state, ..
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+            zone_list_perm,
+            global_state,
+            ..
         } = content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
