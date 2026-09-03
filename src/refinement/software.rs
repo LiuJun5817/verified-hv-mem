@@ -783,7 +783,6 @@ proof fn lemma_memory_set_mapped_page_has_region(
             && 0 <= i < region.pages
             && vaddr == region.spec_page_vaddr(i)
             && frame == region.spec_frame(i);
-    assert(region.spec_valid());
     lemma_region_phys_page_linear(region, i);
     assert(region_phys_page(region, i) == page);
     assert(region_pages(region).contains(page));
@@ -1029,7 +1028,6 @@ proof fn lemma_memory_set_s2_remove(
     let old = memory_set_s2_entries(zid, mem_set);
     let removed = region_s2_entries(zid, region);
     let new = memory_set_s2_entries(zid, mem_set.remove_region_exact(region));
-    assert(region.spec_valid());
     assert forall|key: VmPageKey| #[trigger]
         new.contains_key(key) <==> old.remove_keys(removed.dom()).contains_key(key) by {
         lemma_region_gpa_mapped_iff(region, key.gpa);
@@ -1555,11 +1553,11 @@ proof fn lemma_cpu_remove_global_shared_projection(
                     post_map.contains_key(key) && post_map[key].page == page)
         },
     );
+    assert(post.budget.inv_zone_ids());
+    assert(post.budget.inv_zones_wf());
+    assert(post.budget.inv_cpu_regions_in_budget());
+    zone_private_pages_disjoint_from_global_shared();
     assert(post@.vm_shared =~= target_shared) by {
-        assert(post.budget.inv_zone_ids());
-        assert(post.budget.inv_zones_wf());
-        assert(post.budget.inv_cpu_regions_in_budget());
-        zone_private_pages_disjoint_from_global_shared();
         assert forall|page: PhysPage| post@.vm_shared.contains(page)
             <==> target_shared.contains(page) by {
             if post@.vm_shared.contains(page) {
@@ -1638,7 +1636,6 @@ proof fn lemma_cpu_remove_global_shared_projection(
     );
     assert forall|page: PhysPage| target_shared.contains(page)
         <==> expected_shared.contains(page) by {
-        lemma_region_to_abstract_pages(zid, concrete);
     }
     assert(target_shared =~= expected_shared);
     assert(post@.vm_shared == expected_shared);
@@ -2020,11 +2017,11 @@ proof fn lemma_iommu_remove_global_shared_projection(
                     post_map.contains_key(key) && post_map[key].page == page)
         },
     );
+    assert(post.budget.inv_zone_ids());
+    assert(post.budget.inv_zones_wf());
+    assert(post.budget.inv_iommu_regions_in_budget());
+    zone_private_pages_disjoint_from_global_shared();
     assert(post@.iommu_shared =~= target_shared) by {
-        assert(post.budget.inv_zone_ids());
-        assert(post.budget.inv_zones_wf());
-        assert(post.budget.inv_iommu_regions_in_budget());
-        zone_private_pages_disjoint_from_global_shared();
         assert forall|page: PhysPage| post@.iommu_shared.contains(page)
             <==> target_shared.contains(page) by {
             if post@.iommu_shared.contains(page) {
@@ -2104,7 +2101,6 @@ proof fn lemma_iommu_remove_global_shared_projection(
     );
     assert forall|page: PhysPage| target_shared.contains(page)
         <==> expected_shared.contains(page) by {
-        lemma_region_to_abstract_pages(zid, concrete);
     }
     assert(target_shared =~= expected_shared);
     assert(post@.iommu_shared == expected_shared);
@@ -2174,7 +2170,6 @@ proof fn lemma_cpu_insert_guards(
     if zone.cpu_mem_set.overlaps_vmem(concrete) {
         let old = choose|old: MemoryRegion| #[trigger]
             zone.cpu_mem_set.regions.contains(old) && old.spec_overlaps_vmem(concrete);
-        assert(old.spec_valid());
         lemma_vmem_overlap_implies_shared_gpa(old, concrete);
         let gpa = choose|gpa: GuestPage|
             region_owns_gpa(old, gpa) && region_owns_gpa(concrete, gpa);
@@ -2194,7 +2189,6 @@ proof fn lemma_cpu_insert_guards(
                     && region_in_zone_private_budget(zid, old)
                     implies !old.spec_overlaps_pmem(concrete) by {
                 if old.spec_overlaps_pmem(concrete) {
-                    assert(old.spec_valid());
                     lemma_pmem_overlap_implies_shared_page(old, concrete);
                     let page = choose|page: PhysPage|
                         region_pages(old).contains(page) && region_pages(concrete).contains(page);
@@ -2254,7 +2248,6 @@ proof fn lemma_iommu_insert_guards(
     if zone.iommu_mem_set.overlaps_vmem(concrete) {
         let old = choose|old: MemoryRegion| #[trigger]
             zone.iommu_mem_set.regions.contains(old) && old.spec_overlaps_vmem(concrete);
-        assert(old.spec_valid());
         lemma_vmem_overlap_implies_shared_gpa(old, concrete);
         let gpa = choose|gpa: GuestPage|
             region_owns_gpa(old, gpa) && region_owns_gpa(concrete, gpa);
@@ -2274,7 +2267,6 @@ proof fn lemma_iommu_insert_guards(
                     && region_in_zone_private_budget(zid, old)
                     implies !old.spec_overlaps_pmem(concrete) by {
                 if old.spec_overlaps_pmem(concrete) {
-                    assert(old.spec_valid());
                     lemma_pmem_overlap_implies_shared_page(old, concrete);
                     let page = choose|page: PhysPage|
                         region_pages(old).contains(page) && region_pages(concrete).contains(page);
@@ -2308,7 +2300,6 @@ proof fn lemma_no_cpu_entries_implies_empty(
     assert(mem_set.regions =~= Set::<MemoryRegion>::empty()) by {
         assert forall|region: MemoryRegion| !mem_set.regions.contains(region) by {
             if mem_set.regions.contains(region) {
-                assert(region.spec_valid());
                 let gpa = region_guest_page(region, 0);
                 let key = VmPageKey { vm, gpa };
                 lemma_gpa_vaddr_roundtrip(region, 0);
@@ -2357,7 +2348,6 @@ proof fn lemma_no_iommu_entries_implies_empty(
     assert(mem_set.regions =~= Set::<MemoryRegion>::empty()) by {
         assert forall|region: MemoryRegion| !mem_set.regions.contains(region) by {
             if mem_set.regions.contains(region) {
-                assert(region.spec_valid());
                 let gpa = region_guest_page(region, 0);
                 let key = VmPageKey { vm, gpa };
                 lemma_gpa_vaddr_roundtrip(region, 0);
@@ -2440,9 +2430,6 @@ impl SoftwareRefinement for SoftwareSpec {
             assert forall|other: VmId| #[trigger]
                 post@.vm_owned.contains_key(other) implies post@.vm_owned[other]
                     == self@.vm_owned.insert(vm, Set::empty())[other] by {
-                if other == vm {
-                    assert(zone_cpu_private_pages(vm.0, empty_zone) =~= Set::empty());
-                }
             }
         }
         assert(post@.vm_shared =~= self@.vm_shared) by {
@@ -2473,9 +2460,6 @@ impl SoftwareRefinement for SoftwareSpec {
             assert forall|other: VmId| #[trigger]
                 post@.iommu_owned.contains_key(other) implies post@.iommu_owned[other]
                     == self@.iommu_owned.insert(vm, Set::empty())[other] by {
-                if other == vm {
-                    assert(zone_iommu_private_pages(vm.0, empty_zone) =~= Set::empty());
-                }
             }
         }
         assert(post@.iommu_shared =~= self@.iommu_shared) by {
@@ -2502,8 +2486,6 @@ impl SoftwareRefinement for SoftwareSpec {
     }
 
     proof fn remove_vm(self, vm: VmId) -> (post: Self) {
-        assert(self.budget.inv_zone_ids());
-        assert(self.budget.zones.contains_key(vm.0));
         lemma_no_cpu_entries_implies_empty(self, vm);
         lemma_no_iommu_entries_implies_empty(self, vm);
         let post = SoftwareSpec {
@@ -2543,7 +2525,6 @@ impl SoftwareRefinement for SoftwareSpec {
 
     proof fn cpu_insert_zone_private_region(self, region: Region) -> (post: Self) {
         let zid = region.vm.0;
-        assert(budget_region_is_zone_private(self, region));
         let concrete = choose_zone_private_region(self, region);
         lemma_cpu_insert_guards(self, region, concrete);
         let post = SoftwareSpec {
@@ -2560,7 +2541,6 @@ impl SoftwareRefinement for SoftwareSpec {
 
     proof fn cpu_remove_zone_private_region(self, region: Region) -> (post: Self) {
         let zid = region.vm.0;
-        assert(budget_region_is_zone_private(self, region));
         let concrete = choose_zone_private_region(self, region);
         assert(abstract_region_installed(self@.s2_map, region));
         assert(self.budget.zones[zid].cpu_mem_set.regions.contains(concrete));
@@ -2578,9 +2558,7 @@ impl SoftwareRefinement for SoftwareSpec {
 
     proof fn cpu_insert_global_shared_region(self, region: Region) -> (post: Self) {
         let zid = region.vm.0;
-        assert(budget_region_is_global_shared(self, region));
         let concrete = choose_global_shared_region(self, region);
-        assert(region_in_budget(zid, concrete));
         lemma_cpu_insert_guards(self, region, concrete);
         lemma_global_shared_region_not_zone_private(zid, concrete);
         let post = SoftwareSpec {
@@ -2597,7 +2575,6 @@ impl SoftwareRefinement for SoftwareSpec {
 
     proof fn cpu_remove_global_shared_region(self, region: Region) -> (post: Self) {
         let zid = region.vm.0;
-        assert(budget_region_is_global_shared(self, region));
         let concrete = choose_global_shared_region(self, region);
         assert(abstract_region_installed(self@.s2_map, region));
         assert(self.budget.zones[zid].cpu_mem_set.regions.contains(concrete));
@@ -2615,7 +2592,6 @@ impl SoftwareRefinement for SoftwareSpec {
 
     proof fn iommu_insert_zone_private_region(self, region: Region) -> (post: Self) {
         let zid = region.vm.0;
-        assert(budget_region_is_zone_private(self, region));
         let concrete = choose_zone_private_region(self, region);
         lemma_iommu_insert_guards(self, region, concrete);
         let post = SoftwareSpec {
@@ -2632,7 +2608,6 @@ impl SoftwareRefinement for SoftwareSpec {
 
     proof fn iommu_remove_zone_private_region(self, region: Region) -> (post: Self) {
         let zid = region.vm.0;
-        assert(budget_region_is_zone_private(self, region));
         let concrete = choose_zone_private_region(self, region);
         assert(abstract_region_installed(self@.iommu_s2_map, region));
         assert(self.budget.zones[zid].iommu_mem_set.regions.contains(concrete));
@@ -2650,9 +2625,7 @@ impl SoftwareRefinement for SoftwareSpec {
 
     proof fn iommu_insert_global_shared_region(self, region: Region) -> (post: Self) {
         let zid = region.vm.0;
-        assert(budget_region_is_global_shared(self, region));
         let concrete = choose_global_shared_region(self, region);
-        assert(region_in_budget(zid, concrete));
         lemma_iommu_insert_guards(self, region, concrete);
         lemma_global_shared_region_not_zone_private(zid, concrete);
         let post = SoftwareSpec {
@@ -2669,7 +2642,6 @@ impl SoftwareRefinement for SoftwareSpec {
 
     proof fn iommu_remove_global_shared_region(self, region: Region) -> (post: Self) {
         let zid = region.vm.0;
-        assert(budget_region_is_global_shared(self, region));
         let concrete = choose_global_shared_region(self, region);
         assert(abstract_region_installed(self@.iommu_s2_map, region));
         assert(self.budget.zones[zid].iommu_mem_set.regions.contains(concrete));

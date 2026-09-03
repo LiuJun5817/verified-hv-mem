@@ -940,8 +940,6 @@ proof fn lemma_cpu_private_insert_partial_wf(
     decreases k,
 {
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
-    assert(sw1.vm_owned.contains_key(region.vm));
     if k == 0 {
         assert(phys_prefix(region, 0) =~= Set::<PhysPage>::empty());
         assert(entry_prefix(region, 0) =~= Map::<VmPageKey, S2Entry>::empty());
@@ -960,11 +958,6 @@ proof fn lemma_cpu_private_insert_partial_wf(
     } else {
         lemma_cpu_private_insert_partial_wf(sw1, hw, region, (k - 1) as nat);
         lemma_cpu_private_insert_edge(sw1, hw, region, (k - 1) as nat);
-        assert(MachineState::step(
-            cpu_private_insert_machine_partial(sw1, hw, region, (k - 1) as nat),
-            cpu_private_insert_machine_partial(sw1, hw, region, k),
-            cpu_private_insert_ops(region)[(k - 1) as int],
-        ));
     }
 }
 
@@ -999,8 +992,6 @@ pub proof fn lemma_cpu_insert_zone_private_region_machine_trace(
     assert(phys_prefix(region, n) =~= region.pages());
     assert(entry_prefix(region, n) =~= region.entries());
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
-    assert(sw1.vm_owned.contains_key(region.vm));
     assert(cpu_private_insert_partial(sw1, region, 0) == sw1) by {
         assert(sw1.vm_owned[region.vm].union(phys_prefix(region, 0))
             =~= sw1.vm_owned[region.vm]);
@@ -1166,8 +1157,6 @@ proof fn lemma_cpu_private_remove_partial_wf(
     decreases k,
 {
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
-    assert(sw1.vm_owned.contains_key(region.vm));
     if k == 0 {
         assert(phys_prefix(region, 0) =~= Set::<PhysPage>::empty());
         assert(entry_prefix(region, 0).dom() =~= Set::<VmPageKey>::empty());
@@ -1190,11 +1179,6 @@ proof fn lemma_cpu_private_remove_partial_wf(
     } else {
         lemma_cpu_private_remove_partial_wf(sw1, hw, region, (k - 1) as nat);
         lemma_cpu_private_remove_edge(sw1, hw, region, (k - 1) as nat);
-        assert(MachineState::step(
-            cpu_private_remove_machine_partial(sw1, hw, region, (k - 1) as nat),
-            cpu_private_remove_machine_partial(sw1, hw, region, k),
-            cpu_private_remove_ops(region)[(k - 1) as int],
-        ));
     }
 }
 
@@ -1230,7 +1214,6 @@ pub proof fn lemma_cpu_remove_zone_private_region_machine_trace(
     assert(entry_prefix(region, n).dom() =~= region.entries().dom());
     lemma_cpu_private_remove_partial_wf(sw1, hw, region, 0);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.vm_owned.contains_key(region.vm));
     assert(cpu_private_remove_partial(sw1, region, 0) == sw1) by {
         assert(sw1.vm_owned[region.vm].difference(phys_prefix(region, 0))
             =~= sw1.vm_owned[region.vm]);
@@ -1581,7 +1564,6 @@ proof fn lemma_cpu_shared_remove_edge(
     let key = VmPageKey::new(vm, gpa);
 
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_cpu_shared_remove_projection_succ(sw1, region, k);
     lemma_phys_prefix_succ(region, k);
     lemma_entry_prefix_succ(region, k);
@@ -1628,7 +1610,6 @@ proof fn lemma_cpu_shared_remove_partial_wf(
     decreases k,
 {
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     if k == 0 {
         assert(phys_prefix(region, 0) =~= Set::<PhysPage>::empty());
         assert(entry_prefix(region, 0).dom() =~= Set::<VmPageKey>::empty());
@@ -1803,8 +1784,6 @@ proof fn lemma_iommu_private_insert_partial_wf(
     decreases k,
 {
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
-    assert(sw1.iommu_owned.contains_key(region.vm));
     if k == 0 {
         assert(phys_prefix(region, 0) =~= Set::<PhysPage>::empty());
         assert(entry_prefix(region, 0) =~= Map::<VmPageKey, S2Entry>::empty());
@@ -1857,7 +1836,6 @@ pub proof fn lemma_iommu_insert_zone_private_region_machine_trace(
     assert(phys_prefix(region, n) =~= region.pages());
     assert(entry_prefix(region, n) =~= region.entries());
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.iommu_owned.contains_key(region.vm));
     assert(iommu_private_insert_partial(sw1, region, 0) == sw1) by {
         assert(sw1.iommu_owned[region.vm].union(phys_prefix(region, 0))
             =~= sw1.iommu_owned[region.vm]);
@@ -2026,8 +2004,6 @@ proof fn lemma_iommu_private_remove_partial_wf(
     decreases k,
 {
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
-    assert(sw1.iommu_owned.contains_key(region.vm));
     if k == 0 {
         assert(phys_prefix(region, 0) =~= Set::<PhysPage>::empty());
         assert(entry_prefix(region, 0).dom() =~= Set::<VmPageKey>::empty());
@@ -2089,7 +2065,6 @@ pub proof fn lemma_iommu_remove_zone_private_region_machine_trace(
     assert(entry_prefix(region, n).dom() =~= region.entries().dom());
     lemma_iommu_private_remove_partial_wf(sw1, hw, region, 0);
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.iommu_owned.contains_key(region.vm));
     assert(iommu_private_remove_partial(sw1, region, 0) == sw1) by {
         assert(sw1.iommu_owned[region.vm].difference(phys_prefix(region, 0))
             =~= sw1.iommu_owned[region.vm]);
@@ -2446,7 +2421,6 @@ proof fn lemma_iommu_shared_remove_edge(
     let key = VmPageKey::new(vm, gpa);
 
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     lemma_iommu_shared_remove_projection_succ(sw1, region, k);
     lemma_phys_prefix_succ(region, k);
     lemma_entry_prefix_succ(region, k);
@@ -2494,7 +2468,6 @@ proof fn lemma_iommu_shared_remove_partial_wf(
     decreases k,
 {
     lemma_sw_machine_wf_equiv(sw1, hw);
-    assert(sw1.wf());
     if k == 0 {
         assert(phys_prefix(region, 0) =~= Set::<PhysPage>::empty());
         assert(entry_prefix(region, 0).dom() =~= Set::<VmPageKey>::empty());
