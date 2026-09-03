@@ -1,8 +1,8 @@
-//! Assumption-1 (weak / ClosureSpec) ghost state and protocol.
+//! `ClosureSpec` ghost state and protocol.
 //!
 //! - [`ClosureGlobalState`]: global tracked ghost state (ClosureSpec instance +
 //!   `zone_ids` plus the prototype `zones_view` token).
-//! - [`ClosureProtocol`]: `ZoneGhostProtocol` implementation for assumption 1.
+//! - [`ClosureProtocol`]: `ZoneGhostProtocol` implementation for `ClosureSpec`.
 use super::super::spec::GhostZone;
 use super::{ZoneGhostProtocol, ZoneStateOps};
 use crate::address::region::MemoryRegion;
@@ -43,8 +43,7 @@ impl ZoneStateOps for ClosureZoneState {
 }
 
 // ─── ClosureGlobalState ──────────────────────────────────────────────────────
-/// Global tracked ghost state held by the hypervisor memory manager under
-/// assumption 1 (`ClosureSpec`).
+/// Global tracked `ClosureSpec` state held by the hypervisor memory manager.
 ///
 /// The old CPU/IOMMU region-closure tokens are intentionally gone. The prototype
 /// keeps one `zones_view` mirror token so transitions can state global overlap
@@ -293,7 +292,7 @@ impl ClosureGlobalState {
 }
 
 // ─── ClosureProtocol ─────────────────────────────────────────────────────────
-/// Assumption-1 (`ClosureSpec`) protocol marker.
+/// `ClosureSpec` protocol marker.
 ///
 /// When `P = ClosureProtocol`:
 /// - `Zone<PT, M, A, ClosureProtocol>` holds a `ClosureZoneState` ghost token.

@@ -1,11 +1,11 @@
 //! Region-assignment protocol abstraction.
 //!
-//! Abstracts over the two safety assumptions (`ClosureSpec` / `BudgetSpec`) so that
-//! `Zone` and `HvMem` are generic over `P: ZoneGhostProtocol` rather than hard-wired.
+//! Abstracts over the `ClosureSpec` and `BudgetSpec` region-assignment policies so
+//! that `Zone` and `HvMem` are generic over `P: ZoneGhostProtocol` rather than hard-wired.
 //!
 //! Submodules:
-//! - [`closure`]: assumption-1 ghost state (`ClosureGlobalState`) and `ClosureProtocol`.
-//! - [`budget`]:  assumption-2 ghost state (`BudgetGlobalState`) and `BudgetProtocol`.
+//! - [`closure`]: `ClosureSpec` ghost state (`ClosureGlobalState`) and `ClosureProtocol`.
+//! - [`budget`]: `BudgetSpec` ghost state (`BudgetGlobalState`) and `BudgetProtocol`.
 pub mod budget;
 pub mod closure;
 

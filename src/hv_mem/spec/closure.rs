@@ -1,4 +1,4 @@
-//! Core ghost state machine for the hypervisor memory manager (assumption 1: `all_regions`).
+//! Core `all_regions` ghost state machine for the hypervisor memory manager.
 //!
 //! Defines:
 //! - `all_regions()`: the system-wide set of valid, disjoint physical memory regions.
@@ -7,14 +7,13 @@
 //!   global zone view used to state CPU/IOMMU overlap guards directly.
 //! - Token type aliases derived from `ClosureSpec`.
 //!
-//! The two axioms `all_regions_valid` and `all_regions_disjoint` represent the assumption that
-//! physical memory partitioning is correct by construction (guaranteed by the configuration
-//! toolchain), without requiring a runtime proof.
+//! The two axioms `all_regions_valid` and `all_regions_disjoint` model physical
+//! memory partitioning established by the configuration toolchain, without
+//! requiring a runtime proof.
 //!
-//! This is the weak (assumption-1) specification. It is a prototype used to
-//! show how tokenized state machines can expose multi-grained concurrency for a
-//! TSM-enabled design. The active implementation uses the stronger per-zone-budget
-//! variant (`BudgetSpec`).
+//! This prototype shows how tokenized state machines can expose multi-grained
+//! concurrency for a TSM-enabled design. The active implementation uses the
+//! per-zone-budget variant (`BudgetSpec`).
 use super::GhostZone;
 use crate::{
     address::{addr::SpecVAddr, region::MemoryRegion},
@@ -87,9 +86,9 @@ pub open spec fn iommu_insert_region_allowed(
             == gic_region() || r == gic_region() || !region.spec_overlaps_pmem(r)
 }
 
-// Assumption-1 prototype state machine. The per-zone `zones` field remains
-// map-sharded so each zone keeps its local token. The variable `zones_view`
-// mirrors the full map and is used only by the prototype's global overlap guards.
+// Prototype state machine. The per-zone `zones` field remains map-sharded so
+// each zone keeps its local token. The variable `zones_view` mirrors the full
+// map and is used only by the prototype's global overlap guards.
 tokenized_state_machine! {
     ClosureSpec {
         fields {

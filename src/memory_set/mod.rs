@@ -85,6 +85,11 @@ impl SpecMemorySet {
         exists|r: MemoryRegion| self.regions.contains(r) && #[trigger] r.spec_overlaps_vmem(region)
     }
 
+    /// Check if a region overlaps any existing region in physical memory.
+    pub open spec fn overlaps_pmem(&self, region: MemoryRegion) -> bool {
+        exists|r: MemoryRegion| self.regions.contains(r) && #[trigger] r.spec_overlaps_pmem(region)
+    }
+
     /// Translate a virtual address in the memory set to a physical address, if it is mapped.
     pub open spec fn translate(&self, v: SpecVAddr) -> SpecPAddr
         recommends
@@ -332,6 +337,15 @@ pub trait MemorySet<PT, A, I> where
             region.spec_valid(),
         ensures
             res == self@.overlaps_vmem(*region),
+    ;
+
+    /// Check if a region overlaps with any existing region in physical memory.
+    fn overlaps_pmem(&self, region: &MemoryRegion) -> (res: bool)
+        requires
+            self.invariants(),
+            region.spec_valid(),
+        ensures
+            res == self@.overlaps_pmem(*region),
     ;
 
     /// Check if a region starts at the given virtual address is mapped in the memory set.

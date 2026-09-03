@@ -60,51 +60,37 @@ pub struct TlbKey {
 }
 
 #[derive(PartialEq, Eq, Structural, Copy, Clone)]
-pub struct SharedPage {
-    pub left: VmId,
-    pub right: VmId,
-    pub page: PhysPage,
-}
-
-/// Guest-originated requests that the hypervisor may later service.
-#[derive(PartialEq, Eq, Structural, Copy, Clone)]
-pub enum HyperCallReq {
-    RequestMap(GuestPage, PhysPage, AccessPerms),
-    RequestUnmap(GuestPage),
-    RequestShare(PhysPage, VmId),
-    RequestReclaim(PhysPage),
-    RequestFlush(GuestPage),
-}
-
-#[derive(PartialEq, Eq, Structural, Copy, Clone)]
 pub enum VmMemOp {
     Read(CpuId, GuestWordAddr),
     Write(CpuId, GuestWordAddr, DataWord),
-    HyperCall(CpuId, HyperCallReq),
 }
 
 #[derive(PartialEq, Eq, Structural, Copy, Clone)]
 pub enum HypervisorOp {
-    Map(VmId, GuestPage, S2Entry),
-    Unmap(VmId, GuestPage),
-    AssignPage(VmId, PhysPage),
-    ReclaimPage(VmId, PhysPage),
-    SharePage(VmId, VmId, PhysPage),
-    UnsharePage(VmId, VmId, PhysPage),
+    /// Add a new VM to the system, with no CPU or IOMMU mappings.
     AddVm(VmId),
+    /// Remove a VM from the system.
     RemoveVm(VmId),
-    /// SMMU/IOMMU stage-2 map maintenance (the DMA counterpart of `Map`).
-    IommuMap(VmId, GuestPage, S2Entry),
-    /// SMMU/IOMMU stage-2 unmap maintenance (the DMA counterpart of `Unmap`).
-    IommuUnmap(VmId, GuestPage),
-    /// Grant `vm` private DMA ownership of `page` (the DMA counterpart of `AssignPage`).
-    IommuAssignPage(VmId, PhysPage),
-    /// Reclaim `page` from `vm`'s private DMA ownership (counterpart of `ReclaimPage`).
-    IommuReclaimPage(VmId, PhysPage),
+    /// Install one CPU mapping and classify its target as VM-private.
+    MapVmPrivate(VmId, GuestPage, S2Entry),
+    /// Remove one CPU mapping and its matching VM-private page classification.
+    UnmapVmPrivate(VmId, GuestPage, PhysPage),
+    /// Install a CPU mapping whose target belongs to global-shared memory.
+    MapGlobalShared(VmId, GuestPage, S2Entry),
+    /// Remove a CPU global-shared mapping and update its dynamic projection.
+    UnmapGlobalShared(VmId, GuestPage),
+    /// Install one IOMMU mapping and classify its target as VM-private.
+    IommuMapVmPrivate(VmId, GuestPage, S2Entry),
+    /// Remove one IOMMU mapping and its matching VM-private page classification.
+    IommuUnmapVmPrivate(VmId, GuestPage, PhysPage),
+    /// Install an IOMMU mapping whose target belongs to global-shared memory.
+    IommuMapGlobalShared(VmId, GuestPage, S2Entry),
+    /// Remove an IOMMU global-shared mapping and update its dynamic projection.
+    IommuUnmapGlobalShared(VmId, GuestPage),
 }
 
 /// A guest VM step and a hypervisor step are the two machine actions.  TLB
-/// management is folded into the hypervisor `Map`/`Unmap` steps (a SW–HW cowork),
+/// management is folded into the hypervisor mapping steps (a SW–HW cowork),
 /// so there is no standalone hardware-MMU action.
 #[derive(PartialEq, Eq, Structural, Copy, Clone)]
 pub enum MachineAction {
@@ -159,12 +145,6 @@ impl VmPageKey {
 impl TlbKey {
     pub open spec fn new(cpu: CpuId, vm: VmId, gpa: GuestPage) -> Self {
         Self { cpu, vm, gpa }
-    }
-}
-
-impl SharedPage {
-    pub open spec fn reverse(self) -> SharedPage {
-        SharedPage { left: self.right, right: self.left, page: self.page }
     }
 }
 

@@ -3,8 +3,8 @@ use vstd::prelude::*;
 use crate::model::hardware::HardwareView;
 use crate::model::software::SoftwareView;
 use crate::model::types::{
-    CpuId, DataWord, GuestPage, GuestWordAddr, PhysPage, PhysWordAddr, S2Entry, SharedPage,
-    TlbEntry, TlbKey, VmId, VmPageKey,
+    CpuId, DataWord, GuestPage, GuestWordAddr, PhysPage, PhysWordAddr, S2Entry, TlbEntry, TlbKey,
+    VmId, VmPageKey,
 };
 
 verus! {
@@ -18,9 +18,9 @@ verus! {
 /// [`crate::model::machine::security`], not here.
 pub ghost struct MachineState {
     pub all_vms: Set<VmId>,
-    pub hypervisor_owned: Set<PhysPage>,
     pub vm_owned: Map<VmId, Set<PhysPage>>,
-    pub shared_pages: Set<SharedPage>,
+    /// CPU-mapped global-shared pages, copied from `SoftwareView`.
+    pub vm_shared: Set<PhysPage>,
     /// The **software-maintained** stage-2 map (page-table bytes; from `SoftwareView`).
     pub s2_map: Map<VmPageKey, S2Entry>,
     /// The **software-maintained IOMMU** stage-2 map (SMMU page-table bytes; from
@@ -28,7 +28,7 @@ pub ghost struct MachineState {
     pub iommu_s2_map: Map<VmPageKey, S2Entry>,
     /// Per-VM private DMA ownership, copied from `SoftwareView`.
     pub iommu_owned: Map<VmId, Set<PhysPage>>,
-    /// VM-independent IOMMU-shared pages, copied from `SoftwareView`.
+    /// IOMMU-mapped global-shared pages, copied from `SoftwareView`.
     pub iommu_shared: Set<PhysPage>,
     /// The **hardware-reachable** stage-2 map (walker view; from `HardwareView`).  Equal to
     /// `s2_map` at well-formed states (the [`sync`](MachineState::sync) invariant);
@@ -47,9 +47,8 @@ impl MachineState {
     pub open spec fn assemble(sw: SoftwareView, hw: HardwareView) -> MachineState {
         MachineState {
             all_vms: sw.all_vms,
-            hypervisor_owned: sw.hypervisor_owned,
             vm_owned: sw.vm_owned,
-            shared_pages: sw.shared_pages,
+            vm_shared: sw.vm_shared,
             s2_map: sw.s2_map,
             iommu_s2_map: sw.iommu_s2_map,
             iommu_owned: sw.iommu_owned,
@@ -66,36 +65,40 @@ impl MachineState {
         self.all_vms
     }
 
-    /// `page` is private to `vm`: owned by it and exposed through *no* sharing edge.
-    ///
-    /// Note this is "globally unshared", not merely "not shared *with* `vm`".  The
-    /// weaker `!shared_with(vm, page)` would admit a page that `vm` owns yet that is
-    /// shared between two *other* VMs — a configuration `wf` alone does not rule out
-    /// (sharing edges are not tied to ownership in `wf`).  Requiring the page to lie
-    /// in no edge at all is the sound notion of private for the isolation theorems,
-    /// and on reachable states it coincides with `!shared_with(vm, page)` (a share is
-    /// only ever created by the page's owner, and ownership is disjoint).
-    pub open spec fn private_page(&self, vm: VmId, page: PhysPage) -> bool {
+    /// Paper-level `S2Private(self, vm, page)`: `vm` is live and `page` belongs to
+    /// its private CPU stage-2 projection, not to the installed all-VM-shared
+    /// projection.
+    pub open spec fn s2_private(&self, vm: VmId, page: PhysPage) -> bool {
+        &&& self.all_vms().contains(vm)
         &&& self.vm_owned[vm].contains(page)
-        &&& forall|edge: SharedPage| #[trigger]
-            self.shared_pages.contains(edge) ==> edge.page != page
+        &&& !self.vm_shared.contains(page)
     }
 
-    pub open spec fn private_pa(&self, vm: VmId, pa: PhysWordAddr) -> bool {
-        self.private_page(vm, pa.page())
+    /// Paper-level `S2Shared(self, page)`.  This is the dynamic projection of
+    /// installed global-shared CPU mappings.  The lower-level
+    /// `global_shared_pages()` set is the separate static authorization universe.
+    pub open spec fn s2_shared(&self, page: PhysPage) -> bool {
+        self.vm_shared.contains(page)
     }
 
-    pub open spec fn shared_with(&self, vm: VmId, page: PhysPage) -> bool {
-        exists|edge: SharedPage| #[trigger]
-            self.shared_pages.contains(edge) && edge.page == page && (edge.left == vm || edge.right
-                == vm)
+    /// Paper-level `IOMMUPrivate(self, vm, page)`: `vm` is live and `page` belongs
+    /// to its private IOMMU projection, not to the installed all-VM-shared IOMMU
+    /// projection.
+    pub open spec fn iommu_private(&self, vm: VmId, page: PhysPage) -> bool {
+        &&& self.all_vms().contains(vm)
+        &&& self.iommu_owned[vm].contains(page)
+        &&& !self.iommu_shared.contains(page)
+    }
+
+    /// Paper-level `IOMMUShared(self, page)`, using the dynamic projection of
+    /// installed global-shared IOMMU mappings.
+    pub open spec fn iommu_shared_page(&self, page: PhysPage) -> bool {
+        self.iommu_shared.contains(page)
     }
 
     pub open spec fn owned_or_shared(&self, vm: VmId, page: PhysPage) -> bool {
-        (self.vm_owned.contains_key(vm) && self.vm_owned[vm].contains(page)) || self.shared_with(
-            vm,
-            page,
-        )
+        (self.vm_owned.contains_key(vm) && self.vm_owned[vm].contains(page))
+            || self.vm_shared.contains(page)
     }
 
     /// TLB keys whose cached translation would be stale after a change to
@@ -109,40 +112,13 @@ impl MachineState {
         Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa && self.iommu_tlb.contains_key(key))
     }
 
-    /// `page` is referenced by no `s2_map` entry, no TLB entry, and no sharing edge.
-    ///
-    /// This is the model's *flush-before-free* gate: `hv_reclaim_page_step` requires
-    /// it, so a page cannot be returned to the pool while any CPU's TLB still caches
-    /// it.  Together with the synchronous flush in `hv_unmap_step`, it discharges the
-    /// real asynchronous TLB-shootdown window without modelling stale state (see the
-    /// note on `hv_unmap_step`).
-    pub open spec fn page_is_quiescent(&self, page: PhysPage) -> bool {
-        &&& forall|key: VmPageKey| #[trigger]
-            self.s2_map.contains_key(key) ==> self.s2_map[key].page != page
-        &&& forall|key: TlbKey| #[trigger] self.tlb.contains_key(key) ==> self.tlb[key].page != page
-        &&& forall|edge: SharedPage| #[trigger]
-            self.shared_pages.contains(edge) ==> edge.page != page
-    }
-
-    /// IOMMU flush-before-free gate: `page` is referenced by no IOMMU stage-2 entry and
-    /// no SMMU TLB entry.  Required by `hv_iommu_reclaim_page_step` so a page cannot lose
-    /// its DMA ownership while an SMMU translation to it still resolves (which would
-    /// strand a mapping targeting neither `iommu_owned` nor `iommu_shared`).
-    pub open spec fn iommu_page_is_quiescent(&self, page: PhysPage) -> bool {
-        &&& forall|key: VmPageKey| #[trigger]
-            self.iommu_s2_map.contains_key(key) ==> self.iommu_s2_map[key].page != page
-        &&& forall|key: TlbKey| #[trigger]
-            self.iommu_tlb.contains_key(key) ==> self.iommu_tlb[key].page != page
-    }
-
     pub open spec fn same_identity_as(&self, other: &Self) -> bool {
         self.all_vms == other.all_vms
     }
 
     pub open spec fn same_ownership_as(&self, other: &Self) -> bool {
-        &&& self.hypervisor_owned == other.hypervisor_owned
         &&& self.vm_owned == other.vm_owned
-        &&& self.shared_pages == other.shared_pages
+        &&& self.vm_shared == other.vm_shared
         &&& self.iommu_owned == other.iommu_owned
         &&& self.iommu_shared == other.iommu_shared
     }
@@ -177,6 +153,20 @@ impl MachineState {
         }
     }
 
+    /// Paper-level successful CPU translation `CPU(self, vm, gpa) = page`.
+    /// `cpu` makes the model's per-CPU TLB index explicit; the isolation theorem
+    /// quantifies over it.
+    pub open spec fn cpu_translates_to(
+        &self,
+        cpu: CpuId,
+        vm: VmId,
+        gpa: GuestPage,
+        page: PhysPage,
+    ) -> bool {
+        let entry = self.effective_entry(cpu, vm, gpa);
+        entry is Some && entry->Some_0.page == page
+    }
+
     pub open spec fn translated_word(&self, cpu: CpuId, vm: VmId, gva: GuestWordAddr) -> Option<
         PhysWordAddr,
     > {
@@ -186,16 +176,6 @@ impl MachineState {
         } else {
             Option::None
         }
-    }
-
-    pub open spec fn can_read(&self, cpu: CpuId, vm: VmId, gva: GuestWordAddr) -> bool {
-        let entry = self.effective_entry(cpu, vm, gva.page());
-        entry is Some && entry->Some_0.access.read
-    }
-
-    pub open spec fn can_write(&self, cpu: CpuId, vm: VmId, gva: GuestWordAddr) -> bool {
-        let entry = self.effective_entry(cpu, vm, gva.page());
-        entry is Some && entry->Some_0.access.write
     }
 
     /// Effective IOMMU translation.  The `stream` parameter reuses `CpuId` as the
@@ -218,15 +198,19 @@ impl MachineState {
         }
     }
 
-    pub open spec fn read_observation(&self, cpu: CpuId, vm: VmId, gva: GuestWordAddr) -> Option<
-        DataWord,
-    > {
-        let paddr = self.translated_word(cpu, vm, gva);
-        if paddr is Some && self.can_read(cpu, vm, gva) && self.memory.contains_key(paddr->Some_0) {
-            Option::Some(self.memory[paddr->Some_0])
-        } else {
-            Option::None
-        }
+    /// Paper-level successful DMA translation `DMA(self, vm, iova) = page`.
+    /// `stream` makes the model's per-stream SMMU-TLB index explicit; the theorem
+    /// quantifies over it. `GuestPage` is reused as the regime-neutral IOVA-page
+    /// representation.
+    pub open spec fn dma_translates_to(
+        &self,
+        stream: CpuId,
+        vm: VmId,
+        iova: GuestPage,
+        page: PhysPage,
+    ) -> bool {
+        let entry = self.iommu_effective_entry(stream, vm, iova);
+        entry is Some && entry->Some_0.page == page
     }
 
     /// Every cached TLB entry agrees with the **hardware-reachable** map (the TLB
@@ -272,17 +256,7 @@ impl MachineState {
                 self.vm_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(page)
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.vm_owned[vm].contains(page) ==> !self.hypervisor_owned.contains(page)
-    }
-
-    pub open spec fn sharing_wf(&self) -> bool {
-        forall|edge: SharedPage| #[trigger]
-            self.shared_pages.contains(edge) ==> {
-                &&& edge.left != edge.right
-                &&& self.all_vms().contains(edge.left)
-                &&& self.all_vms().contains(edge.right)
-                &&& self.shared_pages.contains(edge.reverse())
-            }
+                self.vm_owned[vm].contains(page) ==> !self.vm_shared.contains(page)
     }
 
     pub open spec fn translation_wf(&self) -> bool {
@@ -308,8 +282,8 @@ impl MachineState {
                 self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(
                     page,
                 )
-                // (4) The shared region is disjoint from every VM's CPU ownership: a device DMA to
-                // a shared page can never land on another VM's CPU-private page.
+                    && !self.vm_shared.contains(page)
+                // CPU-private pages are disjoint from IOMMU-shared pages.
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
                 self.vm_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
@@ -332,7 +306,6 @@ impl MachineState {
 
     pub open spec fn wf(&self) -> bool {
         &&& self.ownership_wf()
-        &&& self.sharing_wf()
         &&& self.translation_wf()
         &&& self.iommu_wf()
         &&& self.tlb_safe()

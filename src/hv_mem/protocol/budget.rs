@@ -1,7 +1,7 @@
-//! Assumption-2 (strong / BudgetSpec) ghost state and protocol.
+//! `BudgetSpec` ghost state and protocol.
 //!
 //! - [`BudgetGlobalState`]: global tracked ghost state (BudgetSpec instance + `zone_ids` token).
-//! - [`BudgetProtocol`]: `ZoneGhostProtocol` implementation for assumption 2.
+//! - [`BudgetProtocol`]: `ZoneGhostProtocol` implementation for `BudgetSpec`.
 //!
 //! `insert_region` under `BudgetProtocol` is zone-local: only the `BudgetSpec::zones[zid]`
 //! map-sharded token is updated, so **no global HvMem write lock is required**.
@@ -17,12 +17,13 @@ verus! {
 
 use super::super::spec::budget::*;
 
-/// Per-zone tracked ghost state for `BudgetSpec` (assumption 2).
+/// Per-zone tracked ghost state for `BudgetSpec`.
 ///
 /// Parallel to `ClosureZoneState`, but wraps a `BudgetZoneToken`
 /// (map-sharded `BudgetSpec::zones` entry) instead of a `ClosureZoneToken`.
 /// Stored in the zone-level lock without a separate configured-budget token;
-/// configured regions are accessed through the pure `zone_regions(zid)` function.
+/// configured pages are accessed through the pure `zone_private_pages(zid)` and
+/// `global_shared_pages()` functions.
 pub tracked struct BudgetZoneState {
     pub zone_tok: BudgetZoneToken,
 }
@@ -45,11 +46,11 @@ impl ZoneStateOps for BudgetZoneState {
 }
 
 // ─── BudgetGlobalState ───────────────────────────────────────────────────────
-/// Global tracked ghost state for assumption-2 (BudgetSpec).
+/// Global tracked ghost state for `BudgetSpec`.
 ///
 /// Unlike `ClosureGlobalState`, there are no dynamic closure tokens here because
-/// `BudgetSpec` tracks ownership via a static per-zone budget function
-/// (`zone_regions`) rather than a dynamic global set.  As a result,
+/// `BudgetSpec` tracks authorization via static zone-private/global-shared page
+/// budgets rather than a dynamic global set. As a result,
 /// `insert_region` does **not** need to acquire the `HvMem` write lock.
 pub tracked struct BudgetGlobalState {
     /// The `BudgetSpec` instance (constant-sharded; freely duplicable ghost value).
@@ -73,14 +74,14 @@ impl BudgetGlobalState {
 }
 
 // ─── BudgetProtocol ────────────────────────────────────────────────────────────
-/// Assumption-2 (BudgetSpec) protocol marker.
+/// `BudgetSpec` protocol marker.
 ///
 /// When `P = BudgetProtocol`:
 /// - `Zone<PT, M, A, BudgetProtocol>` holds a `BudgetZoneState` ghost token.
 /// - `HvMem<PT, M, A, BudgetProtocol>` holds `BudgetGlobalState` as global state.
 /// - `insert_region` is **zone-local**: `gs` (global state) is not modified,
 ///   so the HvMem write lock does **not** need to be held for insertion.
-///   This is the key performance benefit of assumption 2.
+///   This is the key concurrency benefit of the static budget policy.
 pub struct BudgetProtocol;
 
 impl ZoneGhostProtocol for BudgetProtocol {
@@ -125,7 +126,14 @@ impl BudgetProtocol {
     ) -> (tracked new_zt: BudgetZoneState)
         requires
             zt.wf(gs.mem_inst_id()),
-            zone_regions(zt.zone_id()).contains(region),
+            region.spec_valid(),
+            region_in_budget(zt.zone_id(), region),
+            region_in_zone_private_budget(zt.zone_id(), region)
+                ==> pmem_nonoverlap_with_zone_private_regions(
+                zt.zone_id(),
+                zt.ghost_zone().cpu_mem_set,
+                region,
+            ),
             !zt.ghost_zone().cpu_mem_set.overlaps_vmem(region),
             !zt.ghost_zone().cpu_mem_set.regions.contains(region),
         ensures
@@ -177,7 +185,7 @@ impl BudgetProtocol {
         BudgetZoneState { zone_tok: new_tok }
     }
 
-    /// Insert a region into a zone's IOMMU mappings.
+    /// Insert a zone-private or global-shared region into a zone's IOMMU mappings.
     pub proof fn iommu_insert_region(
         tracked gs: &BudgetGlobalState,
         tracked zt: BudgetZoneState,
@@ -185,7 +193,14 @@ impl BudgetProtocol {
     ) -> (tracked new_zt: BudgetZoneState)
         requires
             zt.wf(gs.mem_inst_id()),
-            zone_regions(zt.zone_id()).contains(region) || region == gic_region(),
+            region.spec_valid(),
+            region_in_budget(zt.zone_id(), region),
+            region_in_zone_private_budget(zt.zone_id(), region)
+                ==> pmem_nonoverlap_with_zone_private_regions(
+                zt.zone_id(),
+                zt.ghost_zone().iommu_mem_set,
+                region,
+            ),
             !zt.ghost_zone().iommu_mem_set.overlaps_vmem(region),
             !zt.ghost_zone().iommu_mem_set.regions.contains(region),
         ensures

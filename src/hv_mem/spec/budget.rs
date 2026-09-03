@@ -1,70 +1,235 @@
-//! Assumption-2 per-zone region state machine for the hypervisor memory manager.
+//! Static physical-page-budget state machine for the hypervisor memory manager.
 //!
-//! Under assumption 2 each zone is pre-allocated a fixed set of physical memory
-//! regions at boot time. A zone may only insert regions that are within its own
-//! configured region set, so `insert_region` needs only the zone-local `zones`
-//! token — no global lock is needed.
+//! Physical memory is partitioned into zone-private budgets and one global
+//! shared budget. A CPU or IOMMU region is admissible when its entire physical
+//! footprint lies in either budget. Shared-budget regions may deliberately
+//! overlap in physical memory while using different guest addresses or
+//! attributes. Within each CPU/IOMMU memory set, zone-private regions remain
+//! pairwise non-overlapping in physical memory so removing one region cannot
+//! silently release another zone-private mapping's pages.
 //!
-//! Compared to [`super::ClosureSpec`]:
-//! - `ClosureSpec` has a `#[sharding(variable)]` `zones_view` mirror, whose
-//!   global token lets the prototype state cross-zone overlap guards directly.
-//! - `BudgetSpec` uses external uninterpreted spec functions to model static
-//!   per-zone regions (`zone_regions`) and static GIC regions (`gic_region`).
-//!   No budget token exists in the state machine, so there is less token plumbing.
-//!
-//! P1 only needs the following facts:
-//! - regions currently assigned to a zone stay inside that zone's `zone_regions`;
-//! - different zones' configured regions are physically disjoint;
-//! - `gic_region` is physically disjoint from every zone's configured regions.
+//! The budgets are static pure functions rather than tokenized fields. Region
+//! transitions therefore consume only the zone-local `zones[zid]` shard and
+//! retain the read-lock concurrency of the original `BudgetSpec` protocol.
 use super::GhostZone;
-use crate::address::region::MemoryRegion;
-use crate::memory_set::SpecMemorySet;
+use crate::{address::region::MemoryRegion, memory_set::SpecMemorySet, model::types::PhysPage};
 use verus_state_machines_macros::tokenized_state_machine;
 use vstd::prelude::*;
 
 verus! {
 
-/// Static configured regions owned by one zone.
-pub uninterp spec fn zone_regions(zid: nat) -> Set<MemoryRegion>;
+use crate::constants::*;
 
-/// Static configured GIC region.
-pub uninterp spec fn gic_region() -> MemoryRegion;
+/// Static zone-private physical-page budget of zone `zid`.
+pub uninterp spec fn zone_private_pages(zid: nat) -> Set<PhysPage>;
 
-/// Axiom: all configured zone and GIC regions are valid memory regions.
-pub axiom fn configured_regions_valid()
+/// Static physical pages that every zone may map.
+pub uninterp spec fn global_shared_pages() -> Set<PhysPage>;
+
+/// Axiom: zone-private page budgets of distinct zones are pairwise disjoint.
+pub axiom fn zone_private_pages_pairwise_disjoint()
     ensures
-        forall|zid: nat, r: MemoryRegion| #[trigger]
-            zone_regions(zid).contains(r) ==> r.spec_valid(),
-        gic_region().spec_valid(),
+        forall|zid1: nat, zid2: nat, page: PhysPage|
+            #![trigger zone_private_pages(zid1).contains(page),
+                zone_private_pages(zid2).contains(page)]
+            zid1 != zid2 && zone_private_pages(zid1).contains(page)
+                ==> !zone_private_pages(zid2).contains(page),
 ;
 
-/// Axiom: configured regions within one zone are physically disjoint.
-pub axiom fn zone_regions_internal_disjoint()
+/// Axiom: no zone-private page is globally shared.
+pub axiom fn zone_private_pages_disjoint_from_global_shared()
     ensures
-        forall|zid: nat, r1: MemoryRegion, r2: MemoryRegion|
-            #![auto]
-            zone_regions(zid).contains(r1) && zone_regions(zid).contains(r2) && r1 != r2
-                ==> !r1.spec_overlaps_pmem(r2),
+        forall|zid: nat, page: PhysPage| #[trigger]
+            zone_private_pages(zid).contains(page) ==> !global_shared_pages().contains(page),
 ;
 
-/// Axiom: configured regions of distinct zones are physically disjoint.
-pub axiom fn zone_regions_pairwise_disjoint()
-    ensures
-        forall|zid1: nat, zid2: nat, r1: MemoryRegion, r2: MemoryRegion|
-            #![auto]
-            zid1 != zid2 && zone_regions(zid1).contains(r1) && zone_regions(zid2).contains(r2)
-                ==> !r1.spec_overlaps_pmem(r2),
-;
+/// The physical page occupied by page index `i` of `region`.
+pub open spec fn region_phys_page(region: MemoryRegion, i: nat) -> PhysPage {
+    PhysPage(region.pstart@.0 / SPEC_PAGE_SIZE + i)
+}
 
-/// Axiom: GIC region is physically disjoint from every zone region.
-pub axiom fn gic_region_disjoint_from_zones()
-    ensures
-        forall|zid: nat, r: MemoryRegion|
-            #![auto]
-            zone_regions(zid).contains(r) ==> !gic_region().spec_overlaps_pmem(r),
-;
+/// The complete physical-page footprint of `region`.
+pub open spec fn region_phys_pages(region: MemoryRegion) -> Set<PhysPage> {
+    Set::new(
+        |page: PhysPage|
+            exists|i: nat| 0 <= i < region.pages && #[trigger] region_phys_page(region, i) == page,
+    )
+}
 
-// Per-zone-budget state machine
+/// `region` lies wholly in zone `zid`'s zone-private page budget.
+pub open spec fn region_in_zone_private_budget(zid: nat, region: MemoryRegion) -> bool {
+    region_phys_pages(region).subset_of(zone_private_pages(zid))
+}
+
+/// `region` lies wholly in the global shared page budget.
+pub open spec fn region_in_global_shared_budget(region: MemoryRegion) -> bool {
+    region_phys_pages(region).subset_of(global_shared_pages())
+}
+
+/// Page-budget authorization for either a CPU or IOMMU region.
+pub open spec fn region_in_budget(zid: nat, region: MemoryRegion) -> bool {
+    region_in_zone_private_budget(zid, region) || region_in_global_shared_budget(region)
+}
+
+/// Whether `region` is physically non-overlapping with every zone-private
+/// region already in `mem_set`.
+pub open spec fn pmem_nonoverlap_with_zone_private_regions(
+    zid: nat,
+    mem_set: SpecMemorySet,
+    region: MemoryRegion,
+) -> bool {
+    forall|old_region: MemoryRegion| #[trigger]
+        mem_set.regions.contains(old_region) && region_in_zone_private_budget(zid, old_region)
+            ==> !old_region.spec_overlaps_pmem(region)
+}
+
+/// Zone-private regions in one memory set are pairwise non-overlapping in physical memory.
+pub open spec fn private_regions_pmem_nonoverlap(zid: nat, mem_set: SpecMemorySet) -> bool {
+    forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
+        mem_set.regions.contains(r1) && #[trigger] mem_set.regions.contains(r2) && r1 != r2
+            && region_in_zone_private_budget(zid, r1) && region_in_zone_private_budget(zid, r2)
+            ==> !r1.spec_overlaps_pmem(r2)
+}
+
+/// Every region in `mem_set` is authorized by `zid`'s zone-private budget or the
+/// global shared budget.
+pub open spec fn all_regions_in_budget(zid: nat, mem_set: SpecMemorySet) -> bool {
+    forall|region: MemoryRegion| #[trigger]
+        mem_set.regions.contains(region) ==> region_in_budget(zid, region)
+}
+
+/// A valid global-shared region cannot also lie in any zone-private budget.
+pub proof fn lemma_global_shared_region_not_zone_private(zid: nat, region: MemoryRegion)
+    requires
+        region.spec_valid(),
+        region_in_global_shared_budget(region),
+    ensures
+        !region_in_zone_private_budget(zid, region),
+{
+    let page = region_phys_page(region, 0);
+    assert(region_phys_pages(region).contains(page)) by {
+        assert(0 < region.pages);
+    };
+    zone_private_pages_disjoint_from_global_shared();
+    if region_in_zone_private_budget(zid, region) {
+        assert(zone_private_pages(zid).contains(page));
+        assert(global_shared_pages().contains(page));
+        assert(!global_shared_pages().contains(page));
+        assert(false);
+    }
+}
+
+/// A valid zone-private region cannot also lie in the global-shared budget.
+pub proof fn lemma_zone_private_region_not_global_shared(zid: nat, region: MemoryRegion)
+    requires
+        region.spec_valid(),
+        region_in_zone_private_budget(zid, region),
+    ensures
+        !region_in_global_shared_budget(region),
+{
+    let page = region_phys_page(region, 0);
+    assert(region_phys_pages(region).contains(page)) by {
+        assert(0 < region.pages);
+    };
+    zone_private_pages_disjoint_from_global_shared();
+    if region_in_global_shared_budget(region) {
+        assert(zone_private_pages(zid).contains(page));
+        assert(global_shared_pages().contains(page));
+        assert(!global_shared_pages().contains(page));
+        assert(false);
+    }
+}
+
+/// Insertion preserves page-budget authorization and zone-private-region pmem non-overlap.
+pub proof fn lemma_insert_region_preserves_budget_policy(
+    zid: nat,
+    mem_set: SpecMemorySet,
+    region: MemoryRegion,
+)
+    requires
+        mem_set.wf(),
+        all_regions_in_budget(zid, mem_set),
+        private_regions_pmem_nonoverlap(zid, mem_set),
+        region.spec_valid(),
+        region_in_budget(zid, region),
+        region_in_zone_private_budget(zid, region) ==> pmem_nonoverlap_with_zone_private_regions(
+            zid,
+            mem_set,
+            region,
+        ),
+        !mem_set.regions.contains(region),
+        !mem_set.overlaps_vmem(region),
+    ensures
+        all_regions_in_budget(zid, mem_set.insert_region(region)),
+        private_regions_pmem_nonoverlap(zid, mem_set.insert_region(region)),
+{
+    let new_mem_set = mem_set.insert_region(region);
+    assert forall|r: MemoryRegion| #[trigger]
+        new_mem_set.regions.contains(r) implies region_in_budget(zid, r) by {
+        if r != region {
+            assert(mem_set.regions.contains(r));
+        }
+    };
+    assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
+        new_mem_set.regions.contains(r1) && #[trigger] new_mem_set.regions.contains(r2) && r1 != r2
+            && region_in_zone_private_budget(zid, r1) && region_in_zone_private_budget(
+            zid,
+            r2,
+        ) implies !r1.spec_overlaps_pmem(r2) by {
+        if r1 == region {
+            assert(mem_set.regions.contains(r2));
+            assert(!r2.spec_overlaps_pmem(region));
+            assert(r2.spec_valid());
+            region.lemma_overlaps_pmem_symmetric(r2);
+        } else if r2 == region {
+            assert(mem_set.regions.contains(r1));
+        } else {
+            assert(mem_set.regions.contains(r1));
+            assert(mem_set.regions.contains(r2));
+        }
+    };
+}
+
+/// Removing a region only shrinks the set, so it preserves the budget policy.
+pub proof fn lemma_remove_region_preserves_budget_policy(
+    zid: nat,
+    mem_set: SpecMemorySet,
+    region: MemoryRegion,
+)
+    requires
+        all_regions_in_budget(zid, mem_set),
+        private_regions_pmem_nonoverlap(zid, mem_set),
+    ensures
+        all_regions_in_budget(zid, mem_set.remove_region_exact(region)),
+        private_regions_pmem_nonoverlap(zid, mem_set.remove_region_exact(region)),
+{
+    let new_mem_set = mem_set.remove_region_exact(region);
+    assert forall|r: MemoryRegion| #[trigger]
+        new_mem_set.regions.contains(r) implies region_in_budget(zid, r) by {
+        assert(mem_set.regions.contains(r));
+    };
+    assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
+        new_mem_set.regions.contains(r1) && #[trigger] new_mem_set.regions.contains(r2) && r1 != r2
+            && region_in_zone_private_budget(zid, r1) && region_in_zone_private_budget(
+            zid,
+            r2,
+        ) implies !r1.spec_overlaps_pmem(r2) by {
+        assert(mem_set.regions.contains(r1));
+        assert(mem_set.regions.contains(r2));
+    };
+}
+
+/// An empty memory set satisfies both budget-policy clauses.
+pub proof fn lemma_empty_memory_set_budget_policy(zid: nat)
+    ensures
+        all_regions_in_budget(zid, SpecMemorySet { regions: Set::empty(), mappings: Map::empty() }),
+        private_regions_pmem_nonoverlap(
+            zid,
+            SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
+        ),
+{
+}
+
 tokenized_state_machine! {
     BudgetSpec {
         fields {
@@ -74,68 +239,54 @@ tokenized_state_machine! {
             #[sharding(map)]
             pub zones: Map<nat, GhostZone>,
         }
-
-        // ── Invariants ─────────────────────────────────────────────────────────────
-
-        /// `zone_ids` and `zones.dom()` are always identical.
         #[invariant]
         pub fn inv_zone_ids(&self) -> bool {
             self.zones.dom() == self.zone_ids
         }
 
-        /// All zones are well-formed (regions valid and non-overlapping).
         #[invariant]
         pub fn inv_zones_wf(&self) -> bool {
             forall|zid: nat|
                 self.zones.contains_key(zid) ==> #[trigger] self.zones[zid].wf()
         }
 
-        /// CPU-owned dynamic regions must come from the zone's ordinary region set.
+        /// Every CPU region lies entirely in one of the two admissible budgets.
         #[invariant]
-        pub fn inv_cpu_in_zone_regions(&self) -> bool {
-            forall|zid: nat, r: MemoryRegion|
-                self.zones.contains_key(zid) && #[trigger] self.zones[zid].cpu_mem_set.regions.contains(r)
-                    ==> #[trigger] zone_regions(zid).contains(r)
+        pub fn inv_cpu_regions_in_budget(&self) -> bool {
+            forall|zid: nat| self.zones.contains_key(zid) ==> all_regions_in_budget(
+                zid,
+                self.zones[zid].cpu_mem_set,
+            )
         }
 
-        /// IOMMU-owned dynamic regions may come from the zone's ordinary region
-        /// set, or from the distinguished GIC region.
+        /// IOMMU regions obey the same zone-private-or-global-shared policy as CPU regions.
         #[invariant]
-        pub fn inv_iommu_in_zone_regions(&self) -> bool {
-            forall|zid: nat, r: MemoryRegion|
-                self.zones.contains_key(zid) && #[trigger] self.zones[zid].iommu_mem_set.regions.contains(r)
-                    ==> #[trigger] zone_regions(zid).contains(r) || r == gic_region()
+        pub fn inv_iommu_regions_in_budget(&self) -> bool {
+            forall|zid: nat| self.zones.contains_key(zid) ==> all_regions_in_budget(
+                zid,
+                self.zones[zid].iommu_mem_set,
+            )
         }
 
-        // ── Properties ─────────────────────────────────────────────────────────────
-
-        property! {
-            cross_zone_disjoint(zid1: nat, zone1: GhostZone, zid2: nat, zone2: GhostZone) {
-                have zones >= [zid1 => zone1];
-                have zones >= [zid2 => zone2];
-                require(zid1 != zid2);
-                assert(forall|r1: MemoryRegion, r2: MemoryRegion| #![auto]
-                    zone1.cpu_mem_set.regions.contains(r1) && zone2.cpu_mem_set.regions.contains(r2)
-                        ==> !r1.spec_overlaps_pmem(r2)
-                ) by {
-                    assert forall|r1: MemoryRegion, r2: MemoryRegion| #![auto]
-                        zone1.cpu_mem_set.regions.contains(r1) && zone2.cpu_mem_set.regions.contains(r2)
-                        implies !r1.spec_overlaps_pmem(r2) by {
-                        assert(pre.zones.contains_key(zid1));
-                        assert(pre.zones.contains_key(zid2));
-                        assert(pre.zones[zid1] == zone1);
-                        assert(pre.zones[zid2] == zone2);
-
-                        assert(zone_regions(zid1).contains(r1));
-                        assert(zone_regions(zid2).contains(r2));
-
-                        zone_regions_pairwise_disjoint();
-                    };
-                };
-            }
+        /// Zone-private CPU regions are pairwise non-overlapping in physical memory.
+        #[invariant]
+        pub fn inv_cpu_private_regions_pmem_nonoverlap(&self) -> bool {
+            forall|zid: nat|
+                self.zones.contains_key(zid) ==> private_regions_pmem_nonoverlap(
+                    zid,
+                    self.zones[zid].cpu_mem_set,
+                )
         }
 
-        // ── Transitions ─────────────────────────────────────────────────────────────
+        /// Zone-private IOMMU regions are pairwise non-overlapping in physical memory.
+        #[invariant]
+        pub fn inv_iommu_private_regions_pmem_nonoverlap(&self) -> bool {
+            forall|zid: nat|
+                self.zones.contains_key(zid) ==> private_regions_pmem_nonoverlap(
+                    zid,
+                    self.zones[zid].iommu_mem_set,
+                )
+        }
 
         init! {
             initialize() {
@@ -155,7 +306,6 @@ tokenized_state_machine! {
             }
         }
 
-        /// Remove a zone.
         transition! {
             remove_zone(zid: nat) {
                 remove zones -= [zid => let _zone];
@@ -166,7 +316,14 @@ tokenized_state_machine! {
         transition! {
             cpu_insert_region(zid: nat, region: MemoryRegion) {
                 remove zones -= [zid => let zone];
-                require(zone_regions(zid).contains(region));
+                require(region.spec_valid());
+                require(region_in_budget(zid, region));
+                require(region_in_zone_private_budget(zid, region)
+                    ==> pmem_nonoverlap_with_zone_private_regions(
+                        zid,
+                        zone.cpu_mem_set,
+                        region,
+                    ));
                 require(!zone.cpu_mem_set.regions.contains(region));
                 require(!zone.cpu_mem_set.overlaps_vmem(region));
                 add zones += [zid => zone.cpu_insert_region(region)];
@@ -191,7 +348,14 @@ tokenized_state_machine! {
         transition! {
             iommu_insert_region(zid: nat, region: MemoryRegion) {
                 remove zones -= [zid => let zone];
-                require(zone_regions(zid).contains(region) || region == gic_region());
+                require(region.spec_valid());
+                require(region_in_budget(zid, region));
+                require(region_in_zone_private_budget(zid, region)
+                    ==> pmem_nonoverlap_with_zone_private_regions(
+                        zid,
+                        zone.iommu_mem_set,
+                        region,
+                    ));
                 require(!zone.iommu_mem_set.regions.contains(region));
                 require(!zone.iommu_mem_set.overlaps_vmem(region));
                 add zones += [zid => zone.iommu_insert_region(region)];
@@ -213,353 +377,64 @@ tokenized_state_machine! {
             }
         }
 
-        // ── Inductive proofs ────────────────────────────────────────────────────────
-
         #[inductive(initialize)]
         fn initialize_inductive(post: Self) { }
 
         #[inductive(add_zone)]
         fn add_zone_inductive(pre: Self, post: Self, zid: nat) {
-            // The new zone is always empty; all invariants are trivially preserved.
-            assert(post.zones.dom() == post.zone_ids);
-            // inv_zones_wf: empty zone has SpecMemorySet::wf() vacuously true.
-            assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf() by {
-                if zid2 != zid {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                }
-            };
-            // inv_zone_within_budget: new zone is empty so the forall is vacuously true.
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) by {
-                if zid2 == zid {
-                    assert(post.zones[zid].cpu_mem_set.regions =~= Set::empty());
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].iommu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) || r == gic_region() by {
-                if zid2 == zid {
-                    assert(post.zones[zid].iommu_mem_set.regions =~= Set::empty());
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                    assert(pre.zones[zid2].iommu_mem_set.regions.contains(r));
-                    assert(zone_regions(zid2).contains(r) || r == gic_region());
-                }
-            };
+            lemma_empty_memory_set_budget_policy(zid);
         }
 
         #[inductive(remove_zone)]
-        fn remove_zone_inductive(pre: Self, post: Self, zid: nat) {
-            // inv_zone_ids: dom(pre.zones.remove(zid)) == pre.zone_ids.remove(zid)
-            assert(post.zones.dom() == post.zone_ids);
-            // inv_zones_wf: only remaining zones (all != zid), unchanged from pre
-            assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf() by {
-                assert(post.zones[zid2] == pre.zones[zid2]);
-            };
-            // inv_zone_within_budget: remaining zones unchanged
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) by {
-                assert(post.zones[zid2] == pre.zones[zid2]);
-                assert(pre.zones.contains_key(zid2));
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].iommu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) || r == gic_region() by {
-                assert(post.zones[zid2] == pre.zones[zid2]);
-                assert(pre.zones.contains_key(zid2));
-            };
-        }
+        fn remove_zone_inductive(pre: Self, post: Self, zid: nat) { }
 
         #[inductive(cpu_insert_region)]
         fn cpu_insert_region_inductive(pre: Self, post: Self, zid: nat, region: MemoryRegion) {
             let old_zone = pre.zones[zid];
-            let new_zone = post.zones[zid];
-            // inv_zone_ids: zone_ids unchanged; zones replaces value at zid only
-            assert(post.zones.dom() == post.zone_ids);
-            // inv_zones_wf
-            assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf() by {
-                if zid2 == zid {
-                    assert(old_zone.wf());
-                    assert(new_zone == old_zone.cpu_insert_region(region));
-                    // `region` is valid (in zone_regions, which are valid); the transition
-                    // requires non-overlap and non-membership on the CPU set, so the
-                    // SpecMemorySet wf-preservation lemma discharges `new_zone.cpu_mem_set.wf()`.
-                    configured_regions_valid();
-                    assert(region.spec_valid());
-                    assert(new_zone.cpu_mem_set == old_zone.cpu_mem_set.insert_region(region));
-                    old_zone.cpu_mem_set.lemma_insert_region_wf(region);
-                    assert(new_zone.iommu_mem_set == old_zone.iommu_mem_set);
-                    assert(new_zone.wf());
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                }
-            };
-            // inv_zone_within_budget: new region by require; old regions and other zones from pre
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) by {
-                if zid2 == zid {
-                    assert(new_zone == old_zone.cpu_insert_region(region));
-                    if r != region {
-                        assert(old_zone.cpu_mem_set.regions.contains(r));
-                        assert(pre.zones.contains_key(zid));
-                    }
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].iommu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) || r == gic_region() by {
-                if zid2 == zid {
-                    assert(new_zone.iommu_mem_set == old_zone.iommu_mem_set);
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
+            assert(old_zone.wf());
+            old_zone.cpu_mem_set.lemma_insert_region_wf(region);
+            lemma_insert_region_preserves_budget_policy(zid, old_zone.cpu_mem_set, region);
         }
 
         #[inductive(cpu_remove_region)]
         fn cpu_remove_region_inductive(pre: Self, post: Self, zid: nat, region: MemoryRegion) {
             let old_zone = pre.zones[zid];
-            let new_zone = post.zones[zid];
-            // inv_zone_ids: zone_ids unchanged; zones replaces value at zid only
-            assert(post.zones.dom() == post.zone_ids);
-            // inv_zones_wf: removing a region preserves wf (regions() shrinks)
-            assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf() by {
-                if zid2 == zid {
-                    assert(old_zone.wf());
-                    assert(new_zone == old_zone.cpu_remove_region(region));
-                    // transition requires `region` is present in the CPU set; the
-                    // wf-preservation lemma discharges `new_zone.cpu_mem_set.wf()`.
-                    assert(new_zone.cpu_mem_set == old_zone.cpu_mem_set.remove_region_exact(region));
-                    old_zone.cpu_mem_set.lemma_remove_region_exact_wf(region);
-                    assert(new_zone.iommu_mem_set == old_zone.iommu_mem_set);
-                    assert(new_zone.wf());
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) by {
-                if zid2 == zid {
-                    assert(new_zone == old_zone.cpu_remove_region(region));
-                    assert(old_zone.cpu_mem_set.regions.contains(r));
-                    assert(pre.zones.contains_key(zid));
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].iommu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) || r == gic_region() by {
-                if zid2 == zid {
-                    assert(new_zone.iommu_mem_set == old_zone.iommu_mem_set);
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
+            assert(old_zone.wf());
+            old_zone.cpu_mem_set.lemma_remove_region_exact_wf(region);
+            lemma_remove_region_preserves_budget_policy(zid, old_zone.cpu_mem_set, region);
         }
 
         #[inductive(cpu_clear)]
         fn cpu_clear_inductive(pre: Self, post: Self, zid: nat) {
             let old_zone = pre.zones[zid];
-            let new_zone = post.zones[zid];
-            assert(post.zones.dom() == post.zone_ids);
-            assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf() by {
-                if zid2 == zid {
-                    assert(old_zone.wf());
-                    assert(new_zone == old_zone.cpu_clear());
-                    assert(new_zone.cpu_mem_set == SpecMemorySet {
-                        regions: Set::empty(),
-                        mappings: Map::empty(),
-                    });
-                    assert(new_zone.cpu_mem_set.wf());
-                    assert(new_zone.wf());
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) by {
-                if zid2 == zid {
-                    assert(new_zone.cpu_mem_set.regions =~= Set::empty());
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].iommu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) || r == gic_region() by {
-                if zid2 == zid {
-                    assert(new_zone.iommu_mem_set == old_zone.iommu_mem_set);
-                    assert(pre.zones.contains_key(zid));
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
+            assert(old_zone.wf());
+            lemma_empty_memory_set_budget_policy(zid);
         }
 
         #[inductive(iommu_insert_region)]
         fn iommu_insert_region_inductive(pre: Self, post: Self, zid: nat, region: MemoryRegion) {
             let old_zone = pre.zones[zid];
-            let new_zone = post.zones[zid];
-            // inv_zone_ids: zone_ids unchanged; zones replaces value at zid only
-            assert(post.zones.dom() == post.zone_ids);
-            // inv_zones_wf
-            assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf() by {
-                if zid2 == zid {
-                    assert(old_zone.wf());
-                    assert(new_zone == old_zone.iommu_insert_region(region));
-                    // `region` is valid (in zone_regions or the GIC region, both valid);
-                    // the transition requires non-overlap and non-membership on the IOMMU set.
-                    configured_regions_valid();
-                    assert(region.spec_valid());
-                    assert(new_zone.iommu_mem_set == old_zone.iommu_mem_set.insert_region(region));
-                    old_zone.iommu_mem_set.lemma_insert_region_wf(region);
-                    assert(new_zone.cpu_mem_set == old_zone.cpu_mem_set);
-                    assert(new_zone.wf());
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) by {
-                if zid2 == zid {
-                    assert(new_zone.cpu_mem_set == old_zone.cpu_mem_set);
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].iommu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) || r == gic_region() by {
-                if zid2 == zid {
-                    assert(new_zone == old_zone.iommu_insert_region(region));
-                    if r != region {
-                        assert(old_zone.iommu_mem_set.regions.contains(r));
-                        assert(pre.zones.contains_key(zid));
-                    }
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
+            assert(old_zone.wf());
+            old_zone.iommu_mem_set.lemma_insert_region_wf(region);
+            lemma_insert_region_preserves_budget_policy(zid, old_zone.iommu_mem_set, region);
         }
 
         #[inductive(iommu_remove_region)]
         fn iommu_remove_region_inductive(pre: Self, post: Self, zid: nat, region: MemoryRegion) {
             let old_zone = pre.zones[zid];
-            let new_zone = post.zones[zid];
-            // inv_zone_ids: zone_ids unchanged; zones replaces value at zid only
-            assert(post.zones.dom() == post.zone_ids);
-            // inv_zones_wf
-            assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf() by {
-                if zid2 == zid {
-                    assert(old_zone.wf());
-                    assert(new_zone == old_zone.iommu_remove_region(region));
-                    // transition requires `region` is present in the IOMMU set.
-                    assert(new_zone.iommu_mem_set == old_zone.iommu_mem_set.remove_region_exact(region));
-                    old_zone.iommu_mem_set.lemma_remove_region_exact_wf(region);
-                    assert(new_zone.cpu_mem_set == old_zone.cpu_mem_set);
-                    assert(new_zone.wf());
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) by {
-                if zid2 == zid {
-                    assert(new_zone.cpu_mem_set == old_zone.cpu_mem_set);
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].iommu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) || r == gic_region() by {
-                if zid2 == zid {
-                    assert(new_zone == old_zone.iommu_remove_region(region));
-                    assert(old_zone.iommu_mem_set.regions.contains(r));
-                    assert(pre.zones.contains_key(zid));
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
+            assert(old_zone.wf());
+            old_zone.iommu_mem_set.lemma_remove_region_exact_wf(region);
+            lemma_remove_region_preserves_budget_policy(zid, old_zone.iommu_mem_set, region);
         }
 
         #[inductive(iommu_clear)]
         fn iommu_clear_inductive(pre: Self, post: Self, zid: nat) {
             let old_zone = pre.zones[zid];
-            let new_zone = post.zones[zid];
-            assert(post.zones.dom() == post.zone_ids);
-            assert forall|zid2: nat| post.zones.contains_key(zid2)
-                implies #[trigger] post.zones[zid2].wf() by {
-                if zid2 == zid {
-                    assert(old_zone.wf());
-                    assert(new_zone == old_zone.iommu_clear());
-                    assert(new_zone.iommu_mem_set == SpecMemorySet {
-                        regions: Set::empty(),
-                        mappings: Map::empty(),
-                    });
-                    assert(new_zone.iommu_mem_set.wf());
-                    assert(new_zone.wf());
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) by {
-                if zid2 == zid {
-                    assert(new_zone.cpu_mem_set == old_zone.cpu_mem_set);
-                    assert(pre.zones.contains_key(zid));
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
-            assert forall|zid2: nat, r: MemoryRegion|
-                post.zones.contains_key(zid2) && #[trigger] post.zones[zid2].iommu_mem_set.regions.contains(r)
-                implies #[trigger] zone_regions(zid2).contains(r) || r == gic_region() by {
-                if zid2 == zid {
-                    assert(new_zone.iommu_mem_set.regions =~= Set::empty());
-                } else {
-                    assert(post.zones[zid2] == pre.zones[zid2]);
-                    assert(pre.zones.contains_key(zid2));
-                }
-            };
+            assert(old_zone.wf());
+            lemma_empty_memory_set_budget_policy(zid);
         }
     }
 }
-// ── Token type aliases ─────────────────────────────────────────────────────────
-
 
 /// `BudgetSpec` instance token (constant-sharded, shared by reference).
 pub type BudgetSpecInstance = BudgetSpec::Instance;

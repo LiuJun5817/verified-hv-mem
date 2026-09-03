@@ -11,8 +11,8 @@
 //! - `spec`: ghost state machines (`ClosureSpec` / `BudgetSpec`) and token type aliases.
 //! - `zone`: single-zone memory abstraction (`ZoneKey`, `ZoneRwContent`, `ZonePred`, `Zone`).
 //! - `protocol`: region-assignment protocol layer.
-//!   - `protocol::closure`: assumption-1 ghost state (`ClosureGlobalState`) + `ClosureProtocol`.
-//!   - `protocol::budget`:  assumption-2 ghost state (`BudgetGlobalState`) + `BudgetProtocol`.
+//!   - `protocol::closure`: `ClosureSpec` ghost state (`ClosureGlobalState`) + `ClosureProtocol`.
+//!   - `protocol::budget`: `BudgetSpec` ghost state (`BudgetGlobalState`) + `BudgetProtocol`.
 //! - `mod` (this file): `HvMem`, the global exec orchestration layer.
 pub mod protocol;
 pub mod spec;
@@ -851,11 +851,11 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
     /// serialises all callers with a write lock.
     ///
     /// Returns `Err(())` if `region` is invalid, the zone is not found, or
-    /// `region` overlaps an existing mapping in that zone.
+    /// `region` overlaps an existing CPU region in virtual or physical memory.
     pub fn insert_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
         requires
             self.invariants(),
-            zone_regions(zid as nat).contains(region),
+            region_in_budget(zid as nat, region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
         ensures
             res is Ok ==> self.invariants(),
@@ -949,10 +949,11 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
     }
 
     /// Insert `region` into zone `zid`'s IOMMU-visible set using only the HvMem read lock.
+    /// Returns `Err(())` for a virtual or physical overlap within that IOMMU set.
     pub fn insert_iommu_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
         requires
             self.invariants(),
-            zone_regions(zid as nat).contains(region) || region == gic_region(),
+            region_in_budget(zid as nat, region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
         ensures
             res is Ok ==> self.invariants(),
