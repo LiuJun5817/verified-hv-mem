@@ -25,7 +25,7 @@ use super::software::*;
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 use crate::hardware::HardwareInstr;
 use crate::hv_mem::protocol::{BudgetProtocol, ZoneStateOps};
-use crate::hv_mem::zone::{ZoneKey, ZonePred, ZoneRwContent};
+use crate::hv_mem::{ZoneKey, ZonePred, ZoneRwContent};
 use crate::model::convert::*;
 use crate::memory_set::MemorySet;
 use crate::page_table::PageTable;

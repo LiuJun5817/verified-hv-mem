@@ -85,7 +85,7 @@ impl BudgetGlobalState {
 pub struct BudgetProtocol;
 
 impl ZoneGhostProtocol for BudgetProtocol {
-    type ZoneToken = BudgetZoneState;
+    type ZoneState = BudgetZoneState;
 
     type GlobalState = BudgetGlobalState;
 

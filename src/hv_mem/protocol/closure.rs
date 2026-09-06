@@ -302,7 +302,7 @@ impl ClosureGlobalState {
 pub struct ClosureProtocol;
 
 impl ZoneGhostProtocol for ClosureProtocol {
-    type ZoneToken = ClosureZoneState;
+    type ZoneState = ClosureZoneState;
 
     type GlobalState = ClosureGlobalState;
 
