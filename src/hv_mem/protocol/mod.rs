@@ -6,13 +6,16 @@
 //! Submodules:
 //! - [`closure`]: `ClosureSpec` ghost state (`ClosureGlobalState`) and `ClosureProtocol`.
 //! - [`budget`]: `BudgetSpec` ghost state (`BudgetGlobalState`) and `BudgetProtocol`.
+//! - [`hyperenclave`]: draft four-class `HyperEnclaveProtocol`.
 pub mod budget;
 pub mod closure;
+pub mod hyperenclave;
 
 use super::spec::GhostZone;
 use crate::memory_set::SpecMemorySet;
 pub use budget::{BudgetGlobalState, BudgetProtocol, BudgetZoneState};
 pub use closure::{ClosureGlobalState, ClosureProtocol, ClosureZoneState};
+pub use hyperenclave::{HyperEnclaveGlobalState, HyperEnclaveProtocol, HyperEnclaveZoneState};
 
 use vstd::prelude::*;
 
@@ -20,7 +23,7 @@ verus! {
 
 /// Minimal spec interface shared by `ClosureZoneState` and `BudgetZoneState`.
 ///
-/// Used as the bound `P::ZoneToken: ZoneStateOps` in the `ZoneGhostProtocol` trait.
+/// Used as the bound `P::ZoneState: ZoneStateOps` in the `ZoneGhostProtocol` trait.
 pub trait ZoneStateOps {
     /// The zone ID (key in the `zones` map sharding).
     spec fn zone_id(&self) -> nat;
@@ -55,7 +58,7 @@ pub trait ZoneStateOps {
 /// called from protocol-specific `impl HvMem<..., P>` blocks.
 pub trait ZoneGhostProtocol: Sized {
     /// Per-zone tracked ghost state (map-sharded token from `zones[zid]`).
-    type ZoneToken: ZoneStateOps;
+    type ZoneState: ZoneStateOps;
 
     /// Global tracked ghost state stored inside `HvMem`'s write-lock content.
     ///
@@ -77,7 +80,7 @@ pub trait ZoneGhostProtocol: Sized {
     /// Register a new empty zone; returns a fresh zone token.
     ///
     /// The zone starts with no regions; use `insert_region` to populate it.
-    proof fn add_zone(tracked gs: &mut Self::GlobalState, zid: nat) -> (tracked zt: Self::ZoneToken)
+    proof fn add_zone(tracked gs: &mut Self::GlobalState, zid: nat) -> (tracked zt: Self::ZoneState)
         requires
             Self::global_wf(old(gs)),
             !Self::zone_ids(old(gs)).contains(zid),
@@ -98,7 +101,7 @@ pub trait ZoneGhostProtocol: Sized {
     ;
 
     /// Deregister an empty zone; consumes its zone token.
-    proof fn remove_zone(tracked gs: &mut Self::GlobalState, tracked zt: Self::ZoneToken)
+    proof fn remove_zone(tracked gs: &mut Self::GlobalState, tracked zt: Self::ZoneState)
         requires
             Self::global_wf(old(gs)),
             zt.wf(Self::mem_inst_id(old(gs))),
