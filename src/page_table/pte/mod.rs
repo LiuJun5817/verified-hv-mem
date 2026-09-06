@@ -8,8 +8,10 @@ use vstd::prelude::*;
 
 mod aarch64;
 pub use aarch64::Aarch64PTE;
-mod x86;
-pub use x86::X86PTE;
+mod amd;
+pub use amd::AmdNptPTE;
+mod intel;
+pub use intel::IntelEptPTE;
 
 verus! {
 

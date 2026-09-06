@@ -1,4 +1,4 @@
-//! Intel x86 Extended Page Table (EPT) entry.
+//! Intel Extended Page Table (EPT) entry.
 use super::PageTableEntry;
 use crate::address::{
     addr::{PAddr, SpecPAddr},
@@ -54,11 +54,11 @@ pub const EPT_PHYS_ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
 ///
 /// Keeping the raw value makes parsing and serialization exact inverses.
 #[derive(Clone, Copy)]
-pub struct X86PTE {
+pub struct IntelEptPTE {
     pub value: u64,
 }
 
-impl X86PTE {
+impl IntelEptPTE {
     /// Encode the EPT flags used by the hvisor x86 stage-2 implementation.
     pub open spec fn spec_descriptor_flags(attr: MemAttr, huge: bool) -> u64 {
         let mem_type = if attr.device {
@@ -122,7 +122,7 @@ impl X86PTE {
     }
 }
 
-impl PageTableEntry for X86PTE {
+impl PageTableEntry for IntelEptPTE {
     open spec fn wf(self) -> bool {
         true
     }
