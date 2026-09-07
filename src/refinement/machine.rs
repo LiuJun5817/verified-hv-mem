@@ -1302,8 +1302,7 @@ proof fn lemma_cpu_shared_insert_edge(
     lemma_entry_prefix_succ(region, k);
     assert(region.pages().contains(page));
     assert forall|v: VmId| #[trigger]
-        from_sw.all_vms.contains(v) implies !from_sw.vm_owned[v].contains(page)
-            && !from_sw.iommu_owned[v].contains(page) by {}
+        from_sw.all_vms.contains(v) implies !from_sw.vm_owned[v].contains(page) by {}
     assert(!sw1.s2_map.contains_key(key)) by {
         assert(region.entries().contains_key(key));
     }
@@ -1750,7 +1749,6 @@ proof fn lemma_iommu_private_insert_edge(
     }
     assert forall|v: VmId| #[trigger]
         from_sw.all_vms.contains(v) && v != vm implies !from_sw.vm_owned[v].contains(page) by {}
-    assert(!from_sw.vm_shared.contains(page));
     assert(!from_sw.iommu_shared.contains(page));
     assert(!sw1.iommu_s2_map.contains_key(key)) by {
         assert(region.entries().contains_key(key));

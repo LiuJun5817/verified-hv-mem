@@ -897,7 +897,7 @@ proof fn lemma_budget_projection_wf(spec: SoftwareSpec)
     assert forall|vm: VmId| #[trigger]
         sw.all_vms.contains(vm) implies forall|page: PhysPage| #[trigger]
             sw.iommu_owned[vm].contains(page)
-                ==> !sw.iommu_shared.contains(page) && !sw.vm_shared.contains(page) by {
+                ==> !sw.iommu_shared.contains(page) by {
     }
     assert forall|vm: VmId| #[trigger]
         sw.all_vms.contains(vm) implies forall|page: PhysPage| #[trigger]

@@ -66,8 +66,9 @@ impl SoftwareView {
     }
 
     /// IOMMU ownership separation. Private CPU/IOMMU pages are disjoint across
-    /// zones and from both dynamic shared sets. A VM may CPU-map and IOMMU-map
-    /// the same page from its own private budget.
+    /// zones. IOMMU-private pages are disjoint from IOMMU-shared pages, but may
+    /// also be CPU-shared: the two classifications describe different access
+    /// paths. A VM may CPU-map and IOMMU-map the same private page.
     pub open spec fn iommu_ownership_wf(&self) -> bool {
         &&& self.iommu_owned.dom()
             == self.all_vms
@@ -85,13 +86,10 @@ impl SoftwareView {
                 self.iommu_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(
                     page,
                 )
-                // (3) Private DMA pages are disjoint from both shared projections.
+                // (3) Private DMA pages are disjoint from IOMMU-shared pages.
         &&& forall|vm: VmId| #[trigger]
             self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(
-                    page,
-                )
-                    && !self.vm_shared.contains(page)
+                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
                 // (4) CPU-private pages are disjoint from IOMMU-shared pages.
         &&& forall|vm: VmId| #[trigger]
             self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]

@@ -219,8 +219,7 @@ impl MachineState {
         &&& s1.wf()
         &&& s1.all_vms().contains(vm)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms().contains(v) ==> !s1.vm_owned[v].contains(entry.page)
-                && !s1.iommu_owned[v].contains(entry.page))
+            s1.all_vms().contains(v) ==> !s1.vm_owned[v].contains(entry.page))
         &&& !s1.s2_map.contains_key(key)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
@@ -269,7 +268,8 @@ impl MachineState {
     }
 
     /// Atomically classify one physical page as VM-private for DMA and install
-    /// its IOMMU mapping. The same VM may already classify the page CPU-private.
+    /// its IOMMU mapping. The page may already be CPU-private for the same VM or
+    /// CPU-shared; CPU and IOMMU classifications describe different access paths.
     pub open spec fn hv_iommu_map_vm_private_step(
         s1: Self,
         s2: Self,
@@ -285,7 +285,6 @@ impl MachineState {
             s1.all_vms().contains(v) ==> !s1.iommu_owned[v].contains(entry.page))
         &&& (forall|v: VmId| #[trigger]
             s1.all_vms().contains(v) && v != vm ==> !s1.vm_owned[v].contains(entry.page))
-        &&& !s1.vm_shared.contains(entry.page)
         &&& !s1.iommu_shared.contains(entry.page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)

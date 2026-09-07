@@ -279,11 +279,10 @@ impl MachineState {
                 self.iommu_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(page)
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(
-                    page,
-                )
-                    && !self.vm_shared.contains(page)
-                // CPU-private pages are disjoint from IOMMU-shared pages.
+                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
+                // IOMMU-private pages may be CPU-shared: these sets classify
+                // different access paths. CPU-private pages remain disjoint
+                // from IOMMU-shared pages.
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
                 self.vm_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)

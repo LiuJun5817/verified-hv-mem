@@ -217,11 +217,9 @@ pub proof fn lemma_iommu_map_vm_private_step_preserves_wf(
     }
     assert forall|v: VmId| #[trigger] s2.all_vms.contains(v) implies (forall|p: PhysPage|
      #[trigger]
-        s2.iommu_owned[v].contains(p) ==> !s2.iommu_shared.contains(p)
-            && !s2.vm_shared.contains(p)) by {
+        s2.iommu_owned[v].contains(p) ==> !s2.iommu_shared.contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
-            s2.iommu_owned[v].contains(p) implies !s2.iommu_shared.contains(p)
-                && !s2.vm_shared.contains(p) by {
+            s2.iommu_owned[v].contains(p) implies !s2.iommu_shared.contains(p) by {
             if v == vm && p == page {
             } else {
                 assert(s1.iommu_owned[v].contains(p));
@@ -279,11 +277,9 @@ pub proof fn lemma_iommu_unmap_vm_private_step_preserves_wf(
     }
     assert forall|v: VmId| #[trigger] s2.all_vms.contains(v) implies (forall|p: PhysPage|
      #[trigger]
-        s2.iommu_owned[v].contains(p) ==> !s2.iommu_shared.contains(p)
-            && !s2.vm_shared.contains(p)) by {
+        s2.iommu_owned[v].contains(p) ==> !s2.iommu_shared.contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
-            s2.iommu_owned[v].contains(p) implies !s2.iommu_shared.contains(p)
-                && !s2.vm_shared.contains(p) by {
+            s2.iommu_owned[v].contains(p) implies !s2.iommu_shared.contains(p) by {
             assert(s1.iommu_owned[v].contains(p));
         }
     }
@@ -344,19 +340,6 @@ pub proof fn lemma_map_global_shared_step_preserves_wf(
         }
     }
     assert(s2.translation_wf());
-    assert forall|v: VmId| #[trigger] s2.all_vms.contains(v) implies (forall|p: PhysPage|
-     #[trigger]
-        s2.iommu_owned[v].contains(p) ==> !s2.iommu_shared.contains(p)
-            && !s2.vm_shared.contains(p)) by {
-        assert forall|p: PhysPage| #[trigger]
-            s2.iommu_owned[v].contains(p) implies !s2.iommu_shared.contains(p)
-                && !s2.vm_shared.contains(p) by {
-            if p == page {
-                assert(!s1.iommu_owned[v].contains(page));
-                assert(false);
-            }
-        }
-    }
     assert(s2.iommu_ownership_wf());
     assert(s2.iommu_translation_wf());
 }
@@ -426,11 +409,9 @@ pub proof fn lemma_iommu_map_global_shared_step_preserves_wf(
         s2.iommu_owned[a].contains(p) ==> !s2.vm_owned[b].contains(p))) by {}
     assert forall|v: VmId| #[trigger] s2.all_vms.contains(v) implies (forall|p: PhysPage|
      #[trigger]
-        s2.iommu_owned[v].contains(p) ==> !s2.iommu_shared.contains(p)
-            && !s2.vm_shared.contains(p)) by {
+        s2.iommu_owned[v].contains(p) ==> !s2.iommu_shared.contains(p)) by {
         assert forall|p: PhysPage| #[trigger]
-            s2.iommu_owned[v].contains(p) implies !s2.iommu_shared.contains(p)
-                && !s2.vm_shared.contains(p) by {
+            s2.iommu_owned[v].contains(p) implies !s2.iommu_shared.contains(p) by {
             if p == page {
                 assert(!s1.iommu_owned[v].contains(page));
                 assert(false);

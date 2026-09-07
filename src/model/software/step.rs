@@ -70,7 +70,8 @@ impl SoftwareView {
 
     /// Atomically install one IOMMU mapping and add its target to `vm`'s
     /// VM-private IOMMU projection. The same VM may already map the page on the
-    /// CPU side; other VMs and both shared projections may not classify it.
+    /// CPU side, and the page may be CPU-shared; other VMs and the IOMMU-shared
+    /// projection may not classify it.
     pub open spec fn iommu_map_vm_private_step(
         s1: SoftwareView,
         s2: SoftwareView,
@@ -85,7 +86,6 @@ impl SoftwareView {
             s1.all_vms.contains(v) ==> !s1.iommu_owned[v].contains(entry.page))
         &&& (forall|v: VmId| #[trigger]
             s1.all_vms.contains(v) && v != vm ==> !s1.vm_owned[v].contains(entry.page))
-        &&& !s1.vm_shared.contains(entry.page)
         &&& !s1.iommu_shared.contains(entry.page)
         &&& s2.all_vms == s1.all_vms
         &&& s2.vm_owned == s1.vm_owned
@@ -126,8 +126,9 @@ impl SoftwareView {
     }
 
     /// Atomically install one CPU mapping to global-shared memory and add its
-    /// target to the dynamic CPU-shared projection. Existing shared aliases are
-    /// permitted, while no private projection may contain the target.
+    /// target to the dynamic CPU-shared projection. Existing shared aliases and
+    /// IOMMU-private ownership are permitted, while no CPU-private projection may
+    /// contain the target.
     pub open spec fn map_global_shared_step(
         s1: SoftwareView,
         s2: SoftwareView,
@@ -139,8 +140,7 @@ impl SoftwareView {
         &&& s1.all_vms.contains(vm)
         &&& !s1.s2_map.contains_key(key)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms.contains(v) ==> !s1.vm_owned[v].contains(entry.page)
-                && !s1.iommu_owned[v].contains(entry.page))
+            s1.all_vms.contains(v) ==> !s1.vm_owned[v].contains(entry.page))
         &&& s2.all_vms == s1.all_vms
         &&& s2.vm_owned == s1.vm_owned
         &&& s2.vm_shared == s1.vm_shared.insert(entry.page)
@@ -414,8 +414,8 @@ impl SoftwareView {
     }
 
     /// A global-shared CPU region is insertable at fresh guest pages. Its physical
-    /// pages may already have other shared CPU or IOMMU mappings, but may not be
-    /// classified as private in either translation domain.
+    /// pages may already have other shared CPU mappings or IOMMU-private/shared
+    /// mappings, but cannot be CPU-private.
     pub open spec fn cpu_insert_global_shared_region_enabled(
         s1: SoftwareView,
         region: Region,
@@ -426,7 +426,7 @@ impl SoftwareView {
             region.entries().contains_key(k) ==> !s1.s2_map.contains_key(k))
         &&& (forall|p: PhysPage, v: VmId| #[trigger]
             region.pages().contains(p) && #[trigger] s1.all_vms.contains(v)
-                ==> !s1.vm_owned[v].contains(p) && !s1.iommu_owned[v].contains(p))
+                ==> !s1.vm_owned[v].contains(p))
     }
 
     /// A global-shared CPU region is removable when its exact entries are installed.
@@ -525,7 +525,8 @@ impl SoftwareView {
     }
 
     /// A zone-private IOMMU region is insertable when its physical pages have no
-    /// existing IOMMU-private owner, are not shared, and its guest pages are fresh.
+    /// existing IOMMU-private owner, are not IOMMU-shared, and its guest pages are
+    /// fresh. CPU-shared access is independent and is permitted.
     pub open spec fn iommu_insert_zone_private_region_enabled(
         s1: SoftwareView,
         region: Region,
@@ -542,8 +543,7 @@ impl SoftwareView {
             region.pages().contains(p) && #[trigger] s1.all_vms.contains(v) && v != region.vm
                 ==> !s1.vm_owned[v].contains(p))
         &&& (forall|p: PhysPage| #[trigger]
-            region.pages().contains(p) ==> !s1.vm_shared.contains(p)
-                && !s1.iommu_shared.contains(p))
+            region.pages().contains(p) ==> !s1.iommu_shared.contains(p))
     }
 
     /// A zone-private IOMMU region is removable when it is installed and no other
