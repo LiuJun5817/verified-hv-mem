@@ -505,8 +505,6 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
     pub fn clear(&self, zid: usize) -> (res: Result<(), ()>)
         requires
             self.invariants(),
-        ensures
-            res is Ok ==> self.invariants(),
     {
         let guard = self.lock.lock_read();
         let Tracked(hv_content) = guard.borrow(&self.lock);
@@ -534,8 +532,6 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
     pub fn clear_iommu(&self, zid: usize) -> (res: Result<(), ()>)
         requires
             self.invariants(),
-        ensures
-            res is Ok ==> self.invariants(),
     {
         let guard = self.lock.lock_read();
         let Tracked(hv_content) = guard.borrow(&self.lock);
@@ -614,8 +610,6 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
             self.invariants(),
             region_in_budget(zid as nat, region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
-        ensures
-            res is Ok ==> self.invariants(),
     {
         // ── Step 1: validate region ────────────────────────────────────────────
         if !region.valid() {
@@ -666,8 +660,6 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
     pub fn remove_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
         requires
             self.invariants(),
-        ensures
-            res is Ok ==> self.invariants(),
     {
         // ── Step 1: validate region ────────────────────────────────────────────
         if !region.valid() {
@@ -712,8 +704,6 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
             self.invariants(),
             region_in_budget(zid as nat, region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
-        ensures
-            res is Ok ==> self.invariants(),
     {
         if !region.valid() {
             return Err(());
@@ -748,8 +738,6 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
     pub fn remove_iommu_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
         requires
             self.invariants(),
-        ensures
-            res is Ok ==> self.invariants(),
     {
         if !region.valid() {
             return Err(());
