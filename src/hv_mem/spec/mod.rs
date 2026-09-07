@@ -17,7 +17,7 @@ pub use closure::{
 };
 pub use hyperenclave::{
     HyperEnclavePrivateRegionsViewToken, HyperEnclaveSpec, HyperEnclaveSpecInstance,
-    HyperEnclaveZoneIdsToken, HyperEnclaveZoneToken,
+    HyperEnclaveSharedRegionsToken, HyperEnclaveZoneIdsToken, HyperEnclaveZoneToken,
 };
 
 verus! {

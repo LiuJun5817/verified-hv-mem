@@ -5,8 +5,10 @@
 //! DMA pages are a subset of normal-world memory.  The class partition is a
 //! trusted configuration fact; assignment of private pages to individual
 //! enclaves is dynamic state checked on every enclave insertion. Enclave EPC
-//! pages and enclave GPT backing frames may be leaf-mapped; VeriHyMem's own
-//! page-table backing frames may not.
+//! pages and enclave GPT backing frames may be leaf-mapped. Normal-memory
+//! regions may additionally be mapped into an enclave through an explicit
+//! dynamic Shared transition; VeriHyMem's own page-table backing frames may
+//! not be leaf-mapped.
 //!
 //! Executable operations for this state machine live in
 //! `hv_mem::imp::hyperenclave`.  Refinement to the policy-neutral
@@ -136,20 +138,57 @@ pub open spec fn region_in_enclave_memory(zid: nat, region: MemoryRegion) -> boo
     region_in_epc_memory(region) || region_in_enclave_gpt_backing_frames(zid, region)
 }
 
+/// Currently installed enclave-private CPU regions. This is the semantic
+/// source used by the HyperEnclave policy; `enclave_private_regions_view`
+/// below is a conservative cache used by the serialized overlap check.
+pub open spec fn live_enclave_private_regions(
+    zid: nat,
+    zone: GhostZone,
+) -> Set<MemoryRegion> {
+    if zid == root_zone_id() {
+        Set::empty()
+    } else {
+        Set::new(
+            |region: MemoryRegion|
+                zone.cpu_mem_set.regions.contains(region)
+                    && region_in_enclave_memory(zid, region),
+        )
+    }
+}
+
+/// Currently installed normal-memory CPU regions in an enclave zone. These
+/// are the exact dynamic Shared regions for the HyperEnclave policy. Sharing
+/// scope is deliberately not represented here: the caller supplies the
+/// marshalling-buffer authorization as an interface premise.
+pub open spec fn live_shared_regions(
+    zid: nat,
+    zone: GhostZone,
+) -> Set<MemoryRegion> {
+    if zid == root_zone_id() {
+        Set::empty()
+    } else {
+        Set::new(
+            |region: MemoryRegion|
+                zone.cpu_mem_set.regions.contains(region)
+                    && region_in_normal_memory(region),
+        )
+    }
+}
+
 /// Runtime overlap guard used while constructing an enclave. The candidate is
 /// compared with the conservative private-region entry for every live
 /// enclave. Root mappings need no such scan because normal memory is statically
 /// disjoint from both EPC memory and the allocator pool.
 pub open spec fn enclave_insert_allowed(
-    private_regions_view: Map<nat, Set<MemoryRegion>>,
+    enclave_private_regions_view: Map<nat, Set<MemoryRegion>>,
     zid: nat,
     region: MemoryRegion,
 ) -> bool {
     &&& zid != root_zone_id()
     &&& region_in_enclave_memory(zid, region)
     &&& forall|other_zid: nat, old_region: MemoryRegion|
-        private_regions_view.contains_key(other_zid) && other_zid != root_zone_id()
-            && #[trigger] private_regions_view[other_zid].contains(old_region)
+        enclave_private_regions_view.contains_key(other_zid) && other_zid != root_zone_id()
+            && #[trigger] enclave_private_regions_view[other_zid].contains(old_region)
             ==> !old_region.spec_overlaps_pmem(region)
 }
 
@@ -173,9 +212,17 @@ tokenized_state_machine! {
 
             /// Conservative per-zone private-region cache used by serialized
             /// runtime overlap checks. An entry may contain regions that have
-            /// since been removed, but never omits a live enclave region.
+            /// since been removed, but never omits a live enclave-private
+            /// region. Normal-memory Shared regions never enter this cache.
             #[sharding(variable)]
-            pub private_regions_view: Map<nat, Set<MemoryRegion>>,
+            pub enclave_private_regions_view: Map<nat, Set<MemoryRegion>>,
+
+            /// Exact per-enclave set of installed normal-memory Shared
+            /// regions. Unlike `enclave_private_regions_view`, this state is not
+            /// conservative: removing the final Shared mapping must allow the
+            /// affected pages to return to the root-private projection.
+            #[sharding(variable)]
+            pub shared_regions: Map<nat, Set<MemoryRegion>>,
         }
 
         #[invariant]
@@ -184,16 +231,37 @@ tokenized_state_machine! {
         }
 
         #[invariant]
-        pub fn inv_private_regions_view_covers_live_regions(&self) -> bool {
-            &&& self.private_regions_view.dom() == self.zone_ids
+        pub fn inv_enclave_private_regions_view_covers_live_regions(&self) -> bool {
+            &&& self.enclave_private_regions_view.dom() == self.zone_ids
             &&& forall|zid: nat| #[trigger]
-                self.zones.contains_key(zid) && zid != root_zone_id() ==> self.zones[zid]
-                    .cpu_mem_set.regions.subset_of(self.private_regions_view[zid])
+                self.zones.contains_key(zid) ==> {
+                    &&& live_enclave_private_regions(zid, self.zones[zid]).subset_of(
+                        self.enclave_private_regions_view[zid],
+                    )
+                    &&& forall|region: MemoryRegion| #[trigger]
+                        self.enclave_private_regions_view[zid].contains(region) ==> {
+                            &&& zid != root_zone_id()
+                            &&& region.spec_valid()
+                            &&& region_in_enclave_memory(zid, region)
+                        }
+                }
+        }
+
+        /// The Shared-region view is exact. Its root entry is empty, and every
+        /// non-root entry is precisely the normal-memory subset of that
+        /// enclave's installed CPU regions.
+        #[invariant]
+        pub fn inv_shared_regions_exact(&self) -> bool {
+            &&& self.shared_regions.dom() == self.zone_ids
+            &&& forall|zid: nat| #[trigger]
+                self.zones.contains_key(zid) ==> self.shared_regions[zid]
+                    == live_shared_regions(zid, self.zones[zid])
         }
 
         /// Per-zone class policy. The normal world may map normal pages and root DMA
-        /// pages. An enclave may map EPC or GPT backing frames on the CPU
-        /// side and has no IOMMU mappings in the initial integration profile.
+        /// pages. An enclave may map private EPC/GPT backing frames or dynamic
+        /// normal-memory Shared regions on the CPU side and has no IOMMU
+        /// mappings in the initial integration profile.
         #[invariant]
         pub fn inv_class_policy(&self) -> bool {
             forall|zid: nat| #[trigger] self.zones.contains_key(zid) ==> {
@@ -208,13 +276,14 @@ tokenized_state_machine! {
                 } else {
                     &&& forall|r: MemoryRegion| #[trigger]
                         self.zones[zid].cpu_mem_set.regions.contains(r)
-                            ==> region_in_enclave_memory(zid, r)
+                            ==> region_in_enclave_memory(zid, r) || region_in_normal_memory(r)
                     &&& self.zones[zid].iommu_mem_set.empty()
                 }
             }
         }
 
-        /// Dynamic exclusivity invariant for enclave physical mappings.
+        /// Dynamic exclusivity invariant for enclave-private physical
+        /// mappings. Normal-memory Shared regions are intentionally excluded.
         #[invariant]
         pub fn inv_enclave_regions_pairwise_disjoint(&self) -> bool {
             forall|zid1: nat, zid2: nat, r1: MemoryRegion, r2: MemoryRegion|
@@ -222,6 +291,8 @@ tokenized_state_machine! {
                     && zid1 != root_zone_id() && zid2 != root_zone_id()
                     && #[trigger] self.zones[zid1].cpu_mem_set.regions.contains(r1)
                     && #[trigger] self.zones[zid2].cpu_mem_set.regions.contains(r2)
+                    && region_in_enclave_memory(zid1, r1)
+                    && region_in_enclave_memory(zid2, r2)
                     && (zid1 != zid2 || r1 != r2)
                     ==> !r1.spec_overlaps_pmem(r2)
         }
@@ -230,7 +301,8 @@ tokenized_state_machine! {
             initialize() {
                 init zone_ids = Set::empty();
                 init zones = Map::empty();
-                init private_regions_view = Map::empty();
+                init enclave_private_regions_view = Map::empty();
+                init shared_regions = Map::empty();
             }
         }
 
@@ -248,7 +320,14 @@ tokenized_state_machine! {
                         mappings: Map::empty(),
                     },
                 }];
-                update private_regions_view = pre.private_regions_view.insert(zid, Set::empty());
+                update enclave_private_regions_view = pre.enclave_private_regions_view.insert(
+                    zid,
+                    Set::empty(),
+                );
+                update shared_regions = pre.shared_regions.insert(
+                    zid,
+                    Set::empty(),
+                );
             }
         }
 
@@ -258,7 +337,8 @@ tokenized_state_machine! {
                 require(zone.cpu_mem_set.empty());
                 require(zone.iommu_mem_set.empty());
                 update zone_ids = pre.zone_ids.remove(zid);
-                update private_regions_view = pre.private_regions_view.remove(zid);
+                update enclave_private_regions_view = pre.enclave_private_regions_view.remove(zid);
+                update shared_regions = pre.shared_regions.remove(zid);
             }
         }
 
@@ -266,11 +346,11 @@ tokenized_state_machine! {
         /// map-sharded zone token. This is a ghost-only operation used by the
         /// serialized private-region insertion scan.
         transition! {
-            synchronize_private_regions_view(zid: nat) {
+            synchronize_enclave_private_regions_view(zid: nat) {
                 remove zones -= [zid => let zone];
-                update private_regions_view = pre.private_regions_view.insert(
+                update enclave_private_regions_view = pre.enclave_private_regions_view.insert(
                     zid,
-                    zone.cpu_mem_set.regions,
+                    live_enclave_private_regions(zid, zone),
                 );
                 add zones += [zid => zone];
             }
@@ -294,13 +374,32 @@ tokenized_state_machine! {
                 remove zones -= [zid => let zone];
                 require(region.spec_valid());
                 require(region_in_enclave_memory(zid, region));
-                require(enclave_insert_allowed(pre.private_regions_view, zid, region));
+                require(enclave_insert_allowed(pre.enclave_private_regions_view, zid, region));
                 require(!zone.cpu_mem_set.regions.contains(region));
                 require(!zone.cpu_mem_set.overlaps_vmem(region));
                 add zones += [zid => zone.cpu_insert_region(region)];
-                update private_regions_view = pre.private_regions_view.insert(
+                update enclave_private_regions_view = pre.enclave_private_regions_view.insert(
                     zid,
-                    zone.cpu_insert_region(region).cpu_mem_set.regions,
+                    live_enclave_private_regions(zid, zone.cpu_insert_region(region)),
+                );
+            }
+        }
+
+        /// Install an explicitly authorized normal-memory Shared region in an
+        /// enclave CPU stage-2 table. The sharing scope is an integration
+        /// premise; the TSM records only the active Shared mapping.
+        transition! {
+            cpu_insert_enclave_shared_region(zid: nat, region: MemoryRegion) {
+                remove zones -= [zid => let zone];
+                require(zid != root_zone_id());
+                require(region.spec_valid());
+                require(region_in_normal_memory(region));
+                require(!zone.cpu_mem_set.regions.contains(region));
+                require(!zone.cpu_mem_set.overlaps_vmem(region));
+                add zones += [zid => zone.cpu_insert_region(region)];
+                update shared_regions = pre.shared_regions.insert(
+                    zid,
+                    live_shared_regions(zid, zone.cpu_insert_region(region)),
                 );
             }
         }
@@ -310,6 +409,10 @@ tokenized_state_machine! {
                 remove zones -= [zid => let zone];
                 require(zone.cpu_mem_set.regions.contains(region));
                 add zones += [zid => zone.cpu_remove_region(region)];
+                update shared_regions = pre.shared_regions.insert(
+                    zid,
+                    live_shared_regions(zid, zone.cpu_remove_region(region)),
+                );
             }
         }
 
@@ -319,6 +422,10 @@ tokenized_state_machine! {
                 remove zones -= [zid => let zone];
                 require(zid != root_zone_id());
                 add zones += [zid => zone.cpu_clear()];
+                update shared_regions = pre.shared_regions.insert(
+                    zid,
+                    Set::empty(),
+                );
             }
         }
 
@@ -369,18 +476,23 @@ tokenized_state_machine! {
             admit();
         }
 
-        #[inductive(synchronize_private_regions_view)]
-        fn synchronize_private_regions_view_inductive(pre: Self, post: Self, zid: nat) {
+        #[inductive(synchronize_enclave_private_regions_view)]
+        fn synchronize_enclave_private_regions_view_inductive(
+            pre: Self,
+            post: Self,
+            zid: nat,
+        ) {
             assert(pre.zones.contains_key(zid));
             assert(pre.zone_ids.contains(zid));
-            assert(pre.private_regions_view.contains_key(zid));
+            assert(pre.enclave_private_regions_view.contains_key(zid));
             assert(post.zone_ids == pre.zone_ids);
             assert(post.zones == pre.zones);
-            assert(post.private_regions_view == pre.private_regions_view.insert(
+            assert(post.enclave_private_regions_view == pre.enclave_private_regions_view.insert(
                 zid,
-                pre.zones[zid].cpu_mem_set.regions,
+                live_enclave_private_regions(zid, pre.zones[zid]),
             ));
-            assert(post.private_regions_view.dom() =~= pre.private_regions_view.dom());
+            assert(post.enclave_private_regions_view.dom()
+                =~= pre.enclave_private_regions_view.dom());
         }
 
         #[inductive(cpu_insert_normal_region)]
@@ -394,6 +506,16 @@ tokenized_state_machine! {
 
         #[inductive(cpu_insert_enclave_private_region)]
         fn cpu_insert_enclave_private_region_inductive(
+            pre: Self,
+            post: Self,
+            zid: nat,
+            region: MemoryRegion,
+        ) {
+            admit();
+        }
+
+        #[inductive(cpu_insert_enclave_shared_region)]
+        fn cpu_insert_enclave_shared_region_inductive(
             pre: Self,
             post: Self,
             zid: nat,
@@ -448,6 +570,8 @@ pub type HyperEnclaveZoneIdsToken = HyperEnclaveSpec::zone_ids;
 
 pub type HyperEnclaveZoneToken = HyperEnclaveSpec::zones;
 
-pub type HyperEnclavePrivateRegionsViewToken = HyperEnclaveSpec::private_regions_view;
+pub type HyperEnclavePrivateRegionsViewToken = HyperEnclaveSpec::enclave_private_regions_view;
+
+pub type HyperEnclaveSharedRegionsToken = HyperEnclaveSpec::shared_regions;
 
 } // verus!
