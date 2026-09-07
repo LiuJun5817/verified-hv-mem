@@ -7,11 +7,16 @@ use crate::constants::*;
 use vstd::prelude::*;
 
 mod aarch64;
-pub use aarch64::Aarch64PTE;
 mod amd;
-pub use amd::AmdNptPTE;
+mod amd_iommu;
 mod intel;
+mod intel_iommu;
+
+pub use aarch64::Aarch64PTE;
+pub use amd::AmdNptPTE;
+pub use amd_iommu::AmdIommuPTE;
 pub use intel::IntelEptPTE;
+pub use intel_iommu::IntelVtdPTE;
 
 verus! {
 
@@ -20,11 +25,14 @@ pub trait PageTableEntry: Sized {
     /// Well-formedness
     spec fn wf(self) -> bool;
 
+    /// Whether this entry format can represent all requested memory attributes.
+    spec fn spec_supports_attr(attr: MemAttr) -> bool;
+
     /// Construct from address and attributes.
     spec fn spec_new(addr: SpecPAddr, attr: MemAttr, huge: bool) -> Self;
 
     /// Construct an entry that references the next-level page table.
-    spec fn spec_new_table(addr: SpecPAddr) -> Self;
+    spec fn spec_new_table(addr: SpecPAddr, next_level: nat) -> Self;
 
     /// Construct an empty entry.
     spec fn spec_empty() -> Self;
@@ -44,7 +52,7 @@ pub trait PageTableEntry: Sized {
     /// Returns whether this entry is valid.
     spec fn spec_valid(self) -> bool;
 
-    /// Returns whether this entry maps to a huge frame.
+    /// Returns the entry-format leaf/block marker. The mapping size comes from the table level.
     spec fn spec_huge(self) -> bool;
 
     /// Construct from address and attributes.
@@ -52,19 +60,20 @@ pub trait PageTableEntry: Sized {
         requires
             addr@.aligned(FrameSize::Size4K.as_nat()),
             addr@.0 < PADDR_UPPER_BOUND,
+            Self::spec_supports_attr(attr),
         ensures
             pte.wf(),
             pte == Self::spec_new(addr@, attr, huge),
     ;
 
     /// Construct an entry that references the next-level page table.
-    fn new_table(addr: PAddr) -> (pte: Self)
+    fn new_table(addr: PAddr, next_level: usize) -> (pte: Self)
         requires
             addr@.aligned(FrameSize::Size4K.as_nat()),
             addr@.0 < PADDR_UPPER_BOUND,
         ensures
             pte.wf(),
-            pte == Self::spec_new_table(addr@),
+            pte == Self::spec_new_table(addr@, next_level as nat),
     ;
 
     /// Construct an empty entry.
@@ -107,7 +116,7 @@ pub trait PageTableEntry: Sized {
             res == self.spec_valid(),
     ;
 
-    /// Returns whether this entry maps to a huge frame.
+    /// Returns the entry-format leaf/block marker. The mapping size comes from the table level.
     fn huge(&self) -> (res: bool)
         ensures
             res == self.spec_huge(),
@@ -125,14 +134,14 @@ pub trait PageTableEntry: Sized {
     ;
 
     /// Lemma: `new_table` produces a well-formed entry.
-    broadcast proof fn lemma_new_table_wf(addr: SpecPAddr)
+    broadcast proof fn lemma_new_table_wf(addr: SpecPAddr, next_level: nat)
         requires
             addr.aligned(FrameSize::Size4K.as_nat()),
             addr.0 < PADDR_UPPER_BOUND,
             addr.0 <= usize::MAX,
         ensures
-            #![trigger Self::spec_new_table(addr)]
-            Self::spec_new_table(addr).wf(),
+            #![trigger Self::spec_new_table(addr, next_level)]
+            Self::spec_new_table(addr, next_level).wf(),
     ;
 
     /// Lemma: `from_u64` produces a well-formed entry.
@@ -155,23 +164,24 @@ pub trait PageTableEntry: Sized {
             addr.aligned(FrameSize::Size4K.as_nat()),
             addr.0 < PADDR_UPPER_BOUND,
             addr.0 <= usize::MAX,
+            Self::spec_supports_attr(attr),
         ensures
             ({
                 let pte = #[trigger] Self::spec_new(addr, attr, huge);
-                pte.spec_valid() && pte.spec_addr() == addr && pte.spec_attr() == attr
-                    && pte.spec_huge() == huge
+                pte.spec_valid() && pte.spec_addr() == addr && pte.spec_attr() == attr && (huge
+                    ==> pte.spec_huge())
             }),
     ;
 
     /// A table entry is valid, non-leaf, and keeps its table address.
-    broadcast proof fn lemma_new_table_keeps_value(addr: SpecPAddr)
+    broadcast proof fn lemma_new_table_keeps_value(addr: SpecPAddr, next_level: nat)
         requires
             addr.aligned(FrameSize::Size4K.as_nat()),
             addr.0 < PADDR_UPPER_BOUND,
             addr.0 <= usize::MAX,
         ensures
             ({
-                let pte = #[trigger] Self::spec_new_table(addr);
+                let pte = #[trigger] Self::spec_new_table(addr, next_level);
                 pte.spec_valid() && pte.spec_addr() == addr && !pte.spec_huge()
             }),
     ;

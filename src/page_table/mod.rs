@@ -7,4 +7,4 @@ mod table;
 
 pub use pt_impl::ExPageTable;
 pub use pt_trait::{PTConstants, PageTable, SpecPTConstants};
-pub use pte::{Aarch64PTE, AmdNptPTE, IntelEptPTE};
+pub use pte::{Aarch64PTE, AmdIommuPTE, AmdNptPTE, IntelEptPTE, IntelVtdPTE};

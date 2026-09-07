@@ -342,6 +342,10 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         self.pt.spec_root()
     }
 
+    open spec fn spec_supports_attr(attr: MemAttr) -> bool {
+        PT::spec_supports_attr(attr)
+    }
+
     open spec fn invariants(&self) -> bool {
         &&& self.pt@.constants.valid()
         // Frame size is 4K
@@ -533,6 +537,7 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 0 <= i <= region.pages,
                 region.spec_valid(),
                 region.spec_within_vspace(self.pt@.constants.arch.vspace_size()),
+                PT::spec_supports_attr(region.attr),
                 i == 0 ==> self.invariants(),
                 self.pt.invariants(),
                 allocator.invariants(),

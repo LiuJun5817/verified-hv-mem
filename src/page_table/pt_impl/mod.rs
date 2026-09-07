@@ -7,7 +7,7 @@ use super::{
 use crate::{
     address::{
         addr::{PAddr, SpecPAddr, VAddr},
-        frame::Frame,
+        frame::{Frame, MemAttr},
     },
     bitmap_allocator::bitmap_trait::BitmapAllocator,
     global_allocator::GlobalAllocator,
@@ -40,6 +40,10 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
 
     open spec fn spec_root(&self) -> SpecPAddr {
         self.0.pt_mem.root@
+    }
+
+    open spec fn spec_supports_attr(attr: MemAttr) -> bool {
+        E::spec_supports_attr(attr)
     }
 
     fn constants(&self) -> (res: PTConstants) {

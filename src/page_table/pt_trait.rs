@@ -1,6 +1,6 @@
 //! Page table trait with formal specification.
 use crate::address::addr::{PAddr, SpecPAddr, SpecVAddr, VAddr};
-use crate::address::frame::{Frame, FrameSize, SpecFrame};
+use crate::address::frame::{Frame, FrameSize, MemAttr, SpecFrame};
 use crate::bitmap_allocator::bitmap_trait::BitmapAllocator;
 use crate::constants::*;
 use crate::global_allocator::GlobalAllocator;
@@ -379,6 +379,9 @@ pub trait PageTable<A> where Self: Sized, A: BitmapAllocator {
     /// Physical address of the root page table.
     spec fn spec_root(&self) -> SpecPAddr;
 
+    /// Whether the concrete entry encoding preserves these attributes.
+    spec fn spec_supports_attr(attr: MemAttr) -> bool;
+
     /// Return the concrete page-table constants used by this implementation.
     ///
     /// Concrete users such as `VecMemorySet` need the runtime architecture to
@@ -439,6 +442,7 @@ pub trait PageTable<A> where Self: Sized, A: BitmapAllocator {
             old(self).inst_id() == allocator.inst_id(),
             old(self).invariants(),
             old(self)@.map_pre(vbase@, frame@),
+            Self::spec_supports_attr(frame.attr),
         ensures
             allocator.invariants(),
             self.inst_id() == old(self).inst_id(),

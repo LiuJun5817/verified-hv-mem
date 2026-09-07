@@ -255,7 +255,8 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
                 let table_base = self.pt_mem.alloc_table(allocator, level + 1);
 
                 // Write entry
-                let pte = E::new_table(table_base);
+                let next_level = self.constants.arch.level_count() - level - 1;
+                let pte = E::new_table(table_base, next_level);
                 self.pt_mem.write(base, idx, pte.to_u64());
 
                 // Insert at next level
@@ -435,6 +436,7 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
             vbase@.aligned(frame.size.as_nat()),
             frame.base@.aligned(frame.size.as_nat()),
             frame.base@.0 + frame.size.as_nat() <= PADDR_UPPER_BOUND,
+            E::spec_supports_attr(frame.attr),
         ensures
             allocator.invariants(),
             self.inst_id() == old(self).inst_id(),

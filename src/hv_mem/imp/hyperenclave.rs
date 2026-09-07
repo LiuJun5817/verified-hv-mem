@@ -76,6 +76,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, HyperEnclaveProtocol, I, D, IOPT,
             mmu.wf(),
             region_in_normal_memory(region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            M::spec_supports_attr(region.attr),
     {
         if !region.valid() {
             return Err(());
@@ -149,6 +150,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, HyperEnclaveProtocol, I, D, IOPT,
                 region,
             ),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            M::spec_supports_attr(region.attr),
         ensures
             gs.wf(),
             gs.mem_inst_id() == old(gs).mem_inst_id(),
@@ -224,6 +226,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, HyperEnclaveProtocol, I, D, IOPT,
             mmu.wf(),
             region_in_normal_memory(region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            M::spec_supports_attr(region.attr),
         ensures
             gs.wf(),
             gs.mem_inst_id() == old(gs).mem_inst_id(),
@@ -429,6 +432,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, HyperEnclaveProtocol, I, D, IOPT,
             iommu_mmu.wf(),
             region_in_dma_memory(region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            IOM::spec_supports_attr(region.attr),
     {
         if !region.valid() {
             return Err(());
@@ -718,6 +722,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
             self.invariants(),
             region_in_normal_memory(region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            M::spec_supports_attr(region.attr),
     {
         if !region.valid() {
             return Err(());
@@ -808,6 +813,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
             self.invariants(),
             region_in_epc_memory(region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            M::spec_supports_attr(region.attr),
     {
         proof {
             assert(region_in_enclave_memory(enclave_id as nat, region));
@@ -826,6 +832,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
             self.invariants(),
             region_in_enclave_gpt_backing_frames(enclave_id as nat, region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            M::spec_supports_attr(region.attr),
     {
         proof {
             assert(region_in_enclave_memory(enclave_id as nat, region));
@@ -846,6 +853,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
             self.invariants(),
             region_in_normal_memory(region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            M::spec_supports_attr(region.attr),
     {
         if enclave_id == 0 || !region.valid() {
             return Err(());
@@ -887,6 +895,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
             self.invariants(),
             region_in_enclave_memory(enclave_id as nat, region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            M::spec_supports_attr(region.attr),
     {
         if enclave_id == 0 || !region.valid() {
             return Err(());
@@ -1096,6 +1105,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
             self.invariants(),
             region_in_dma_memory(region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            IOM::spec_supports_attr(region.attr),
     {
         if !region.valid() {
             return Err(());

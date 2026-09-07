@@ -20,26 +20,33 @@ verus! {
 // | 2     | user             | Set for every constructed leaf and table entry  |
 // | 1     | write            | Write permission                                |
 // | 0     | present          | Read/present permission                         |
-
 /// Present/readable bit.
 pub const NPT_PRESENT: u64 = 1 << 0;
+
 /// Writable bit.
 pub const NPT_WRITABLE: u64 = 1 << 1;
+
 /// Guest page-table walks are always user accesses at the NPT level.
 pub const NPT_USER: u64 = 1 << 2;
+
 /// Write-through caching bit used for device mappings.
 pub const NPT_PWT: u64 = 1 << 3;
+
 /// Cache-disable bit used for device mappings.
 pub const NPT_PCD: u64 = 1 << 4;
+
 /// Large-page bit in an NPT PDPTE/PDE.
 pub const NPT_HUGE: u64 = 1 << 7;
+
 /// Execute-disable bit.
 pub const NPT_NX: u64 = 1 << 63;
+
 /// Physical-address bits, including HyperEnclave's possible SME C-bit.
 pub const NPT_PHYS_ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
+
 /// Fields which make an entry occupied in the software page-table model.
-pub const NPT_VALID_MASK: u64 =
-    NPT_PRESENT | NPT_WRITABLE | NPT_USER | NPT_PWT | NPT_PCD | NPT_HUGE | NPT_NX;
+pub const NPT_VALID_MASK: u64 = NPT_PRESENT | NPT_WRITABLE | NPT_USER | NPT_PWT | NPT_PCD | NPT_HUGE
+    | NPT_NX;
 
 /// An AMD nested-page-table entry.
 ///
@@ -53,11 +60,31 @@ pub struct AmdNptPTE {
 
 impl AmdNptPTE {
     pub open spec fn spec_descriptor_flags(attr: MemAttr, huge: bool) -> u64 {
-        let present = if attr.readable { NPT_PRESENT } else { 0 };
-        let writable = if attr.writable { NPT_WRITABLE } else { 0 };
-        let device = if attr.device { NPT_PWT | NPT_PCD } else { 0 };
-        let execute_never = if attr.executable { 0 } else { NPT_NX };
-        let large_page = if huge { NPT_HUGE } else { 0 };
+        let present = if attr.readable {
+            NPT_PRESENT
+        } else {
+            0
+        };
+        let writable = if attr.writable {
+            NPT_WRITABLE
+        } else {
+            0
+        };
+        let device = if attr.device {
+            NPT_PWT | NPT_PCD
+        } else {
+            0
+        };
+        let execute_never = if attr.executable {
+            0
+        } else {
+            NPT_NX
+        };
+        let large_page = if huge {
+            NPT_HUGE
+        } else {
+            0
+        };
         present | writable | NPT_USER | device | execute_never | large_page
     }
 
@@ -65,11 +92,31 @@ impl AmdNptPTE {
         ensures
             res == Self::spec_descriptor_flags(attr, huge),
     {
-        let present = if attr.readable { NPT_PRESENT } else { 0 };
-        let writable = if attr.writable { NPT_WRITABLE } else { 0 };
-        let device = if attr.device { NPT_PWT | NPT_PCD } else { 0 };
-        let execute_never = if attr.executable { 0 } else { NPT_NX };
-        let large_page = if huge { NPT_HUGE } else { 0 };
+        let present = if attr.readable {
+            NPT_PRESENT
+        } else {
+            0
+        };
+        let writable = if attr.writable {
+            NPT_WRITABLE
+        } else {
+            0
+        };
+        let device = if attr.device {
+            NPT_PWT | NPT_PCD
+        } else {
+            0
+        };
+        let execute_never = if attr.executable {
+            0
+        } else {
+            NPT_NX
+        };
+        let large_page = if huge {
+            NPT_HUGE
+        } else {
+            0
+        };
         present | writable | NPT_USER | device | execute_never | large_page
     }
 }
@@ -79,19 +126,19 @@ impl PageTableEntry for AmdNptPTE {
         true
     }
 
+    open spec fn spec_supports_attr(_attr: MemAttr) -> bool {
+        true
+    }
+
     open spec fn spec_new(addr: SpecPAddr, attr: MemAttr, huge: bool) -> Self {
         Self {
-            value: ((addr.0 as u64) & NPT_PHYS_ADDR_MASK)
-                | Self::spec_descriptor_flags(attr, huge),
+            value: ((addr.0 as u64) & NPT_PHYS_ADDR_MASK) | Self::spec_descriptor_flags(attr, huge),
         }
     }
 
-    open spec fn spec_new_table(addr: SpecPAddr) -> Self {
+    open spec fn spec_new_table(addr: SpecPAddr, _next_level: nat) -> Self {
         Self {
-            value: ((addr.0 as u64) & NPT_PHYS_ADDR_MASK)
-                | NPT_PRESENT
-                | NPT_WRITABLE
-                | NPT_USER,
+            value: ((addr.0 as u64) & NPT_PHYS_ADDR_MASK) | NPT_PRESENT | NPT_WRITABLE | NPT_USER,
         }
     }
 
@@ -133,12 +180,9 @@ impl PageTableEntry for AmdNptPTE {
         Self { value: ((addr.0 as u64) & NPT_PHYS_ADDR_MASK) | flags }
     }
 
-    fn new_table(addr: PAddr) -> (pte: Self) {
+    fn new_table(addr: PAddr, _next_level: usize) -> (pte: Self) {
         Self {
-            value: ((addr.0 as u64) & NPT_PHYS_ADDR_MASK)
-                | NPT_PRESENT
-                | NPT_WRITABLE
-                | NPT_USER,
+            value: ((addr.0 as u64) & NPT_PHYS_ADDR_MASK) | NPT_PRESENT | NPT_WRITABLE | NPT_USER,
         }
     }
 
@@ -178,7 +222,7 @@ impl PageTableEntry for AmdNptPTE {
     proof fn lemma_new_wf(addr: SpecPAddr, attr: MemAttr, huge: bool) {
     }
 
-    proof fn lemma_new_table_wf(addr: SpecPAddr) {
+    proof fn lemma_new_table_wf(addr: SpecPAddr, _next_level: nat) {
     }
 
     proof fn lemma_from_u64_wf(val: u64) {
@@ -192,16 +236,35 @@ impl PageTableEntry for AmdNptPTE {
         let flags = Self::spec_descriptor_flags(attr, huge);
         let raw_addr = addr.0 as u64;
         let value = pte.value;
-        let present = if attr.readable { NPT_PRESENT } else { 0 };
-        let writable = if attr.writable { NPT_WRITABLE } else { 0 };
-        let device = if attr.device { NPT_PWT | NPT_PCD } else { 0 };
-        let execute_never = if attr.executable { 0 } else { NPT_NX };
-        let large_page = if huge { NPT_HUGE } else { 0 };
+        let present = if attr.readable {
+            NPT_PRESENT
+        } else {
+            0
+        };
+        let writable = if attr.writable {
+            NPT_WRITABLE
+        } else {
+            0
+        };
+        let device = if attr.device {
+            NPT_PWT | NPT_PCD
+        } else {
+            0
+        };
+        let execute_never = if attr.executable {
+            0
+        } else {
+            NPT_NX
+        };
+        let large_page = if huge {
+            NPT_HUGE
+        } else {
+            0
+        };
 
         assert(raw_addr % 4096 == 0);
         assert(raw_addr < 0x1_0000_0000_0000u64);
-        assert(flags
-            == present | writable | NPT_USER | device | execute_never | large_page);
+        assert(flags == present | writable | NPT_USER | device | execute_never | large_page);
         assert(value == (raw_addr & NPT_PHYS_ADDR_MASK) | flags);
         assert((raw_addr & NPT_PHYS_ADDR_MASK) == raw_addr) by (bit_vector)
             requires
@@ -219,8 +282,7 @@ impl PageTableEntry for AmdNptPTE {
         ;
         assert(flags & NPT_PHYS_ADDR_MASK == 0) by (bit_vector)
             requires
-                flags
-                    == present | writable | NPT_USER | device | execute_never | large_page,
+                flags == present | writable | NPT_USER | device | execute_never | large_page,
                 present == 0 || present == NPT_PRESENT,
                 writable == 0 || writable == NPT_WRITABLE,
                 device == 0 || device == NPT_PWT | NPT_PCD,
@@ -239,8 +301,7 @@ impl PageTableEntry for AmdNptPTE {
         assert(value & NPT_VALID_MASK != 0) by (bit_vector)
             requires
                 value == raw_addr | flags,
-                flags
-                    == present | writable | NPT_USER | device | execute_never | large_page,
+                flags == present | writable | NPT_USER | device | execute_never | large_page,
         ;
         assert(pte.spec_valid());
 
@@ -248,8 +309,7 @@ impl PageTableEntry for AmdNptPTE {
             requires
                 value == raw_addr | flags,
                 raw_addr & 0xfff == 0,
-                flags
-                    == present | writable | NPT_USER | device | execute_never | large_page,
+                flags == present | writable | NPT_USER | device | execute_never | large_page,
                 present == 0 || present == NPT_PRESENT,
                 writable == 0 || writable == NPT_WRITABLE,
                 device == 0 || device == NPT_PWT | NPT_PCD,
@@ -260,8 +320,7 @@ impl PageTableEntry for AmdNptPTE {
             requires
                 value == raw_addr | flags,
                 raw_addr & 0xfff == 0,
-                flags
-                    == present | writable | NPT_USER | device | execute_never | large_page,
+                flags == present | writable | NPT_USER | device | execute_never | large_page,
                 present == 0 || present == NPT_PRESENT,
                 writable == 0 || writable == NPT_WRITABLE,
                 device == 0 || device == NPT_PWT | NPT_PCD,
@@ -272,8 +331,7 @@ impl PageTableEntry for AmdNptPTE {
             requires
                 value == raw_addr | flags,
                 raw_addr & 0xfff == 0,
-                flags
-                    == present | writable | NPT_USER | device | execute_never | large_page,
+                flags == present | writable | NPT_USER | device | execute_never | large_page,
                 present == 0 || present == NPT_PRESENT,
                 writable == 0 || writable == NPT_WRITABLE,
                 device == 0 || device == NPT_PWT | NPT_PCD,
@@ -284,8 +342,7 @@ impl PageTableEntry for AmdNptPTE {
             requires
                 value == raw_addr | flags,
                 raw_addr < 0x1_0000_0000_0000u64,
-                flags
-                    == present | writable | NPT_USER | device | execute_never | large_page,
+                flags == present | writable | NPT_USER | device | execute_never | large_page,
                 present == 0 || present == NPT_PRESENT,
                 writable == 0 || writable == NPT_WRITABLE,
                 device == 0 || device == NPT_PWT | NPT_PCD,
@@ -296,8 +353,7 @@ impl PageTableEntry for AmdNptPTE {
             requires
                 value == raw_addr | flags,
                 raw_addr & 0xfff == 0,
-                flags
-                    == present | writable | NPT_USER | device | execute_never | large_page,
+                flags == present | writable | NPT_USER | device | execute_never | large_page,
                 present == 0 || present == NPT_PRESENT,
                 writable == 0 || writable == NPT_WRITABLE,
                 device == 0 || device == NPT_PWT | NPT_PCD,
@@ -330,14 +386,16 @@ impl PageTableEntry for AmdNptPTE {
         if attr.device {
             assert(device == NPT_PWT | NPT_PCD);
             assert(device & NPT_PCD != 0) by (bit_vector)
-                requires device == NPT_PWT | NPT_PCD,
+                requires
+                    device == NPT_PWT | NPT_PCD,
             ;
             assert(value & NPT_PCD != 0);
             assert(pte.spec_attr().device);
         } else {
             assert(device == 0);
             assert(device & NPT_PCD == 0) by (bit_vector)
-                requires device == 0,
+                requires
+                    device == 0,
             ;
             assert(value & NPT_PCD == 0);
             assert(!pte.spec_attr().device);
@@ -353,8 +411,8 @@ impl PageTableEntry for AmdNptPTE {
         assert(pte.spec_attr() == attr);
     }
 
-    proof fn lemma_new_table_keeps_value(addr: SpecPAddr) {
-        let pte = Self::spec_new_table(addr);
+    proof fn lemma_new_table_keeps_value(addr: SpecPAddr, next_level: nat) {
+        let pte = Self::spec_new_table(addr, next_level);
         let raw_addr = addr.0 as u64;
         let flags = NPT_PRESENT | NPT_WRITABLE | NPT_USER;
         let value = pte.value;
@@ -367,15 +425,12 @@ impl PageTableEntry for AmdNptPTE {
                 raw_addr < 0x1_0000_0000_0000u64,
         ;
         assert(raw_addr & 0xfff == 0) by (bit_vector)
-            requires raw_addr % 4096 == 0,
+            requires
+                raw_addr % 4096 == 0,
         ;
         assert(value == raw_addr | flags) by (bit_vector)
             requires
-                value
-                    == (raw_addr & NPT_PHYS_ADDR_MASK)
-                        | NPT_PRESENT
-                        | NPT_WRITABLE
-                        | NPT_USER,
+                value == (raw_addr & NPT_PHYS_ADDR_MASK) | NPT_PRESENT | NPT_WRITABLE | NPT_USER,
                 raw_addr & NPT_PHYS_ADDR_MASK == raw_addr,
                 flags == NPT_PRESENT | NPT_WRITABLE | NPT_USER,
         ;

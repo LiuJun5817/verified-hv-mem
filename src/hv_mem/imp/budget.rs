@@ -68,6 +68,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> 
             mmu.wf(),
             region_in_budget(self.zone_id as nat, region),
             region.spec_within_vspace(self.vspace_size()),
+            M::spec_supports_attr(region.attr),
     {
         if !region.valid() {
             return Err(());
@@ -259,6 +260,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> 
             iommu_mmu.wf(),
             region_in_budget(self.zone_id as nat, region),
             region.spec_within_vspace(self.vspace_size()),
+            IOM::spec_supports_attr(region.attr),
     {
         if !region.valid() {
             return Err(());
@@ -614,6 +616,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, BudgetProtocol, I, D, IOPT, IOM>
             self.invariants(),
             region_in_budget(zid as nat, region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            M::spec_supports_attr(region.attr),
     {
         // ── Step 1: validate region ────────────────────────────────────────────
         if !region.valid() {
@@ -708,6 +711,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, BudgetProtocol, I, D, IOPT, IOM>
             self.invariants(),
             region_in_budget(zid as nat, region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+            IOM::spec_supports_attr(region.attr),
     {
         if !region.valid() {
             return Err(());

@@ -22,7 +22,6 @@ verus! {
 // interface also permits a valid mapping with no access permissions.  Such an
 // entry is tracked as occupied by its non-zero memory-type field even though an
 // EPT walk cannot use it until at least one of R/W/X is enabled.
-
 /// EPT read permission.
 pub const EPT_R: u64 = 1 << 0;
 
@@ -127,17 +126,18 @@ impl PageTableEntry for IntelEptPTE {
         true
     }
 
+    open spec fn spec_supports_attr(_attr: MemAttr) -> bool {
+        true
+    }
+
     open spec fn spec_new(addr: SpecPAddr, attr: MemAttr, huge: bool) -> Self {
         Self {
-            value: ((addr.0 as u64) & EPT_PHYS_ADDR_MASK)
-                | Self::spec_descriptor_flags(attr, huge),
+            value: ((addr.0 as u64) & EPT_PHYS_ADDR_MASK) | Self::spec_descriptor_flags(attr, huge),
         }
     }
 
-    open spec fn spec_new_table(addr: SpecPAddr) -> Self {
-        Self {
-            value: ((addr.0 as u64) & EPT_PHYS_ADDR_MASK) | EPT_R | EPT_W | EPT_X,
-        }
+    open spec fn spec_new_table(addr: SpecPAddr, _next_level: nat) -> Self {
+        Self { value: ((addr.0 as u64) & EPT_PHYS_ADDR_MASK) | EPT_R | EPT_W | EPT_X }
     }
 
     open spec fn spec_empty() -> Self {
@@ -179,7 +179,7 @@ impl PageTableEntry for IntelEptPTE {
         Self { value }
     }
 
-    fn new_table(addr: PAddr) -> (pte: Self) {
+    fn new_table(addr: PAddr, _next_level: usize) -> (pte: Self) {
         let value = ((addr.0 as u64) & EPT_PHYS_ADDR_MASK) | EPT_R | EPT_W | EPT_X;
         Self { value }
     }
@@ -220,7 +220,7 @@ impl PageTableEntry for IntelEptPTE {
     proof fn lemma_new_wf(addr: SpecPAddr, attr: MemAttr, huge: bool) {
     }
 
-    proof fn lemma_new_table_wf(addr: SpecPAddr) {
+    proof fn lemma_new_table_wf(addr: SpecPAddr, _next_level: nat) {
     }
 
     proof fn lemma_from_u64_wf(val: u64) {
@@ -429,8 +429,8 @@ impl PageTableEntry for IntelEptPTE {
         assert(pte.spec_attr() == attr);
     }
 
-    proof fn lemma_new_table_keeps_value(addr: SpecPAddr) {
-        let pte = Self::spec_new_table(addr);
+    proof fn lemma_new_table_keeps_value(addr: SpecPAddr, next_level: nat) {
+        let pte = Self::spec_new_table(addr, next_level);
         let raw_addr = addr.0 as u64;
         let flags = EPT_R | EPT_W | EPT_X;
         let value = pte.value;

@@ -314,6 +314,9 @@ pub trait MemorySet<PT, A, I> where
     /// Physical address of this memory set's backing page-table root.
     spec fn spec_pt_root(&self) -> SpecPAddr;
 
+    /// Whether the backing page-table entry format preserves these attributes.
+    spec fn spec_supports_attr(attr: MemAttr) -> bool;
+
     /// Return the physical address of this memory set's backing page-table root.
     fn pt_root(&self) -> (res: PAddr)
         requires
@@ -421,6 +424,7 @@ pub trait MemorySet<PT, A, I> where
             region.spec_valid(),
             region.spec_within_vspace(old(self).pt_constants().arch.vspace_size()),
             !old(self)@.overlaps_vmem(region),
+            Self::spec_supports_attr(region.attr),
             mmu.wf(),
             I::valid_zone_id(zone_id),
             s2_tok@.instance_id() == mmu.inst_id(),
