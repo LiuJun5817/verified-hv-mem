@@ -326,12 +326,21 @@ impl PageTableEntry for AmdNptPTE {
             assert(NPT_NX != 0) by (bit_vector);
         }
         assert(pte.spec_attr().executable == attr.executable);
+        assert(value & NPT_PCD == device & NPT_PCD);
         if attr.device {
+            assert(device == NPT_PWT | NPT_PCD);
             assert(device & NPT_PCD != 0) by (bit_vector)
                 requires device == NPT_PWT | NPT_PCD,
             ;
+            assert(value & NPT_PCD != 0);
+            assert(pte.spec_attr().device);
         } else {
             assert(device == 0);
+            assert(device & NPT_PCD == 0) by (bit_vector)
+                requires device == 0,
+            ;
+            assert(value & NPT_PCD == 0);
+            assert(!pte.spec_attr().device);
         }
         assert(pte.spec_attr().device == attr.device);
         if huge {

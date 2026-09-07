@@ -16,7 +16,7 @@ pub use closure::{
     ClosureSpec, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken, ClosureZonesViewToken,
 };
 pub use hyperenclave::{
-    HyperEnclaveEpcRegionsViewToken, HyperEnclaveSpec, HyperEnclaveSpecInstance,
+    HyperEnclavePrivateRegionsViewToken, HyperEnclaveSpec, HyperEnclaveSpecInstance,
     HyperEnclaveZoneIdsToken, HyperEnclaveZoneToken,
 };
 

@@ -3,10 +3,10 @@
 //! The demo separates physical pages into four externally checked classes:
 //! normal-world memory, EPC memory, monitor memory, and the allocator pool.
 //! DMA pages are a subset of normal-world memory.  The class partition is a
-//! trusted configuration fact; assignment of EPC pages to individual enclaves
-//! is dynamic state checked on every enclave insertion. `ALLOCATOR_POOL` is
-//! reserved for page-table and other internal frames and never appears as a
-//! zone-visible region.
+//! trusted configuration fact; assignment of private pages to individual
+//! enclaves is dynamic state checked on every enclave insertion. Enclave EPC
+//! pages and enclave GPT backing frames may be leaf-mapped; VeriHyMem's own
+//! page-table backing frames may not.
 //!
 //! Executable operations for this state machine live in
 //! `hv_mem::imp::hyperenclave`.  Refinement to the policy-neutral
@@ -46,6 +46,11 @@ pub uninterp spec fn monitor_pool() -> Set<PhysPage>;
 /// inserted into a zone's leaf-mapping memory set.
 pub uninterp spec fn allocator_pool() -> Set<PhysPage>;
 
+/// GPT backing frames privately owned by enclave zone `zid`. HyperEnclave's
+/// RAII allocator discipline supplies this dynamic ownership classification at
+/// the integration boundary.
+pub uninterp spec fn enclave_gpt_backing_frames(zid: nat) -> Set<PhysPage>;
+
 /// Pages reachable by the root-cell IOMMU page table.
 pub uninterp spec fn dma_memory() -> Set<PhysPage>;
 
@@ -64,6 +69,14 @@ pub axiom fn memory_classes_pairwise_disjoint()
 pub axiom fn dma_memory_is_normal_memory()
     ensures
         dma_memory().subset_of(normal_memory()),
+;
+
+/// An enclave GPT backing frame must come from the global allocator pool.
+pub axiom fn enclave_gpt_backing_frames_are_allocator_memory()
+    ensures
+        forall|zid: nat, page: PhysPage| #[trigger]
+            enclave_gpt_backing_frames(zid).contains(page)
+                ==> allocator_pool().contains(page),
 ;
 
 /// Physical page occupied by page index `i` of `region`.
@@ -96,6 +109,13 @@ pub open spec fn region_in_allocator_pool(region: MemoryRegion) -> bool {
     he_region_phys_pages(region).subset_of(allocator_pool())
 }
 
+pub open spec fn region_in_enclave_gpt_backing_frames(
+    zid: nat,
+    region: MemoryRegion,
+) -> bool {
+    he_region_phys_pages(region).subset_of(enclave_gpt_backing_frames(zid))
+}
+
 /// Static integration obligation for the global allocator's complete backing
 /// range.  Page-table and internal frames are allocated only from this range;
 /// there is no runtime transition that changes its memory class.
@@ -109,26 +129,27 @@ pub open spec fn region_in_dma_memory(region: MemoryRegion) -> bool {
     he_region_phys_pages(region).subset_of(dma_memory())
 }
 
-/// Enclave leaf mappings come only from private EPC pages. `ALLOCATOR_POOL`
-/// frames back translation structures but are not leaf-mapped into a zone.
-pub open spec fn region_in_enclave_memory(region: MemoryRegion) -> bool {
-    region_in_epc_memory(region)
+/// Enclave leaf mappings come from private EPC pages or the enclave's GPT
+/// backing frames. VeriHyMem's own page-table backing frames are not in either
+/// class and therefore remain outside this authorization.
+pub open spec fn region_in_enclave_memory(zid: nat, region: MemoryRegion) -> bool {
+    region_in_epc_memory(region) || region_in_enclave_gpt_backing_frames(zid, region)
 }
 
 /// Runtime overlap guard used while constructing an enclave. The candidate is
-/// compared with the conservative EPC-region entry for every live enclave.
-/// Root mappings need no such scan because their physical class is statically
-/// disjoint from EPC memory.
+/// compared with the conservative private-region entry for every live
+/// enclave. Root mappings need no such scan because normal memory is statically
+/// disjoint from both EPC memory and the allocator pool.
 pub open spec fn enclave_insert_allowed(
-    epc_regions_view: Map<nat, Set<MemoryRegion>>,
+    private_regions_view: Map<nat, Set<MemoryRegion>>,
     zid: nat,
     region: MemoryRegion,
 ) -> bool {
     &&& zid != root_zone_id()
-    &&& region_in_enclave_memory(region)
+    &&& region_in_enclave_memory(zid, region)
     &&& forall|other_zid: nat, old_region: MemoryRegion|
-        epc_regions_view.contains_key(other_zid) && other_zid != root_zone_id()
-            && #[trigger] epc_regions_view[other_zid].contains(old_region)
+        private_regions_view.contains_key(other_zid) && other_zid != root_zone_id()
+            && #[trigger] private_regions_view[other_zid].contains(old_region)
             ==> !old_region.spec_overlaps_pmem(region)
 }
 
@@ -150,11 +171,11 @@ tokenized_state_machine! {
             #[sharding(map)]
             pub zones: Map<nat, GhostZone>,
 
-            /// Conservative per-zone EPC-region cache used by serialized
+            /// Conservative per-zone private-region cache used by serialized
             /// runtime overlap checks. An entry may contain regions that have
             /// since been removed, but never omits a live enclave region.
             #[sharding(variable)]
-            pub epc_regions_view: Map<nat, Set<MemoryRegion>>,
+            pub private_regions_view: Map<nat, Set<MemoryRegion>>,
         }
 
         #[invariant]
@@ -163,16 +184,16 @@ tokenized_state_machine! {
         }
 
         #[invariant]
-        pub fn inv_epc_regions_view_covers_live_regions(&self) -> bool {
-            &&& self.epc_regions_view.dom() == self.zone_ids
+        pub fn inv_private_regions_view_covers_live_regions(&self) -> bool {
+            &&& self.private_regions_view.dom() == self.zone_ids
             &&& forall|zid: nat| #[trigger]
                 self.zones.contains_key(zid) && zid != root_zone_id() ==> self.zones[zid]
-                    .cpu_mem_set.regions.subset_of(self.epc_regions_view[zid])
+                    .cpu_mem_set.regions.subset_of(self.private_regions_view[zid])
         }
 
-        /// Per-zone class policy.  The normal world may map normal pages and root DMA
-        /// pages.  An enclave may map EPC pages on the CPU side and has no IOMMU
-        /// mappings in the initial integration profile.
+        /// Per-zone class policy. The normal world may map normal pages and root DMA
+        /// pages. An enclave may map EPC or GPT backing frames on the CPU
+        /// side and has no IOMMU mappings in the initial integration profile.
         #[invariant]
         pub fn inv_class_policy(&self) -> bool {
             forall|zid: nat| #[trigger] self.zones.contains_key(zid) ==> {
@@ -187,7 +208,7 @@ tokenized_state_machine! {
                 } else {
                     &&& forall|r: MemoryRegion| #[trigger]
                         self.zones[zid].cpu_mem_set.regions.contains(r)
-                            ==> region_in_enclave_memory(r)
+                            ==> region_in_enclave_memory(zid, r)
                     &&& self.zones[zid].iommu_mem_set.empty()
                 }
             }
@@ -209,7 +230,7 @@ tokenized_state_machine! {
             initialize() {
                 init zone_ids = Set::empty();
                 init zones = Map::empty();
-                init epc_regions_view = Map::empty();
+                init private_regions_view = Map::empty();
             }
         }
 
@@ -227,7 +248,7 @@ tokenized_state_machine! {
                         mappings: Map::empty(),
                     },
                 }];
-                update epc_regions_view = pre.epc_regions_view.insert(zid, Set::empty());
+                update private_regions_view = pre.private_regions_view.insert(zid, Set::empty());
             }
         }
 
@@ -237,17 +258,17 @@ tokenized_state_machine! {
                 require(zone.cpu_mem_set.empty());
                 require(zone.iommu_mem_set.empty());
                 update zone_ids = pre.zone_ids.remove(zid);
-                update epc_regions_view = pre.epc_regions_view.remove(zid);
+                update private_regions_view = pre.private_regions_view.remove(zid);
             }
         }
 
         /// Refresh one entry of the conservative global cache from its
         /// map-sharded zone token. This is a ghost-only operation used by the
-        /// serialized EPC insertion scan.
+        /// serialized private-region insertion scan.
         transition! {
-            synchronize_epc_regions_view(zid: nat) {
+            synchronize_private_regions_view(zid: nat) {
                 remove zones -= [zid => let zone];
-                update epc_regions_view = pre.epc_regions_view.insert(
+                update private_regions_view = pre.private_regions_view.insert(
                     zid,
                     zone.cpu_mem_set.regions,
                 );
@@ -267,17 +288,17 @@ tokenized_state_machine! {
             }
         }
 
-        /// Dynamically assign an EPC region to one enclave.
+        /// Dynamically assign an EPC or GPT backing region to one enclave.
         transition! {
-            cpu_insert_epc_region(zid: nat, region: MemoryRegion) {
+            cpu_insert_enclave_private_region(zid: nat, region: MemoryRegion) {
                 remove zones -= [zid => let zone];
                 require(region.spec_valid());
-                require(region_in_epc_memory(region));
-                require(enclave_insert_allowed(pre.epc_regions_view, zid, region));
+                require(region_in_enclave_memory(zid, region));
+                require(enclave_insert_allowed(pre.private_regions_view, zid, region));
                 require(!zone.cpu_mem_set.regions.contains(region));
                 require(!zone.cpu_mem_set.overlaps_vmem(region));
                 add zones += [zid => zone.cpu_insert_region(region)];
-                update epc_regions_view = pre.epc_regions_view.insert(
+                update private_regions_view = pre.private_regions_view.insert(
                     zid,
                     zone.cpu_insert_region(region).cpu_mem_set.regions,
                 );
@@ -348,18 +369,18 @@ tokenized_state_machine! {
             admit();
         }
 
-        #[inductive(synchronize_epc_regions_view)]
-        fn synchronize_epc_regions_view_inductive(pre: Self, post: Self, zid: nat) {
+        #[inductive(synchronize_private_regions_view)]
+        fn synchronize_private_regions_view_inductive(pre: Self, post: Self, zid: nat) {
             assert(pre.zones.contains_key(zid));
             assert(pre.zone_ids.contains(zid));
-            assert(pre.epc_regions_view.contains_key(zid));
+            assert(pre.private_regions_view.contains_key(zid));
             assert(post.zone_ids == pre.zone_ids);
             assert(post.zones == pre.zones);
-            assert(post.epc_regions_view == pre.epc_regions_view.insert(
+            assert(post.private_regions_view == pre.private_regions_view.insert(
                 zid,
                 pre.zones[zid].cpu_mem_set.regions,
             ));
-            assert(post.epc_regions_view.dom() =~= pre.epc_regions_view.dom());
+            assert(post.private_regions_view.dom() =~= pre.private_regions_view.dom());
         }
 
         #[inductive(cpu_insert_normal_region)]
@@ -371,8 +392,8 @@ tokenized_state_machine! {
             admit();
         }
 
-        #[inductive(cpu_insert_epc_region)]
-        fn cpu_insert_epc_region_inductive(
+        #[inductive(cpu_insert_enclave_private_region)]
+        fn cpu_insert_enclave_private_region_inductive(
             pre: Self,
             post: Self,
             zid: nat,
@@ -427,6 +448,6 @@ pub type HyperEnclaveZoneIdsToken = HyperEnclaveSpec::zone_ids;
 
 pub type HyperEnclaveZoneToken = HyperEnclaveSpec::zones;
 
-pub type HyperEnclaveEpcRegionsViewToken = HyperEnclaveSpec::epc_regions_view;
+pub type HyperEnclavePrivateRegionsViewToken = HyperEnclaveSpec::private_regions_view;
 
 } // verus!

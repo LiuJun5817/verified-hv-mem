@@ -2,17 +2,17 @@
 //!
 //! `NORMAL_MEMORY`, `EPC_MEMORY`, `MONITOR_POOL`, and `ALLOCATOR_POOL` are a
 //! trusted static partition.  The executable policy never changes that
-//! partition and never leaf-maps monitor or allocator pages.  It dynamically
-//! serializes and checks EPC ownership before assigning pages to an enclave.
+//! partition and never leaf-maps monitor or page-table backing pages. It
+//! dynamically serializes private-page assignment to an enclave.
 //!
 //! Locking order for mutations is always:
 //!
 //! `HvMem lock -> one or more Zone locks`.
 //!
-//! Structural changes and EPC insertion take the outer write lock. Zone-local
-//! operations take its read lock, allowing independent zones to make progress
-//! concurrently. The EPC write lock makes its global overlap scan and the
-//! subsequent page-table update atomic with respect to all such operations.
+//! Structural changes and enclave-private insertion take the outer write lock.
+//! Zone-local operations take its read lock, allowing independent zones to
+//! make progress concurrently. The write lock makes the global overlap scan
+//! and subsequent page-table update atomic with respect to all such operations.
 extern crate alloc;
 
 use super::{
@@ -122,9 +122,9 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         Ok(())
     }
 
-    /// Insert an EPC region into this enclave's CPU page table after the
-    /// caller has established the global non-overlap guard.
-    pub fn insert_epc_region(
+    /// Insert an enclave-private region into this enclave's CPU page table
+    /// after the caller has established the global non-overlap guard.
+    fn insert_private_region(
         &self,
         allocator: &GlobalAllocator<A>,
         Tracked(gs): Tracked<&mut HyperEnclaveGlobalState>,
@@ -141,8 +141,8 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
             old(gs).wf(),
             old(gs).zone_ids().contains(self.zone_id as nat),
             mmu.wf(),
-            region_in_epc_memory(region),
-            enclave_insert_allowed(old(gs).epc_regions_view(), self.zone_id as nat, region),
+            region_in_enclave_memory(self.zone_id as nat, region),
+            enclave_insert_allowed(old(gs).private_regions_view(), self.zone_id as nat, region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
         ensures
             gs.wf(),
@@ -181,7 +181,8 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         );
         let tracked new_cpu_mmu_tok = out.get();
         proof {
-            let tracked new_zone_state = gs.cpu_insert_epc_region(zone_state, region);
+            let tracked new_zone_state =
+                gs.cpu_insert_enclave_private_region(zone_state, region);
             content =
             ZoneRwContent::<M, HyperEnclaveProtocol, D> {
                 cpu_mem_set_perm,
@@ -553,13 +554,13 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
             Tracked(inst),
             Tracked(zone_ids_tok),
             Tracked(_zones_tok),
-            Tracked(epc_regions_view_tok),
+            Tracked(private_regions_view_tok),
         ) = HyperEnclaveSpec::Instance::initialize();
         let ghost inst_id = inst.id();
         let tracked global_state = HyperEnclaveGlobalState::new(
             inst,
             zone_ids_tok,
-            epc_regions_view_tok,
+            private_regions_view_tok,
         );
         let tracked content = HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D> {
             zone_list_perm,
@@ -707,11 +708,6 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
 
     /// Assign an EPC region to one enclave and map it in that enclave's CPU
     /// nested page table.
-    ///
-    /// The complete scan is performed while holding the `HvMem` write lock, so
-    /// no competing HyperEnclave mapping operation can pass its check using a
-    /// stale snapshot.  The target zone is included in the scan, preventing
-    /// physical aliases inside one enclave as well as across enclaves.
     pub fn insert_enclave_epc_region(&self, enclave_id: usize, region: MemoryRegion) -> (res: Result<
         (),
         (),
@@ -719,6 +715,51 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
         requires
             self.invariants(),
             region_in_epc_memory(region),
+            region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+        ensures
+            res is Ok ==> self.invariants(),
+    {
+        proof {
+            assert(region_in_enclave_memory(enclave_id as nat, region));
+        }
+        self.insert_enclave_private_region(enclave_id, region)
+    }
+
+    /// Assign an enclave GPT backing region through the private
+    /// allocator-client interface and map it in that enclave's CPU nested page
+    /// table.
+    pub fn insert_enclave_allocator_client_region(
+        &self,
+        enclave_id: usize,
+        region: MemoryRegion,
+    ) -> (res: Result<(), ()>)
+        requires
+            self.invariants(),
+            region_in_enclave_gpt_backing_frames(enclave_id as nat, region),
+            region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
+        ensures
+            res is Ok ==> self.invariants(),
+    {
+        proof {
+            assert(region_in_enclave_memory(enclave_id as nat, region));
+        }
+        self.insert_enclave_private_region(enclave_id, region)
+    }
+
+    /// Assign an authorized private region to one enclave. Both public
+    /// insertion interfaces share this serialized non-overlap proof.
+    ///
+    /// The complete scan is performed while holding the `HvMem` write lock, so
+    /// no competing HyperEnclave mapping operation can pass its check using a
+    /// stale snapshot.  The target zone is included in the scan, preventing
+    /// physical aliases inside one enclave as well as across enclaves.
+    fn insert_enclave_private_region(&self, enclave_id: usize, region: MemoryRegion) -> (res: Result<
+        (),
+        (),
+    >)
+        requires
+            self.invariants(),
+            region_in_enclave_memory(enclave_id as nat, region),
             region.spec_within_vspace(self.lock.k@.pt_constants.arch.vspace_size()),
         ensures
             res is Ok ==> self.invariants(),
@@ -753,11 +794,11 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
                         != zones@[k].zone_id,
                 forall|j: int|
                     0 <= j < i && zones@[j].zone_id != 0 ==> {
-                        &&& content.global_state.epc_regions_view().contains_key(
+                        &&& content.global_state.private_regions_view().contains_key(
                             zones@[j].zone_id as nat,
                         )
                         &&& forall|old_region: MemoryRegion| #[trigger]
-                            content.global_state.epc_regions_view()[zones@[j].zone_id as nat].contains(
+                            content.global_state.private_regions_view()[zones@[j].zone_id as nat].contains(
                                 old_region,
                             ) ==> !old_region.spec_overlaps_pmem(region)
                     },
@@ -768,7 +809,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
                 let (mem_set, zone_guard) = zone.lock_write();
                 let overlaps = mem_set.overlaps_pmem(&region);
                 let ghost scanned_mem_set = mem_set@;
-                let ghost old_view = content.global_state.epc_regions_view();
+                let ghost old_view = content.global_state.private_regions_view();
                 let RwWriteGuard { handle: zone_handle, token: zone_token } = zone_guard;
                 let tracked mut zone_content: ZoneRwContent<M, HyperEnclaveProtocol, D> =
                     zone_token.get();
@@ -790,10 +831,10 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
                     assert(zone.lock.k@.zone_id == zone.zone_id);
                     assert(zone_state.zone_id() == zone.zone_id as nat);
                     let tracked synchronized_zone_state =
-                        content.global_state.synchronize_epc_regions_view(zone_state);
+                        content.global_state.synchronize_private_regions_view(zone_state);
                     assert(synchronized_zone_state.zone_id() == zone.zone_id as nat);
                     assert(synchronized_zone_state.ghost_zone().cpu_mem_set == scanned_mem_set);
-                    assert(content.global_state.epc_regions_view().contains_pair(
+                    assert(content.global_state.private_regions_view().contains_pair(
                         zone.zone_id as nat,
                         synchronized_zone_state.ghost_zone().cpu_mem_set.regions,
                     ));
@@ -818,25 +859,25 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
                 proof {
                     assert(!scanned_mem_set.overlaps_pmem(region));
                     assert forall|old_region: MemoryRegion| #[trigger]
-                        content.global_state.epc_regions_view()[zone.zone_id as nat].contains(
+                        content.global_state.private_regions_view()[zone.zone_id as nat].contains(
                             old_region,
                         ) implies !old_region.spec_overlaps_pmem(region) by {
-                        assert(content.global_state.epc_regions_view()[zone.zone_id as nat]
+                        assert(content.global_state.private_regions_view()[zone.zone_id as nat]
                             == scanned_mem_set.regions);
                     }
                     assert forall|j: int| 0 <= j < i + 1 && zones@[j].zone_id != 0 implies {
-                        &&& content.global_state.epc_regions_view().contains_key(
+                        &&& content.global_state.private_regions_view().contains_key(
                             zones@[j].zone_id as nat,
                         )
                         &&& forall|old_region: MemoryRegion| #[trigger]
-                            content.global_state.epc_regions_view()[zones@[j].zone_id as nat].contains(
+                            content.global_state.private_regions_view()[zones@[j].zone_id as nat].contains(
                                 old_region,
                             ) ==> !old_region.spec_overlaps_pmem(region)
                     } by {
                         if j != i as int {
                             assert(0 <= j < i);
                             assert(zones@[j].zone_id != zones@[i as int].zone_id);
-                            assert(content.global_state.epc_regions_view()[zones@[j].zone_id as nat]
+                            assert(content.global_state.private_regions_view()[zones@[j].zone_id as nat]
                                 == old_view[zones@[j].zone_id as nat]);
                         } else {
                             assert(zones@[j].zone_id == zone.zone_id);
@@ -856,14 +897,14 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
         };
         proof {
             assert(enclave_insert_allowed(
-                content.global_state.epc_regions_view(),
+                content.global_state.private_regions_view(),
                 enclave_id as nat,
                 region,
             )) by {
                 assert forall|other_zid: nat, old_region: MemoryRegion|
-                    content.global_state.epc_regions_view().contains_key(other_zid) && other_zid
+                    content.global_state.private_regions_view().contains_key(other_zid) && other_zid
                         != root_zone_id()
-                        && #[trigger] content.global_state.epc_regions_view()[other_zid].contains(
+                        && #[trigger] content.global_state.private_regions_view()[other_zid].contains(
                     old_region) implies !old_region.spec_overlaps_pmem(region) by {
                     assert(content.global_state.zone_ids().contains(other_zid));
                     let j = choose|j: int|
@@ -874,7 +915,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
                 }
             }
         }
-        let res = zones[i].insert_epc_region(
+        let res = zones[i].insert_private_region(
             &self.allocator,
             Tracked(&mut content.global_state),
             region,
@@ -886,7 +927,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
 
     /// Tear down every CPU mapping of one enclave. Call this before the
     /// policy-independent [`Self::remove_zone`] operation.
-    pub fn clear_enclave_epc_regions(&self, enclave_id: usize) -> (res: Result<(), ()>)
+    pub fn clear_enclave_private_regions(&self, enclave_id: usize) -> (res: Result<(), ()>)
         requires
             self.invariants(),
         ensures

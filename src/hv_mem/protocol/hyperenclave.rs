@@ -1,8 +1,8 @@
 //! Token wrappers for the draft HyperEnclave four-class policy.
 //!
-//! Unlike `BudgetProtocol`, EPC insertion consults a global
-//! `epc_regions_view`.
-//! Only structural operations and EPC insertion mutate that global state.
+//! Unlike `BudgetProtocol`, enclave-private insertion consults a global
+//! `private_regions_view`.
+//! Only structural operations and enclave-private insertion mutate that global state.
 //! Other region operations advance a zone-local token while holding a shared
 //! `HvMem` lock.
 use super::super::spec::GhostZone;
@@ -40,14 +40,14 @@ impl ZoneStateOps for HyperEnclaveZoneState {
 pub tracked struct HyperEnclaveGlobalState {
     pub inst: HyperEnclaveSpecInstance,
     pub zone_ids_tok: HyperEnclaveZoneIdsToken,
-    pub epc_regions_view_tok: HyperEnclaveEpcRegionsViewToken,
+    pub private_regions_view_tok: HyperEnclavePrivateRegionsViewToken,
 }
 
 impl HyperEnclaveGlobalState {
     pub open spec fn wf(&self) -> bool {
         &&& self.zone_ids_tok.instance_id() == self.inst.id()
-        &&& self.epc_regions_view_tok.instance_id() == self.inst.id()
-        &&& self.epc_regions_view().dom() == self.zone_ids()
+        &&& self.private_regions_view_tok.instance_id() == self.inst.id()
+        &&& self.private_regions_view().dom() == self.zone_ids()
     }
 
     pub open spec fn mem_inst_id(&self) -> InstanceId {
@@ -58,27 +58,27 @@ impl HyperEnclaveGlobalState {
         self.zone_ids_tok.value()
     }
 
-    pub open spec fn epc_regions_view(&self) -> Map<nat, Set<MemoryRegion>> {
-        self.epc_regions_view_tok.value()
+    pub open spec fn private_regions_view(&self) -> Map<nat, Set<MemoryRegion>> {
+        self.private_regions_view_tok.value()
     }
 
     pub proof fn new(
         tracked inst: HyperEnclaveSpecInstance,
         tracked zone_ids_tok: HyperEnclaveZoneIdsToken,
-        tracked epc_regions_view_tok: HyperEnclaveEpcRegionsViewToken,
+        tracked private_regions_view_tok: HyperEnclavePrivateRegionsViewToken,
     ) -> (tracked state: Self)
         requires
             zone_ids_tok.instance_id() == inst.id(),
             zone_ids_tok.value() =~= Set::empty(),
-            epc_regions_view_tok.instance_id() == inst.id(),
-            epc_regions_view_tok.value() =~= Map::empty(),
+            private_regions_view_tok.instance_id() == inst.id(),
+            private_regions_view_tok.value() =~= Map::empty(),
         ensures
             state.wf(),
             state.mem_inst_id() == inst.id(),
             state.zone_ids() =~= Set::empty(),
-            state.epc_regions_view() =~= Map::empty(),
+            state.private_regions_view() =~= Map::empty(),
     {
-        Self { inst, zone_ids_tok, epc_regions_view_tok }
+        Self { inst, zone_ids_tok, private_regions_view_tok }
     }
 
     proof fn lemma_insert_existing_keeps_domain(
@@ -108,11 +108,11 @@ impl HyperEnclaveGlobalState {
     )
         requires
             self.zone_ids_tok.instance_id() == self.inst.id(),
-            self.epc_regions_view_tok.instance_id() == self.inst.id(),
+            self.private_regions_view_tok.instance_id() == self.inst.id(),
             old_view.dom() == old_ids,
             old_ids.contains(zid),
             self.zone_ids() == old_ids,
-            self.epc_regions_view() =~= old_view.insert(zid, regions),
+            self.private_regions_view() =~= old_view.insert(zid, regions),
         ensures
             self.wf(),
     {
@@ -127,7 +127,7 @@ impl HyperEnclaveGlobalState {
             self.wf(),
             self.mem_inst_id() == old(self).mem_inst_id(),
             self.zone_ids() =~= old(self).zone_ids().insert(zid),
-            self.epc_regions_view() =~= old(self).epc_regions_view().insert(
+            self.private_regions_view() =~= old(self).private_regions_view().insert(
                 zid,
                 state.ghost_zone().cpu_mem_set.regions,
             ),
@@ -141,7 +141,7 @@ impl HyperEnclaveGlobalState {
         let tracked zone_tok = self.inst.add_zone(
             zid,
             &mut self.zone_ids_tok,
-            &mut self.epc_regions_view_tok,
+            &mut self.private_regions_view_tok,
         );
         HyperEnclaveZoneState { zone_tok }
     }
@@ -156,7 +156,7 @@ impl HyperEnclaveGlobalState {
             self.wf(),
             self.mem_inst_id() == old(self).mem_inst_id(),
             self.zone_ids() =~= old(self).zone_ids().remove(state.zone_id()),
-            self.epc_regions_view() =~= old(self).epc_regions_view().remove(state.zone_id()),
+            self.private_regions_view() =~= old(self).private_regions_view().remove(state.zone_id()),
     {
         let tracked HyperEnclaveZoneState { zone_tok } = state;
         let zid = zone_tok.key();
@@ -164,14 +164,14 @@ impl HyperEnclaveGlobalState {
             zid,
             &mut self.zone_ids_tok,
             zone_tok,
-            &mut self.epc_regions_view_tok,
+            &mut self.private_regions_view_tok,
         );
     }
 
-    /// Refresh one conservative EPC-region entry after reopening the zone
+    /// Refresh one conservative private-region entry after reopening the zone
     /// lock. Abstract memory state is unchanged; the returned equality lets
-    /// the executable scan prove the EPC insertion guard.
-    pub proof fn synchronize_epc_regions_view(
+    /// the executable scan prove the private-region insertion guard.
+    pub proof fn synchronize_private_regions_view(
         tracked &mut self,
         tracked state: HyperEnclaveZoneState,
     ) -> (tracked new_state: HyperEnclaveZoneState)
@@ -186,24 +186,24 @@ impl HyperEnclaveGlobalState {
             new_state.wf(self.mem_inst_id()),
             new_state.zone_id() == state.zone_id(),
             new_state.ghost_zone() == state.ghost_zone(),
-            self.epc_regions_view() =~= old(self).epc_regions_view().insert(
+            self.private_regions_view() =~= old(self).private_regions_view().insert(
                 state.zone_id(),
                 state.ghost_zone().cpu_mem_set.regions,
             ),
-            self.epc_regions_view().contains_pair(
+            self.private_regions_view().contains_pair(
                 state.zone_id(),
                 state.ghost_zone().cpu_mem_set.regions,
             ),
     {
-        let ghost old_view = self.epc_regions_view();
+        let ghost old_view = self.private_regions_view();
         let ghost old_ids = self.zone_ids();
         let ghost old_regions = state.ghost_zone().cpu_mem_set.regions;
         let tracked HyperEnclaveZoneState { zone_tok } = state;
         let zid = zone_tok.key();
-        let tracked new_zone_tok = self.inst.synchronize_epc_regions_view(
+        let tracked new_zone_tok = self.inst.synchronize_private_regions_view(
             zid,
             zone_tok,
-            &mut self.epc_regions_view_tok,
+            &mut self.private_regions_view_tok,
         );
         self.lemma_existing_zone_update_preserves_wf(old_view, old_ids, zid, old_regions);
         HyperEnclaveZoneState { zone_tok: new_zone_tok }
@@ -235,8 +235,9 @@ impl HyperEnclaveGlobalState {
         HyperEnclaveZoneState { zone_tok: new_zone_tok }
     }
 
-    /// Dynamically assign a private EPC region to an enclave.
-    pub proof fn cpu_insert_epc_region(
+    /// Dynamically assign an EPC or private allocator-client region to an
+    /// enclave.
+    pub proof fn cpu_insert_enclave_private_region(
         tracked &mut self,
         tracked state: HyperEnclaveZoneState,
         region: MemoryRegion,
@@ -247,8 +248,8 @@ impl HyperEnclaveGlobalState {
             old(self).zone_ids().contains(state.zone_id()),
             state.zone_id() != root_zone_id(),
             region.spec_valid(),
-            region_in_epc_memory(region),
-            enclave_insert_allowed(old(self).epc_regions_view(), state.zone_id(), region),
+            region_in_enclave_memory(state.zone_id(), region),
+            enclave_insert_allowed(old(self).private_regions_view(), state.zone_id(), region),
             !state.ghost_zone().cpu_mem_set.regions.contains(region),
             !state.ghost_zone().cpu_mem_set.overlaps_vmem(region),
         ensures
@@ -258,21 +259,21 @@ impl HyperEnclaveGlobalState {
             new_state.wf(self.mem_inst_id()),
             new_state.zone_id() == state.zone_id(),
             new_state.ghost_zone() == state.ghost_zone().cpu_insert_region(region),
-            self.epc_regions_view() =~= old(self).epc_regions_view().insert(
+            self.private_regions_view() =~= old(self).private_regions_view().insert(
                 state.zone_id(),
                 state.ghost_zone().cpu_insert_region(region).cpu_mem_set.regions,
             ),
     {
-        let ghost old_view = self.epc_regions_view();
+        let ghost old_view = self.private_regions_view();
         let ghost old_ids = self.zone_ids();
         let ghost new_regions = state.ghost_zone().cpu_insert_region(region).cpu_mem_set.regions;
         let tracked HyperEnclaveZoneState { zone_tok } = state;
         let zid = zone_tok.key();
-        let tracked new_zone_tok = self.inst.cpu_insert_epc_region(
+        let tracked new_zone_tok = self.inst.cpu_insert_enclave_private_region(
             zid,
             region,
             zone_tok,
-            &mut self.epc_regions_view_tok,
+            &mut self.private_regions_view_tok,
         );
         self.lemma_existing_zone_update_preserves_wf(
             old_view,
