@@ -48,9 +48,11 @@ verus! {
 
 use crate::model::convert::*;
 
-impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
+impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
+    IOPT: PageTable<A>,
+    IOM: MemorySet<IOPT, A, I>,
     A: BitmapAllocator,
     I: HardwareInstr,
  {
@@ -80,7 +82,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
 
         if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write(
@@ -90,7 +92,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
             return Err(());
         }
 
-        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -105,7 +107,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         proof {
             let tracked new_zone_state = gs.cpu_insert_normal_region(zone_state, region);
             content =
-            ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+            ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -157,7 +159,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
 
         if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
             || mem_set.overlaps_pmem(&region) {
@@ -165,7 +167,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
             return Err(());
         }
 
-        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -186,7 +188,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
             let tracked new_zone_state =
                 gs.cpu_insert_enclave_private_region(zone_state, region);
             content =
-            ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+            ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -232,14 +234,14 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
 
         if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
 
-        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -260,7 +262,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
             let tracked new_zone_state =
                 gs.cpu_insert_enclave_shared_region(zone_state, region);
             content =
-            ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+            ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -301,7 +303,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
 
         if !mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -309,7 +311,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let ghost old_mem_set = mem_set@;
 
-        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -337,7 +339,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
                 ghost_region,
             );
             content =
-            ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+            ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -375,8 +377,8 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
     {
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D> = token.get();
-        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
+        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -395,7 +397,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         proof {
             let tracked new_zone_state = gs.cpu_clear_enclave_regions(zone_state);
             content =
-            ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+            ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -433,7 +435,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let (mut mem_set, guard) = self.lock_write_iommu();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
 
         if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
             || mem_set.overlaps_pmem(&region) {
@@ -441,7 +443,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
             return Err(());
         }
 
-        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -461,7 +463,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         proof {
             let tracked new_zone_state = gs.iommu_insert_region(zone_state, region);
             content =
-            ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+            ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -498,14 +500,14 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let (mut mem_set, guard) = self.lock_write_iommu();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
 
         if !mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
         let ghost old_mem_set = mem_set@;
-        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -527,7 +529,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
                 old_mem_set.regions.contains(r) && r.vstart@ == region.vstart@;
             let tracked new_zone_state = gs.iommu_remove_region(zone_state, ghost_region);
             content =
-            ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+            ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -562,8 +564,8 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
     {
         let (mut mem_set, guard) = self.lock_write_iommu();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D> = token.get();
-        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+        let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
+        let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -582,7 +584,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
         proof {
             let tracked new_zone_state = gs.iommu_clear_regions(zone_state);
             content =
-            ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+            ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -595,9 +597,11 @@ impl<PT, M, A, I, D> Zone<PT, M, A, HyperEnclaveProtocol, I, D> where
     }
 }
 
-impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
+impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
+    IOPT: PageTable<A>,
+    IOM: MemorySet<IOPT, A, I>,
     A: BitmapAllocator,
     I: HardwareInstr,
  {
@@ -640,7 +644,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
             enclave_private_regions_view_tok,
             shared_regions_tok,
         );
-        let tracked content = HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D> {
+        let tracked content = HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state,
             cpu_vm_ids_tok,
@@ -659,7 +663,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
 
         proof {
             assert(super::mem::mmu_vm_ids(Set::<nat>::empty()) =~= Set::<VmId>::empty());
-            assert(HvMemPred::<PT, M, A, HyperEnclaveProtocol, I, D>::inv(key@, content));
+            assert(HvMemPred::<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM>::inv(key@, content));
         }
         let lock = RwLock::new(key, Tracked(content));
         Self { zone_list, lock, allocator, cpu_mmu, iommu_mmu, pt_constants }
@@ -673,7 +677,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D> { zone_list_perm, .. } =
+        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> { zone_list_perm, .. } =
             content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
         let res = match Self::find_zone_index(zones, zone_id) {
@@ -697,7 +701,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D> { zone_list_perm, .. } =
+        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> { zone_list_perm, .. } =
             content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
         let res = match Self::find_zone_index(zones, zone_id) {
@@ -720,7 +724,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D> {
+        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state,
             ..
@@ -756,7 +760,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let guard = self.lock.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: HvMemRwContent<PT, M, A, HyperEnclaveProtocol, I, D> = token.get();
+        let tracked mut content: HvMemRwContent<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> = token.get();
         let zones = self.zone_list.borrow(Tracked(&content.zone_list_perm));
         let i = match Self::find_zone_index(zones, zone_id) {
             Some(i) => i,
@@ -848,7 +852,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let guard = self.lock.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: HvMemRwContent<PT, M, A, HyperEnclaveProtocol, I, D> = token.get();
+        let tracked mut content: HvMemRwContent<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> = token.get();
         let zones = self.zone_list.borrow(Tracked(&content.zone_list_perm));
         let i = match Self::find_zone_index(zones, enclave_id) {
             Some(i) => i,
@@ -889,7 +893,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let guard = self.lock.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: HvMemRwContent<PT, M, A, HyperEnclaveProtocol, I, D> = token.get();
+        let tracked mut content: HvMemRwContent<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> = token.get();
         let zones = self.zone_list.borrow(Tracked(&content.zone_list_perm));
 
         // Dynamic isolation check: scan every live non-root CPU memory set.
@@ -900,7 +904,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
                 region.spec_valid(),
                 self.invariants(),
                 handle@.instance_id() == self.lock.inst@.id(),
-                HvMemPred::<PT, M, A, HyperEnclaveProtocol, I, D>::inv(self.lock.k@, content),
+                HvMemPred::<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM>::inv(self.lock.k@, content),
                 content.global_state.wf(),
                 forall|zid: nat| #[trigger]
                     content.global_state.zone_ids().contains(zid) == (exists|j: int|
@@ -935,9 +939,9 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
                 );
                 let ghost old_view = content.global_state.enclave_private_regions_view();
                 let RwWriteGuard { handle: zone_handle, token: zone_token } = zone_guard;
-                let tracked mut zone_content: ZoneRwContent<M, HyperEnclaveProtocol, D> =
+                let tracked mut zone_content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> =
                     zone_token.get();
-                let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+                let tracked ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
                     cpu_mem_set_perm,
                     iommu_mem_set_perm,
                     payload_perm,
@@ -967,7 +971,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
                         scanned_private_regions,
                     ));
                     zone_content =
-                    ZoneRwContent::<M, HyperEnclaveProtocol, D> {
+                    ZoneRwContent::<M, HyperEnclaveProtocol, D, IOM> {
                         cpu_mem_set_perm,
                         iommu_mem_set_perm,
                         payload_perm,
@@ -1066,7 +1070,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let guard = self.lock.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: HvMemRwContent<PT, M, A, HyperEnclaveProtocol, I, D> = token.get();
+        let tracked mut content: HvMemRwContent<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> = token.get();
         let zones = self.zone_list.borrow(Tracked(&content.zone_list_perm));
         let i = match Self::find_zone_index(zones, enclave_id) {
             Some(i) => i,
@@ -1098,7 +1102,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D> {
+        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state,
             ..
@@ -1132,7 +1136,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
         }
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D> {
+        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state,
             ..
@@ -1163,7 +1167,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, HyperEnclaveProtocol, I, D> where
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D> {
+        let tracked HvMemRwContent::<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state,
             ..

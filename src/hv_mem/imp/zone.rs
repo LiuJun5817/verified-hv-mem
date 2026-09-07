@@ -65,11 +65,11 @@ pub struct ZoneKey {
 ///
 /// Generic over `P: ZoneGhostProtocol`: the concrete `ZoneState` type depends on
 /// which protocol is in use (`BudgetZoneState` for `BudgetProtocol`).
-pub tracked struct ZoneRwContent<M, P, D = ()> where P: ZoneGhostProtocol {
+pub tracked struct ZoneRwContent<M, P, D = (), IOM = M> where P: ZoneGhostProtocol {
     /// Permission to read/write the zone's exec CPU `mem_set` PCell.
     pub cpu_mem_set_perm: PointsTo<M>,
     /// Permission to read/write the zone's exec IOMMU `mem_set` PCell.
-    pub iommu_mem_set_perm: PointsTo<M>,
+    pub iommu_mem_set_perm: PointsTo<IOM>,
     /// Permission to read/write the zone's opaque integration payload.
     pub payload_perm: PointsTo<D>,
     /// Per-zone ghost token (map-sharded `zones[zid]` for the active spec).
@@ -84,26 +84,32 @@ pub tracked struct ZoneRwContent<M, P, D = ()> where P: ZoneGhostProtocol {
 }
 
 /// Phantom struct that carries the `Zone`-level `InvariantPredicate`.
-pub struct ZonePred<PT, M, A, P, I, D = ()> where
+pub struct ZonePred<PT, M, A, P, I, D = (), IOPT = PT, IOM = M> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
+    IOPT: PageTable<A>,
+    IOM: MemorySet<IOPT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
     I: HardwareInstr,
  {
-    pub _phantom: PhantomData<(PT, M, A, P, I, D)>,
+    pub _phantom: PhantomData<(PT, M, A, P, I, D, IOPT, IOM)>,
 }
 
-impl<PT, M, A, P, I, D> InvariantPredicate<ZoneKey, ZoneRwContent<M, P, D>> for ZonePred<
+impl<PT, M, A, P, I, D, IOPT, IOM> InvariantPredicate<ZoneKey, ZoneRwContent<M, P, D, IOM>> for ZonePred<
     PT,
     M,
     A,
     P,
     I,
     D,
+    IOPT,
+    IOM,
 > where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
+    IOPT: PageTable<A>,
+    IOM: MemorySet<IOPT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
     I: HardwareInstr,
@@ -115,7 +121,7 @@ impl<PT, M, A, P, I, D> InvariantPredicate<ZoneKey, ZoneRwContent<M, P, D>> for 
     /// - `zone_state` belongs to the key's spec instance,
     /// - the ghost zone's CPU/IOMMU views mirror the exec memory sets' views, and
     /// - the CPU and IOMMU `s2map` slice tokens are synced with their memory sets.
-    open spec fn inv(k: ZoneKey, v: ZoneRwContent<M, P, D>) -> bool {
+    open spec fn inv(k: ZoneKey, v: ZoneRwContent<M, P, D, IOM>) -> bool {
         &&& v.cpu_mem_set_perm.is_init()
         &&& v.cpu_mem_set_perm@.pcell === k.cpu_cell_id
         &&& v.cpu_mem_set_perm@.mem_contents->Init_0.invariants()
@@ -159,9 +165,11 @@ impl<PT, M, A, P, I, D> InvariantPredicate<ZoneKey, ZoneRwContent<M, P, D>> for 
 /// Multiple CPUs from the **same zone** can hold read guards concurrently
 /// (e.g., for page-table walks).  A write guard gives exclusive access for
 /// operations that mutate either visible memory set.
-pub struct Zone<PT, M, A, P, I, D = ()> where
+pub struct Zone<PT, M, A, P, I, D = (), IOPT = PT, IOM = M> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
+    IOPT: PageTable<A>,
+    IOM: MemorySet<IOPT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
     I: HardwareInstr,
@@ -169,20 +177,22 @@ pub struct Zone<PT, M, A, P, I, D = ()> where
     /// Exec CPU memory set — written only while the write guard is held.
     pub cpu_mem_set: PCell<M>,
     /// Exec IOMMU memory set — written only while the write guard is held.
-    pub iommu_mem_set: PCell<M>,
+    pub iommu_mem_set: PCell<IOM>,
     /// Opaque integration payload, protected by the same lock as the memory sets.
     pub payload: PCell<D>,
     /// RwLock protecting `ZoneRwContent<M, P, D>` with `ZoneKey` predicate.
-    pub lock: RwLock<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
+    pub lock: RwLock<ZoneKey, ZoneRwContent<M, P, D, IOM>, ZonePred<PT, M, A, P, I, D, IOPT, IOM>>,
     /// Zone identifier.
     pub zone_id: usize,
     /// Phantom data for unused type parameters.
-    pub _phantom: PhantomData<(PT, A, P, I, D)>,
+    pub _phantom: PhantomData<(PT, A, P, I, D, IOPT)>,
 }
 
-impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
+impl<PT, M, A, P, I, D, IOPT, IOM> Zone<PT, M, A, P, I, D, IOPT, IOM> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
+    IOPT: PageTable<A>,
+    IOM: MemorySet<IOPT, A, I>,
     A: BitmapAllocator,
     P: ZoneGhostProtocol,
     I: HardwareInstr,
@@ -232,7 +242,7 @@ impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
     /// Assemble a `Zone` from already-built exec CPU/IOMMU `mem_set`s and its ghost token.
     pub fn new(
         cpu_mem_set: M,
-        iommu_mem_set: M,
+        iommu_mem_set: IOM,
         payload: D,
         zone_id: usize,
         Ghost(mem_inst_id): Ghost<InstanceId>,
@@ -284,7 +294,7 @@ impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
         let (payload_cell, Tracked(payload_perm)) = PCell::new(payload);
 
         // Bundle permission + ghost tokens into the lock content.
-        let tracked zone_rw_content = ZoneRwContent::<M, P, D> {
+        let tracked zone_rw_content = ZoneRwContent::<M, P, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -322,7 +332,7 @@ impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
     /// Acquire exclusive (write) access to this zone's CPU memory set.
     pub fn lock_write(&self) -> (res: (
         M,
-        RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
+        RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D, IOM>, ZonePred<PT, M, A, P, I, D, IOPT, IOM>>,
     ))
         requires
             self.wf(),
@@ -363,15 +373,15 @@ impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
             res.1.token@.iommu_mmu_tok.value().coherent(VmId(self.lock.k@.zone_id as nat)),
     {
         let RwWriteGuard { handle, token } = self.lock.lock_write();
-        let tracked mut content: ZoneRwContent<M, P, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, P, D, IOM> = token.get();
         let mem_set = self.cpu_mem_set.take(Tracked(&mut content.cpu_mem_set_perm));
         (mem_set, RwWriteGuard { handle, token: Tracked(content) })
     }
 
     /// Acquire exclusive (write) access to this zone's IOMMU memory set.
     pub fn lock_write_iommu(&self) -> (res: (
-        M,
-        RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
+        IOM,
+        RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D, IOM>, ZonePred<PT, M, A, P, I, D, IOPT, IOM>>,
     ))
         requires
             self.wf(),
@@ -411,7 +421,7 @@ impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
             res.1.token@.iommu_mmu_tok.value().coherent(VmId(self.lock.k@.zone_id as nat)),
     {
         let RwWriteGuard { handle, token } = self.lock.lock_write();
-        let tracked mut content: ZoneRwContent<M, P, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, P, D, IOM> = token.get();
         let mem_set = self.iommu_mem_set.take(Tracked(&mut content.iommu_mem_set_perm));
         (mem_set, RwWriteGuard { handle, token: Tracked(content) })
     }
@@ -420,7 +430,7 @@ impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
     pub fn unlock_write(
         &self,
         mem_set: M,
-        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
+        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D, IOM>, ZonePred<PT, M, A, P, I, D, IOPT, IOM>>,
     )
         requires
             self.wf(),
@@ -462,7 +472,7 @@ impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
             guard.token@.iommu_mmu_tok.value().coherent(VmId(self.lock.k@.zone_id as nat)),
     {
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, P, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, P, D, IOM> = token.get();
         self.cpu_mem_set.put(Tracked(&mut content.cpu_mem_set_perm), mem_set);
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
     }
@@ -470,8 +480,8 @@ impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
     /// Release the IOMMU write lock and restore the zone invariant.
     pub fn unlock_write_iommu(
         &self,
-        mem_set: M,
-        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
+        mem_set: IOM,
+        guard: RwWriteGuard<ZoneKey, ZoneRwContent<M, P, D, IOM>, ZonePred<PT, M, A, P, I, D, IOPT, IOM>>,
     )
         requires
             self.wf(),
@@ -510,7 +520,7 @@ impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
             guard.token@.iommu_mmu_tok.value().coherent(VmId(self.lock.k@.zone_id as nat)),
     {
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, P, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, P, D, IOM> = token.get();
         self.iommu_mem_set.put(Tracked(&mut content.iommu_mem_set_perm), mem_set);
         self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
     }
@@ -518,8 +528,8 @@ impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
     /// Acquire shared (read) access to this zone's state.
     pub fn lock_read(&self) -> (res: RwReadGuard<
         ZoneKey,
-        ZoneRwContent<M, P, D>,
-        ZonePred<PT, M, A, P, I, D>,
+        ZoneRwContent<M, P, D, IOM>,
+        ZonePred<PT, M, A, P, I, D, IOPT, IOM>,
     >)
         requires
             self.wf(),
@@ -532,7 +542,7 @@ impl<PT, M, A, P, I, D> Zone<PT, M, A, P, I, D> where
     /// Release the read lock acquired by `lock_read`.
     pub fn unlock_read(
         &self,
-        guard: RwReadGuard<ZoneKey, ZoneRwContent<M, P, D>, ZonePred<PT, M, A, P, I, D>>,
+        guard: RwReadGuard<ZoneKey, ZoneRwContent<M, P, D, IOM>, ZonePred<PT, M, A, P, I, D, IOPT, IOM>>,
     )
         requires
             self.wf(),

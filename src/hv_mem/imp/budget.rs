@@ -40,9 +40,11 @@ use crate::model::convert::*;
 /// `BudgetSpec` region transitions are zone-local: they only consume/produce the
 /// per-zone `zones[zid]` map-sharded token and access `BudgetSpecInstance`
 /// (constant-sharded) as a shared reference.
-impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
+impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
+    IOPT: PageTable<A>,
+    IOM: MemorySet<IOPT, A, I>,
     A: BitmapAllocator,
     I: HardwareInstr,
  {
@@ -72,7 +74,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D, IOM> = token.get();
 
         if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
             || mem_set.overlaps_pmem(&region) {
@@ -83,7 +85,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         // Pull this zone's CPU MMU slice token out of the lock content so it can be
         // threaded through `mem_set.insert` (which fires `map`/`map_dsb` per page).
 
-        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
+        let tracked ZoneRwContent::<M, BudgetProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -104,7 +106,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         proof {
             let tracked new_zone_state = BudgetProtocol::cpu_insert_region(gs, zone_state, region);
             content =
-            ZoneRwContent::<M, BudgetProtocol, D> {
+            ZoneRwContent::<M, BudgetProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -141,7 +143,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         }
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D, IOM> = token.get();
 
         if !mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
@@ -152,7 +154,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         // invariant `cpu_mmu_tok.value().s2map == pt_s2map_inner(mem_set@.mappings)` is the
         // sync point, threaded through `mem_set.remove`, which fires
         // `unmap_invalidate` (forced `DSB`+`TLBI`) per page.
-        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
+        let tracked ZoneRwContent::<M, BudgetProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -179,7 +181,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
                 ghost_region,
             );
             content =
-            ZoneRwContent::<M, BudgetProtocol, D> {
+            ZoneRwContent::<M, BudgetProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -210,8 +212,8 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
     {
         let (mut mem_set, guard) = self.lock_write();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
-        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D, IOM> = token.get();
+        let tracked ZoneRwContent::<M, BudgetProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -225,7 +227,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         proof {
             let tracked new_zone_state = BudgetProtocol::cpu_clear(gs, zone_state);
             content =
-            ZoneRwContent::<M, BudgetProtocol, D> {
+            ZoneRwContent::<M, BudgetProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -263,7 +265,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         }
         let (mut mem_set, guard) = self.lock_write_iommu();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D, IOM> = token.get();
 
         if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
             || mem_set.overlaps_pmem(&region) {
@@ -274,7 +276,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         // Pull the IOMMU slice token out and thread it through `mem_set.insert` with
         // `iommu = true`, which fires the SMMU `iommu_map_sync` per inserted page.
 
-        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
+        let tracked ZoneRwContent::<M, BudgetProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -299,7 +301,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
                 region,
             );
             content =
-            ZoneRwContent::<M, BudgetProtocol, D> {
+            ZoneRwContent::<M, BudgetProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -335,14 +337,14 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         }
         let (mut mem_set, guard) = self.lock_write_iommu();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D, IOM> = token.get();
 
         if !mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
         let ghost old_mem_set = mem_set@;
-        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
+        let tracked ZoneRwContent::<M, BudgetProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -369,7 +371,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
                 ghost_region,
             );
             content =
-            ZoneRwContent::<M, BudgetProtocol, D> {
+            ZoneRwContent::<M, BudgetProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -400,8 +402,8 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
     {
         let (mut mem_set, guard) = self.lock_write_iommu();
         let RwWriteGuard { handle, token } = guard;
-        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D> = token.get();
-        let tracked ZoneRwContent::<M, BudgetProtocol, D> {
+        let tracked mut content: ZoneRwContent<M, BudgetProtocol, D, IOM> = token.get();
+        let tracked ZoneRwContent::<M, BudgetProtocol, D, IOM> {
             cpu_mem_set_perm,
             iommu_mem_set_perm,
             payload_perm,
@@ -421,7 +423,7 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
         proof {
             let tracked new_zone_state = BudgetProtocol::iommu_clear(gs, zone_state);
             content =
-            ZoneRwContent::<M, BudgetProtocol, D> {
+            ZoneRwContent::<M, BudgetProtocol, D, IOM> {
                 cpu_mem_set_perm,
                 iommu_mem_set_perm,
                 payload_perm,
@@ -444,9 +446,11 @@ impl<PT, M, A, I, D> Zone<PT, M, A, BudgetProtocol, I, D> where
 /// `zone_ids_tok` is never modified, so no HvMem write lock is required.
 ///
 /// Locking order: HvMem read lock → zone write lock.
-impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
+impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> where
     PT: PageTable<A>,
     M: MemorySet<PT, A, I>,
+    IOPT: PageTable<A>,
+    IOM: MemorySet<IOPT, A, I>,
     A: BitmapAllocator,
     I: HardwareInstr,
  {
@@ -476,7 +480,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
         let ghost inst_id = inst.id();
 
         let tracked budget_global_state = BudgetGlobalState { inst, zone_ids_tok };
-        let tracked content = HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+        let tracked content = HvMemRwContent::<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state: budget_global_state,
             cpu_vm_ids_tok,
@@ -495,7 +499,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
 
         proof {
             assert(super::mem::mmu_vm_ids(Set::<nat>::empty()) =~= Set::<VmId>::empty());
-            assert(HvMemPred::<PT, M, A, BudgetProtocol, I, D>::inv(key@, content));
+            assert(HvMemPred::<PT, M, A, BudgetProtocol, I, D, IOPT, IOM>::inv(key@, content));
         }
         let lock = RwLock::new(key, Tracked(content));
         Self { zone_list, lock, allocator, cpu_mmu, iommu_mmu, pt_constants }
@@ -508,7 +512,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
     {
         let guard = self.lock.lock_read();
         let Tracked(hv_content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state,
             ..
@@ -535,7 +539,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
     {
         let guard = self.lock.lock_read();
         let Tracked(hv_content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state,
             ..
@@ -563,7 +567,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> { zone_list_perm, .. } =
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> { zone_list_perm, .. } =
             content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
@@ -584,7 +588,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
     {
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> { zone_list_perm, .. } =
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> { zone_list_perm, .. } =
             content;
         let zones = self.zone_list.borrow(Tracked(&zone_list_perm));
 
@@ -619,7 +623,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
 
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state,
             ..
@@ -669,7 +673,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
 
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state,
             ..
@@ -710,7 +714,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
         }
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state,
             ..
@@ -744,7 +748,7 @@ impl<PT, M, A, I, D> HvMem<PT, M, A, BudgetProtocol, I, D> where
         }
         let guard = self.lock.lock_read();
         let Tracked(content) = guard.borrow(&self.lock);
-        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D> {
+        let tracked HvMemRwContent::<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> {
             zone_list_perm,
             global_state,
             ..
