@@ -5,7 +5,7 @@
 //!
 //! ```text
 //!         software                              hardware
-//!   SoftwareRefinement   (software.rs)    HardwareRefinement   (hardware.rs)
+//!   SoftwareRefinement   (software/)      HardwareRefinement   (hardware.rs)
 //!     impl for SoftwareSpec                 impl for HardwareSpec
 //!      (BudgetSpec::State)               (MmuSpec::State, MmuSpec::State)
 //!         │ view                                 │ view
@@ -13,20 +13,21 @@
 //!         └────────────► MachineState ◄──────────┘   (machine.rs)
 //! ```
 //!
-//! Each `*Refinement` is a **ghost contract**: the tokenized SM's own `State` is the
-//! abstract state, the model `*View` is its `View` projection, and `invariants()` is
-//! the SM's real, inductively-proven `invariant()` — so every reachable state the
-//! impl drives projects to a `wf` (hence secure) view.  The contract methods fire
-//! the macro transitions via `*Spec::take_step::*`.
+//! Each `*Refinement` is a **ghost contract**. Software policies expose their
+//! projection through `SoftwareRefinement::view`, independently of Verus's `View`
+//! trait; `invariants()` is the policy TSM's inductively maintained invariant.
+//! Thus every reachable policy state projects to a well-formed software view.
 //! # Module layout
 //!
 //! All refinement proofs, one per layer/side:
 //!
 //! | module       | role                                                                 |
 //! |--------------|----------------------------------------------------------------------|
-//! | [`software`] | `SoftwareSpec` -> `SoftwareView` projection + `SoftwareRefinement` contract/impl |
+//! | [`software`] | common software helpers plus policy-specific BudgetSpec/HyperEnclave refinements |
 //! | [`hardware`] | `HardwareSpec` projection + `HardwareRefinement` contract/impl        |
-//! | [`machine`]  | `(SoftwareView, HardwareView)` → `MachineState`, incl. the sync bridge |
+//! | [`sync`]     | concrete BudgetSpec/MMU token synchronization bridge                   |
+//! | [`machine`]  | view-only `(SoftwareView, HardwareView)` → `MachineState`              |
 pub mod hardware;
 pub mod machine;
 pub mod software;
+pub mod sync;

@@ -5,6 +5,24 @@ use crate::model::types::{GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 
 verus! {
 
+/// Policy-neutral software operations produced by a concrete memory-policy
+/// refinement. Region operations retain their policy-independent private/shared
+/// classification; their decomposition into per-page machine actions belongs to
+/// the SW+HW refinement layer.
+#[derive(PartialEq, Eq, Structural, Copy, Clone)]
+pub enum SoftwareOp {
+    AddVm(VmId),
+    RemoveVm(VmId),
+    CpuInsertZonePrivateRegion(Region),
+    CpuRemoveZonePrivateRegion(Region),
+    CpuInsertGlobalSharedRegion(Region),
+    CpuRemoveGlobalSharedRegion(Region),
+    IommuInsertZonePrivateRegion(Region),
+    IommuRemoveZonePrivateRegion(Region),
+    IommuInsertGlobalSharedRegion(Region),
+    IommuRemoveGlobalSharedRegion(Region),
+}
+
 // ---------------------------------------------------------------------------
 // Software-only state transitions
 //
@@ -594,6 +612,75 @@ impl SoftwareView {
             region.entries().contains_key(k) ==> s1.iommu_s2_map.contains_key(k)
                 && s1.iommu_s2_map[k] == region.entries()[k])
     }
+
+    /// Dispatch one policy-neutral software operation. Enabledness is part of
+    /// the relation so a refinement trace carries every premise needed by the
+    /// view-level SW+HW composition proof.
+    pub open spec fn step(s1: Self, s2: Self, op: SoftwareOp) -> bool {
+        match op {
+            SoftwareOp::AddVm(vm) => {
+                Self::add_vm_enabled(s1, vm) && Self::add_vm_step(s1, s2, vm)
+            },
+            SoftwareOp::RemoveVm(vm) => {
+                Self::remove_vm_enabled(s1, vm) && Self::remove_vm_step(s1, s2, vm)
+            },
+            SoftwareOp::CpuInsertZonePrivateRegion(region) => {
+                Self::cpu_insert_zone_private_region_enabled(s1, region)
+                    && Self::cpu_insert_zone_private_region_step(s1, s2, region)
+            },
+            SoftwareOp::CpuRemoveZonePrivateRegion(region) => {
+                Self::cpu_remove_zone_private_region_enabled(s1, region)
+                    && Self::cpu_remove_zone_private_region_step(s1, s2, region)
+            },
+            SoftwareOp::CpuInsertGlobalSharedRegion(region) => {
+                Self::cpu_insert_global_shared_region_enabled(s1, region)
+                    && Self::cpu_insert_global_shared_region_step(s1, s2, region)
+            },
+            SoftwareOp::CpuRemoveGlobalSharedRegion(region) => {
+                Self::cpu_remove_global_shared_region_enabled(s1, region)
+                    && Self::cpu_remove_global_shared_region_step(s1, s2, region)
+            },
+            SoftwareOp::IommuInsertZonePrivateRegion(region) => {
+                Self::iommu_insert_zone_private_region_enabled(s1, region)
+                    && Self::iommu_insert_zone_private_region_step(s1, s2, region)
+            },
+            SoftwareOp::IommuRemoveZonePrivateRegion(region) => {
+                Self::iommu_remove_zone_private_region_enabled(s1, region)
+                    && Self::iommu_remove_zone_private_region_step(s1, s2, region)
+            },
+            SoftwareOp::IommuInsertGlobalSharedRegion(region) => {
+                Self::iommu_insert_global_shared_region_enabled(s1, region)
+                    && Self::iommu_insert_global_shared_region_step(s1, s2, region)
+            },
+            SoftwareOp::IommuRemoveGlobalSharedRegion(region) => {
+                Self::iommu_remove_global_shared_region_enabled(s1, region)
+                    && Self::iommu_remove_global_shared_region_step(s1, s2, region)
+            },
+        }
+    }
+
+    /// Execute a finite sequence of policy-neutral software operations.
+    pub open spec fn run_ops(start: Self, end: Self, ops: Seq<SoftwareOp>) -> bool
+        decreases ops.len(),
+    {
+        if ops.len() == 0 {
+            start == end
+        } else {
+            exists|next: Self|
+                Self::step(start, next, ops[0])
+                    && Self::run_ops(next, end, ops.skip(1))
+        }
+    }
+}
+
+/// Policy-neutral software execution relation used by every concrete memory
+/// policy refinement.
+pub open spec fn run_software_ops(
+    start: SoftwareView,
+    end: SoftwareView,
+    ops: Seq<SoftwareOp>,
+) -> bool {
+    SoftwareView::run_ops(start, end, ops)
 }
 
 } // verus!

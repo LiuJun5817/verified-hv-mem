@@ -242,10 +242,9 @@ pub proof fn lemma_remove_region_preserves_pmem_disjoint(
         memory_set_regions_pmem_disjoint(mem_set.remove_region_exact(region)),
 {
     let new_mem_set = mem_set.remove_region_exact(region);
-    assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
+    assert(forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
         new_mem_set.regions.contains(r1) && #[trigger] new_mem_set.regions.contains(r2) && r1
-            != r2 implies !r1.spec_overlaps_pmem(r2) by {
-    }
+            != r2 ==> !r1.spec_overlaps_pmem(r2));
 }
 
 /// A valid normal-memory region cannot also be enclave-private memory.
@@ -257,7 +256,7 @@ pub proof fn lemma_normal_region_not_enclave_memory(zid: nat, region: MemoryRegi
         !region_in_enclave_memory(zid, region),
 {
     let page = he_region_phys_page(region, 0);
-    assert(he_region_phys_pages(region).contains(page)) by { }
+    assert(he_region_phys_pages(region).contains(page));
     memory_classes_pairwise_disjoint();
     enclave_gpt_backing_frames_are_allocator_memory();
 }
@@ -583,9 +582,9 @@ tokenized_state_machine! {
 
         #[inductive(add_zone)]
         fn add_zone_inductive(pre: Self, post: Self, zid: nat) {
-            assert forall|other: nat| #[trigger]
-                post.zones.contains_key(other) implies post.shared_regions[other]
-                    == live_shared_regions(other, post.zones[other]) by { }
+            assert(forall|other: nat| #[trigger]
+                post.zones.contains_key(other) ==> post.shared_regions[other]
+                    == live_shared_regions(other, post.zones[other]));
         }
 
         #[inductive(remove_zone)]
@@ -634,8 +633,8 @@ tokenized_state_machine! {
             let new_zone = old_zone.cpu_insert_region(region);
             lemma_enclave_region_not_normal_memory(zid, region);
             assert(post.enclave_private_regions_view.dom() =~= post.zone_ids);
-            assert forall|other: nat| #[trigger]
-                post.zones.contains_key(other) implies {
+            assert(forall|other: nat| #[trigger]
+                post.zones.contains_key(other) ==> {
                     &&& live_enclave_private_regions(other, post.zones[other]).subset_of(
                         post.enclave_private_regions_view[other],
                     )
@@ -645,12 +644,12 @@ tokenized_state_machine! {
                             &&& cached.spec_valid()
                             &&& region_in_enclave_memory(other, cached)
                         }
-                } by { }
+                });
             assert(live_shared_regions(zid, new_zone)
                 =~= live_shared_regions(zid, old_zone));
-            assert forall|other: nat| #[trigger]
-                post.zones.contains_key(other) implies post.shared_regions[other]
-                    == live_shared_regions(other, post.zones[other]) by { }
+            assert(forall|other: nat| #[trigger]
+                post.zones.contains_key(other) ==> post.shared_regions[other]
+                    == live_shared_regions(other, post.zones[other]));
             assert forall|zid1: nat, zid2: nat, r1: MemoryRegion, r2: MemoryRegion|
                 post.zones.contains_key(zid1) && post.zones.contains_key(zid2)
                     && zid1 != root_zone_id() && zid2 != root_zone_id()

@@ -288,6 +288,16 @@ tokenized_state_machine! {
                 )
         }
 
+        /// Reachable memory sets contain finitely many region-sized operation
+        /// units, so an atomic clear can refine to a finite removal trace.
+        #[invariant]
+        pub fn inv_region_sets_finite(&self) -> bool {
+            forall|zid: nat| #[trigger] self.zones.contains_key(zid) ==> {
+                &&& self.zones[zid].cpu_mem_set.regions.finite()
+                &&& self.zones[zid].iommu_mem_set.regions.finite()
+            }
+        }
+
         init! {
             initialize() {
                 init zone_ids = Set::empty();
