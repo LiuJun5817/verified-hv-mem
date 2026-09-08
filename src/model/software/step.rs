@@ -13,14 +13,14 @@ verus! {
 pub enum SoftwareOp {
     AddVm(VmId),
     RemoveVm(VmId),
-    CpuInsertZonePrivateRegion(Region),
-    CpuRemoveZonePrivateRegion(Region),
-    CpuInsertGlobalSharedRegion(Region),
-    CpuRemoveGlobalSharedRegion(Region),
-    IommuInsertZonePrivateRegion(Region),
-    IommuRemoveZonePrivateRegion(Region),
-    IommuInsertGlobalSharedRegion(Region),
-    IommuRemoveGlobalSharedRegion(Region),
+    CpuInsertPrivateRegion(Region),
+    CpuRemovePrivateRegion(Region),
+    CpuInsertSharedRegion(Region),
+    CpuRemoveSharedRegion(Region),
+    IommuInsertPrivateRegion(Region),
+    IommuRemovePrivateRegion(Region),
+    IommuInsertSharedRegion(Region),
+    IommuRemoveSharedRegion(Region),
 }
 
 // ---------------------------------------------------------------------------
@@ -32,9 +32,9 @@ pub enum SoftwareOp {
 // ---------------------------------------------------------------------------
 impl SoftwareView {
     /// Atomically install one CPU mapping and add its physical target to `vm`'s
-    /// VM-private projection. The page may already be private to the same VM's
-    /// IOMMU, but is absent from every CPU-private and shared projection.
-    pub open spec fn map_vm_private_step(
+    /// S2-Private projection. The page may already be IOMMU-Private for the same
+    /// VM, but is absent from every S2-Private and Shared projection.
+    pub open spec fn map_s2_private_step(
         s1: SoftwareView,
         s2: SoftwareView,
         vm: VmId,
@@ -45,23 +45,23 @@ impl SoftwareView {
         &&& s1.all_vms.contains(vm)
         &&& !s1.s2_map.contains_key(key)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms.contains(v) ==> !s1.vm_owned[v].contains(entry.page))
-        &&& !s1.vm_shared.contains(entry.page)
+            s1.all_vms.contains(v) ==> !s1.s2_private_pages[v].contains(entry.page))
+        &&& !s1.s2_shared_pages.contains(entry.page)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms.contains(v) && v != vm ==> !s1.iommu_owned[v].contains(entry.page))
-        &&& !s1.iommu_shared.contains(entry.page)
+            s1.all_vms.contains(v) && v != vm ==> !s1.iommu_private_pages[v].contains(entry.page))
+        &&& !s1.iommu_shared_pages.contains(entry.page)
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].insert(entry.page))
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages.insert(vm, s1.s2_private_pages[vm].insert(entry.page))
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == s1.s2_map.insert(key, entry)
         &&& s2.iommu_s2_map == s1.iommu_s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
     }
 
     /// Atomically remove one CPU mapping and its physical target from `vm`'s
-    /// VM-private projection. No other CPU mapping may target the page.
-    pub open spec fn unmap_vm_private_step(
+    /// S2-Private projection. No other CPU mapping may target the page.
+    pub open spec fn unmap_s2_private_step(
         s1: SoftwareView,
         s2: SoftwareView,
         vm: VmId,
@@ -73,24 +73,24 @@ impl SoftwareView {
         &&& s1.all_vms.contains(vm)
         &&& s1.s2_map.contains_key(key)
         &&& s1.s2_map[key].page == page
-        &&& s1.vm_owned[vm].contains(page)
-        &&& !s1.vm_shared.contains(page)
+        &&& s1.s2_private_pages[vm].contains(page)
+        &&& !s1.s2_shared_pages.contains(page)
         &&& (forall|k: VmPageKey| #[trigger]
             post_map.contains_key(k) ==> post_map[k].page != page)
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].remove(page))
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages.insert(vm, s1.s2_private_pages[vm].remove(page))
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == post_map
         &&& s2.iommu_s2_map == s1.iommu_s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
     }
 
     /// Atomically install one IOMMU mapping and add its target to `vm`'s
-    /// VM-private IOMMU projection. The same VM may already map the page on the
-    /// CPU side, and the page may be CPU-shared; other VMs and the IOMMU-shared
+    /// IOMMU-Private projection. The same VM may already map the page on the CPU
+    /// side, and the page may be S2-Shared; other VMs and the IOMMU-Shared
     /// projection may not classify it.
-    pub open spec fn iommu_map_vm_private_step(
+    pub open spec fn map_iommu_private_step(
         s1: SoftwareView,
         s2: SoftwareView,
         vm: VmId,
@@ -101,23 +101,23 @@ impl SoftwareView {
         &&& s1.all_vms.contains(vm)
         &&& !s1.iommu_s2_map.contains_key(key)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms.contains(v) ==> !s1.iommu_owned[v].contains(entry.page))
+            s1.all_vms.contains(v) ==> !s1.iommu_private_pages[v].contains(entry.page))
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms.contains(v) && v != vm ==> !s1.vm_owned[v].contains(entry.page))
-        &&& !s1.iommu_shared.contains(entry.page)
+            s1.all_vms.contains(v) && v != vm ==> !s1.s2_private_pages[v].contains(entry.page))
+        &&& !s1.iommu_shared_pages.contains(entry.page)
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == s1.s2_map
-        &&& s2.iommu_owned
-            == s1.iommu_owned.insert(vm, s1.iommu_owned[vm].insert(entry.page))
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages
+            == s1.iommu_private_pages.insert(vm, s1.iommu_private_pages[vm].insert(entry.page))
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
         &&& s2.iommu_s2_map == s1.iommu_s2_map.insert(key, entry)
     }
 
     /// Atomically remove one IOMMU mapping and its target from `vm`'s
-    /// VM-private IOMMU projection. No other IOMMU mapping may target the page.
-    pub open spec fn iommu_unmap_vm_private_step(
+    /// IOMMU-Private projection. No other IOMMU mapping may target the page.
+    pub open spec fn unmap_iommu_private_step(
         s1: SoftwareView,
         s2: SoftwareView,
         vm: VmId,
@@ -129,25 +129,25 @@ impl SoftwareView {
         &&& s1.all_vms.contains(vm)
         &&& s1.iommu_s2_map.contains_key(key)
         &&& s1.iommu_s2_map[key].page == page
-        &&& s1.iommu_owned[vm].contains(page)
-        &&& !s1.iommu_shared.contains(page)
+        &&& s1.iommu_private_pages[vm].contains(page)
+        &&& !s1.iommu_shared_pages.contains(page)
         &&& (forall|k: VmPageKey| #[trigger]
             post_map.contains_key(k) ==> post_map[k].page != page)
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == s1.s2_map
-        &&& s2.iommu_owned
-            == s1.iommu_owned.insert(vm, s1.iommu_owned[vm].remove(page))
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages
+            == s1.iommu_private_pages.insert(vm, s1.iommu_private_pages[vm].remove(page))
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
         &&& s2.iommu_s2_map == post_map
     }
 
-    /// Atomically install one CPU mapping to global-shared memory and add its
-    /// target to the dynamic CPU-shared projection. Existing shared aliases and
-    /// IOMMU-private ownership are permitted, while no CPU-private projection may
+    /// Atomically install one CPU mapping to shared memory and add its
+    /// target to the dynamic S2-Shared projection. Existing shared aliases and
+    /// IOMMU-Private classifications are permitted, while no S2-Private projection may
     /// contain the target.
-    pub open spec fn map_global_shared_step(
+    pub open spec fn map_s2_shared_step(
         s1: SoftwareView,
         s2: SoftwareView,
         vm: VmId,
@@ -158,19 +158,19 @@ impl SoftwareView {
         &&& s1.all_vms.contains(vm)
         &&& !s1.s2_map.contains_key(key)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms.contains(v) ==> !s1.vm_owned[v].contains(entry.page))
+            s1.all_vms.contains(v) ==> !s1.s2_private_pages[v].contains(entry.page))
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared.insert(entry.page)
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages.insert(entry.page)
         &&& s2.s2_map == s1.s2_map.insert(key, entry)
         &&& s2.iommu_s2_map == s1.iommu_s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
     }
 
-    /// Atomically remove one CPU global-shared mapping. Its physical target
-    /// remains CPU-shared exactly when a surviving CPU mapping still aliases it.
-    pub open spec fn unmap_global_shared_step(
+    /// Atomically remove one CPU shared mapping. Its physical target
+    /// remains S2-Shared exactly when a surviving CPU mapping still aliases it.
+    pub open spec fn unmap_s2_shared_step(
         s1: SoftwareView,
         s2: SoftwareView,
         vm: VmId,
@@ -183,19 +183,19 @@ impl SoftwareView {
             post_map.contains_key(k) && post_map[k].page == page;
         &&& s1.all_vms.contains(vm)
         &&& s1.s2_map.contains_key(key)
-        &&& s1.vm_shared.contains(page)
+        &&& s1.s2_shared_pages.contains(page)
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == if aliased { s1.vm_shared } else { s1.vm_shared.remove(page) }
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == if aliased { s1.s2_shared_pages } else { s1.s2_shared_pages.remove(page) }
         &&& s2.s2_map == post_map
         &&& s2.iommu_s2_map == s1.iommu_s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
     }
 
-    /// Atomically install one IOMMU mapping to global-shared memory and add its
-    /// target to the dynamic IOMMU-shared projection.
-    pub open spec fn iommu_map_global_shared_step(
+    /// Atomically install one IOMMU mapping to shared memory and add its
+    /// target to the dynamic IOMMU-Shared projection.
+    pub open spec fn map_iommu_shared_step(
         s1: SoftwareView,
         s2: SoftwareView,
         vm: VmId,
@@ -206,20 +206,20 @@ impl SoftwareView {
         &&& s1.all_vms.contains(vm)
         &&& !s1.iommu_s2_map.contains_key(key)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms.contains(v) ==> !s1.vm_owned[v].contains(entry.page)
-                && !s1.iommu_owned[v].contains(entry.page))
+            s1.all_vms.contains(v) ==> !s1.s2_private_pages[v].contains(entry.page)
+                && !s1.iommu_private_pages[v].contains(entry.page))
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == s1.s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared.insert(entry.page)
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages.insert(entry.page)
         &&& s2.iommu_s2_map == s1.iommu_s2_map.insert(key, entry)
     }
 
-    /// Atomically remove one IOMMU global-shared mapping. Its target remains
-    /// IOMMU-shared exactly when a surviving IOMMU mapping still aliases it.
-    pub open spec fn iommu_unmap_global_shared_step(
+    /// Atomically remove one IOMMU shared mapping. Its target remains
+    /// IOMMU-Shared exactly when a surviving IOMMU mapping still aliases it.
+    pub open spec fn unmap_iommu_shared_step(
         s1: SoftwareView,
         s2: SoftwareView,
         vm: VmId,
@@ -232,16 +232,16 @@ impl SoftwareView {
             post_map.contains_key(k) && post_map[k].page == page;
         &&& s1.all_vms.contains(vm)
         &&& s1.iommu_s2_map.contains_key(key)
-        &&& s1.iommu_shared.contains(page)
+        &&& s1.iommu_shared_pages.contains(page)
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == s1.s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == if aliased {
-            s1.iommu_shared
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == if aliased {
+            s1.iommu_shared_pages
         } else {
-            s1.iommu_shared.remove(page)
+            s1.iommu_shared_pages.remove(page)
         }
         &&& s2.iommu_s2_map == post_map
     }
@@ -255,101 +255,105 @@ impl SoftwareView {
     /// Register a fresh, empty VM (counterpart of `HvMem::add_zone`).
     pub open spec fn add_vm_step(s1: SoftwareView, s2: SoftwareView, vm: VmId) -> bool {
         &&& s2.all_vms == s1.all_vms.insert(vm)
-        &&& s2.vm_owned == s1.vm_owned.insert(vm, Set::empty())
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages.insert(vm, Set::empty())
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map
             == s1.s2_map
-        // The fresh VM owns nothing for DMA either; `iommu_owned` tracks `all_vms`.
+        // The fresh VM has no IOMMU-Private pages; the map tracks `all_vms`.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
-        &&& s2.iommu_owned == s1.iommu_owned.insert(vm, Set::empty())
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages == s1.iommu_private_pages.insert(vm, Set::empty())
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
     }
 
     /// Deregister an empty VM (counterpart of `HvMem::remove_zone`).
     pub open spec fn remove_vm_step(s1: SoftwareView, s2: SoftwareView, vm: VmId) -> bool {
         &&& s2.all_vms == s1.all_vms.remove(vm)
-        &&& s2.vm_owned == s1.vm_owned.remove(vm)
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages.remove(vm)
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map
             == s1.s2_map
-        // Drop the VM's (empty) DMA ownership; `iommu_owned` tracks `all_vms`.
+        // Drop the VM's empty IOMMU-Private entry; the map tracks `all_vms`.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
-        &&& s2.iommu_owned == s1.iommu_owned.remove(vm)
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages == s1.iommu_private_pages.remove(vm)
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
     }
 
-    /// Install a CPU region drawn from `region.vm`'s zone-private budget.
-    pub open spec fn cpu_insert_zone_private_region_step(
+    /// Apply the dynamic effect of installing an S2-Private region for
+    /// `region.vm`.
+    pub open spec fn cpu_insert_private_region_step(
         s1: SoftwareView,
         s2: SoftwareView,
         region: Region,
     ) -> bool {
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned.insert(
+        &&& s2.s2_private_pages == s1.s2_private_pages.insert(
             region.vm,
-            s1.vm_owned[region.vm].union(region.pages()),
+            s1.s2_private_pages[region.vm].union(region.pages()),
         )
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == s1.s2_map.union_prefer_right(
             region.entries(),
         )
         // CPU operations leave the IOMMU projection untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
     }
 
-    /// Remove a CPU region drawn from `region.vm`'s zone-private budget.
-    pub open spec fn cpu_remove_zone_private_region_step(
+    /// Apply the dynamic effect of removing an S2-Private region for
+    /// `region.vm`.
+    pub open spec fn cpu_remove_private_region_step(
         s1: SoftwareView,
         s2: SoftwareView,
         region: Region,
     ) -> bool {
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned.insert(
+        &&& s2.s2_private_pages == s1.s2_private_pages.insert(
             region.vm,
-            s1.vm_owned[region.vm].difference(region.pages()),
+            s1.s2_private_pages[region.vm].difference(region.pages()),
         )
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == s1.s2_map.remove_keys(
             region.entries().dom(),
         )
         // CPU operations leave the IOMMU projection untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
     }
 
-    /// Install a CPU region drawn from the global-shared budget. Physical aliases
-    /// are permitted; `s2_map` records which VMs actually map the shared pages.
-    pub open spec fn cpu_insert_global_shared_region_step(
+    /// Apply the dynamic effect of installing an S2-Shared region. Physical
+    /// aliases are permitted; `s2_map` records which VMs actually map the
+    /// shared pages.
+    pub open spec fn cpu_insert_shared_region_step(
         s1: SoftwareView,
         s2: SoftwareView,
         region: Region,
     ) -> bool {
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared.union(region.pages())
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages.union(region.pages())
         &&& s2.s2_map == s1.s2_map.union_prefer_right(region.entries())
         // CPU operations leave the IOMMU projection untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
     }
 
-    /// Remove a CPU region drawn from the global-shared budget. A physical page
-    /// remains in `vm_shared` while any surviving CPU mapping still targets it.
-    pub open spec fn cpu_remove_global_shared_region_step(
+    /// Apply the dynamic effect of removing an S2-Shared region. A physical
+    /// page remains in `s2_shared_pages` while any surviving CPU mapping still
+    /// targets it.
+    pub open spec fn cpu_remove_shared_region_step(
         s1: SoftwareView,
         s2: SoftwareView,
         region: Region,
     ) -> bool {
         let post_map = s1.s2_map.remove_keys(region.entries().dom());
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared =~= Set::new(
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages =~= Set::new(
             |p: PhysPage| {
-                &&& s1.vm_shared.contains(p)
+                &&& s1.s2_shared_pages.contains(p)
                 &&& (!region.pages().contains(p) || exists|k: VmPageKey| #[trigger]
                     post_map.contains_key(k) && post_map[k].page == p)
             },
@@ -357,8 +361,8 @@ impl SoftwareView {
         &&& s2.s2_map == post_map
         // CPU operations leave the IOMMU projection untouched.
         &&& s2.iommu_s2_map == s1.iommu_s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
     }
 
     // -----------------------------------------------------------------------
@@ -373,19 +377,20 @@ impl SoftwareView {
         !s1.all_vms.contains(vm)
     }
 
-    /// `vm` exists, owns nothing (CPU or DMA), and has no mappings (CPU or IOMMU),
+    /// `vm` exists, has no Private pages, and has no CPU or IOMMU mappings,
     /// so dropping it strands nothing.
     pub open spec fn remove_vm_enabled(s1: SoftwareView, vm: VmId) -> bool {
         &&& s1.all_vms.contains(vm)
-        &&& s1.vm_owned[vm] == Set::<PhysPage>::empty()
-        &&& s1.iommu_owned[vm] == Set::<PhysPage>::empty()
+        &&& s1.s2_private_pages[vm] == Set::<PhysPage>::empty()
+        &&& s1.iommu_private_pages[vm] == Set::<PhysPage>::empty()
         &&& (forall|k: VmPageKey| #[trigger] s1.s2_map.contains_key(k) ==> k.vm != vm)
         &&& (forall|k: VmPageKey| #[trigger] s1.iommu_s2_map.contains_key(k) ==> k.vm != vm)
     }
 
-    /// A zone-private CPU region is insertable when its physical pages have no
-    /// existing CPU-private owner, are not shared, and its guest pages are fresh.
-    pub open spec fn cpu_insert_zone_private_region_enabled(
+    /// An S2-Private region is insertable when its physical pages have no
+    /// existing S2-Private classification, are not S2-Shared, and its guest
+    /// pages are fresh.
+    pub open spec fn cpu_insert_private_region_enabled(
         s1: SoftwareView,
         region: Region,
     ) -> bool {
@@ -393,32 +398,32 @@ impl SoftwareView {
         &&& s1.all_vms.contains(region.vm)
         &&& (forall|p: PhysPage, v: VmId| #[trigger]
             region.pages().contains(p) && #[trigger] s1.all_vms.contains(v)
-                ==> !s1.vm_owned[v].contains(p))
+                ==> !s1.s2_private_pages[v].contains(p))
         &&& (forall|p: PhysPage| #[trigger]
-            region.pages().contains(p) ==> !s1.vm_shared.contains(p))
+            region.pages().contains(p) ==> !s1.s2_shared_pages.contains(p))
         &&& (forall|k: VmPageKey| #[trigger]
             region.entries().contains_key(k) ==> !s1.s2_map.contains_key(
                 k,
             ))
-        // The same zone may already DMA-map the private page. Other zones may not,
-        // and no page may simultaneously belong to the IOMMU-shared projection.
+        // The same VM may already DMA-map the Private page. Other VMs may not,
+        // and no page may simultaneously belong to the IOMMU-Shared projection.
         &&& (forall|p: PhysPage, v1: VmId| #[trigger]
             region.pages().contains(p) && #[trigger] s1.all_vms.contains(v1) && v1 != region.vm
-                ==> !s1.iommu_owned[v1].contains(p))
+                ==> !s1.iommu_private_pages[v1].contains(p))
         &&& (forall|p: PhysPage| #[trigger]
-            region.pages().contains(p) ==> !s1.iommu_shared.contains(p))
+            region.pages().contains(p) ==> !s1.iommu_shared_pages.contains(p))
     }
 
-    /// A zone-private CPU region is removable when it is installed and no other
+    /// A private CPU region is removable when it is installed and no other
     /// CPU mapping targets its physical pages.
-    pub open spec fn cpu_remove_zone_private_region_enabled(
+    pub open spec fn cpu_remove_private_region_enabled(
         s1: SoftwareView,
         region: Region,
     ) -> bool {
         &&& region.wf()
         &&& s1.all_vms.contains(region.vm)
         &&& (forall|p: PhysPage| #[trigger]
-            region.pages().contains(p) ==> s1.vm_owned[region.vm].contains(p))
+            region.pages().contains(p) ==> s1.s2_private_pages[region.vm].contains(p))
         &&& (forall|k: VmPageKey| #[trigger]
             region.entries().contains_key(k) ==> s1.s2_map.contains_key(k) && s1.s2_map[k]
                 == region.entries()[k])
@@ -428,13 +433,13 @@ impl SoftwareView {
                 s1.s2_map[k].page,
             ))
         &&& (forall|p: PhysPage| #[trigger]
-            region.pages().contains(p) ==> !s1.vm_shared.contains(p))
+            region.pages().contains(p) ==> !s1.s2_shared_pages.contains(p))
     }
 
-    /// A global-shared CPU region is insertable at fresh guest pages. Its physical
-    /// pages may already have other shared CPU mappings or IOMMU-private/shared
-    /// mappings, but cannot be CPU-private.
-    pub open spec fn cpu_insert_global_shared_region_enabled(
+    /// A shared CPU region is insertable at fresh guest pages. Its physical
+    /// pages may already have other shared CPU mappings or IOMMU-Private/shared
+    /// mappings, but cannot be S2-Private.
+    pub open spec fn cpu_insert_shared_region_enabled(
         s1: SoftwareView,
         region: Region,
     ) -> bool {
@@ -444,19 +449,19 @@ impl SoftwareView {
             region.entries().contains_key(k) ==> !s1.s2_map.contains_key(k))
         &&& (forall|p: PhysPage, v: VmId| #[trigger]
             region.pages().contains(p) && #[trigger] s1.all_vms.contains(v)
-                ==> !s1.vm_owned[v].contains(p))
+                ==> !s1.s2_private_pages[v].contains(p))
     }
 
-    /// A global-shared CPU region is removable when its exact entries are installed.
-    /// Other physical aliases are permitted and keep their pages in `vm_shared`.
-    pub open spec fn cpu_remove_global_shared_region_enabled(
+    /// A shared CPU region is removable when its exact entries are installed.
+    /// Other physical aliases are permitted and keep their pages in `s2_shared_pages`.
+    pub open spec fn cpu_remove_shared_region_enabled(
         s1: SoftwareView,
         region: Region,
     ) -> bool {
         &&& region.wf()
         &&& s1.all_vms.contains(region.vm)
         &&& (forall|p: PhysPage| #[trigger]
-            region.pages().contains(p) ==> s1.vm_shared.contains(p))
+            region.pages().contains(p) ==> s1.s2_shared_pages.contains(p))
         &&& (forall|k: VmPageKey| #[trigger]
             region.entries().contains_key(k) ==> s1.s2_map.contains_key(k)
                 && s1.s2_map[k] == region.entries()[k])
@@ -465,62 +470,65 @@ impl SoftwareView {
     // -----------------------------------------------------------------------
     // IOMMU region operations
     // -----------------------------------------------------------------------
-    /// Install an IOMMU region drawn from `region.vm`'s zone-private budget.
-    pub open spec fn iommu_insert_zone_private_region_step(
+    /// Apply the dynamic effect of installing an IOMMU-Private region for
+    /// `region.vm`.
+    pub open spec fn iommu_insert_private_region_step(
         s1: SoftwareView,
         s2: SoftwareView,
         region: Region,
     ) -> bool {
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == s1.s2_map
-        &&& s2.iommu_shared == s1.iommu_shared
-        &&& s2.iommu_owned == s1.iommu_owned.insert(
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
+        &&& s2.iommu_private_pages == s1.iommu_private_pages.insert(
             region.vm,
-            s1.iommu_owned[region.vm].union(region.pages()),
+            s1.iommu_private_pages[region.vm].union(region.pages()),
         )
         &&& s2.iommu_s2_map == s1.iommu_s2_map.union_prefer_right(region.entries())
     }
 
-    /// Remove an IOMMU region drawn from `region.vm`'s zone-private budget.
-    pub open spec fn iommu_remove_zone_private_region_step(
+    /// Apply the dynamic effect of removing an IOMMU-Private region for
+    /// `region.vm`.
+    pub open spec fn iommu_remove_private_region_step(
         s1: SoftwareView,
         s2: SoftwareView,
         region: Region,
     ) -> bool {
         &&& s2.all_vms == s1.all_vms
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == s1.s2_map
-        &&& s2.iommu_shared == s1.iommu_shared
-        &&& s2.iommu_owned == s1.iommu_owned.insert(
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
+        &&& s2.iommu_private_pages == s1.iommu_private_pages.insert(
             region.vm,
-            s1.iommu_owned[region.vm].difference(region.pages()),
+            s1.iommu_private_pages[region.vm].difference(region.pages()),
         )
         &&& s2.iommu_s2_map == s1.iommu_s2_map.remove_keys(region.entries().dom())
     }
 
-    /// Install an IOMMU region drawn from the global-shared budget. Physical aliases
-    /// are permitted independently of the CPU shared mappings.
-    pub open spec fn iommu_insert_global_shared_region_step(
+    /// Apply the dynamic effect of installing an IOMMU-Shared region. Physical
+    /// aliases are permitted independently of the CPU Shared mappings.
+    pub open spec fn iommu_insert_shared_region_step(
         s1: SoftwareView,
         s2: SoftwareView,
         region: Region,
     ) -> bool {
         &&& s2.all_vms == s1.all_vms
         // IOMMU operations leave the CPU projection untouched.
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == s1.s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared.union(region.pages())
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages.union(region.pages())
         &&& s2.iommu_s2_map == s1.iommu_s2_map.union_prefer_right(region.entries())
     }
 
-    /// Remove an IOMMU region drawn from the global-shared budget. A physical page
-    /// remains in `iommu_shared` while any surviving IOMMU mapping still targets it.
-    pub open spec fn iommu_remove_global_shared_region_step(
+    /// Apply the dynamic effect of removing an IOMMU-Shared region. A physical
+    /// page remains in `iommu_shared_pages` while any surviving IOMMU mapping
+    /// still targets it.
+    pub open spec fn iommu_remove_shared_region_step(
         s1: SoftwareView,
         s2: SoftwareView,
         region: Region,
@@ -528,13 +536,13 @@ impl SoftwareView {
         let post_map = s1.iommu_s2_map.remove_keys(region.entries().dom());
         &&& s2.all_vms == s1.all_vms
         // IOMMU operations leave the CPU projection untouched.
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.s2_map == s1.s2_map
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared =~= Set::new(
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages =~= Set::new(
             |p: PhysPage| {
-                &&& s1.iommu_shared.contains(p)
+                &&& s1.iommu_shared_pages.contains(p)
                 &&& (!region.pages().contains(p) || exists|k: VmPageKey| #[trigger]
                     post_map.contains_key(k) && post_map[k].page == p)
             },
@@ -542,10 +550,10 @@ impl SoftwareView {
         &&& s2.iommu_s2_map == post_map
     }
 
-    /// A zone-private IOMMU region is insertable when its physical pages have no
-    /// existing IOMMU-private owner, are not IOMMU-shared, and its guest pages are
-    /// fresh. CPU-shared access is independent and is permitted.
-    pub open spec fn iommu_insert_zone_private_region_enabled(
+    /// An IOMMU-Private region is insertable when its physical pages have no
+    /// existing IOMMU-Private classification, are not IOMMU-Shared, and its
+    /// guest pages are fresh. S2-Shared access is independent and is permitted.
+    pub open spec fn iommu_insert_private_region_enabled(
         s1: SoftwareView,
         region: Region,
     ) -> bool {
@@ -555,25 +563,25 @@ impl SoftwareView {
             region.entries().contains_key(k) ==> !s1.iommu_s2_map.contains_key(k))
         &&& (forall|p: PhysPage, v: VmId| #[trigger]
             region.pages().contains(p) && #[trigger] s1.all_vms.contains(v)
-                ==> !s1.iommu_owned[v].contains(p))
-        // The same zone may already CPU-map the private page; other zones may not.
+                ==> !s1.iommu_private_pages[v].contains(p))
+        // The same VM may already CPU-map the Private page; other VMs may not.
         &&& (forall|p: PhysPage, v: VmId| #[trigger]
             region.pages().contains(p) && #[trigger] s1.all_vms.contains(v) && v != region.vm
-                ==> !s1.vm_owned[v].contains(p))
+                ==> !s1.s2_private_pages[v].contains(p))
         &&& (forall|p: PhysPage| #[trigger]
-            region.pages().contains(p) ==> !s1.iommu_shared.contains(p))
+            region.pages().contains(p) ==> !s1.iommu_shared_pages.contains(p))
     }
 
-    /// A zone-private IOMMU region is removable when it is installed and no other
+    /// A private IOMMU region is removable when it is installed and no other
     /// IOMMU mapping targets its physical pages.
-    pub open spec fn iommu_remove_zone_private_region_enabled(
+    pub open spec fn iommu_remove_private_region_enabled(
         s1: SoftwareView,
         region: Region,
     ) -> bool {
         &&& region.wf()
         &&& s1.all_vms.contains(region.vm)
         &&& (forall|p: PhysPage| #[trigger]
-            region.pages().contains(p) ==> s1.iommu_owned[region.vm].contains(p))
+            region.pages().contains(p) ==> s1.iommu_private_pages[region.vm].contains(p))
         &&& (forall|k: VmPageKey| #[trigger]
             region.entries().contains_key(k) ==> s1.iommu_s2_map.contains_key(k)
                 && s1.iommu_s2_map[k] == region.entries()[k])
@@ -582,10 +590,10 @@ impl SoftwareView {
                 ==> !region.pages().contains(s1.iommu_s2_map[k].page))
     }
 
-    /// A global-shared IOMMU region is insertable at fresh guest pages. Its physical
+    /// A shared IOMMU region is insertable at fresh guest pages. Its physical
     /// pages may already have shared CPU or IOMMU mappings, but may not be classified
     /// as private in either translation domain.
-    pub open spec fn iommu_insert_global_shared_region_enabled(
+    pub open spec fn iommu_insert_shared_region_enabled(
         s1: SoftwareView,
         region: Region,
     ) -> bool {
@@ -595,19 +603,19 @@ impl SoftwareView {
             region.entries().contains_key(k) ==> !s1.iommu_s2_map.contains_key(k))
         &&& (forall|p: PhysPage, v: VmId| #[trigger]
             region.pages().contains(p) && #[trigger] s1.all_vms.contains(v)
-                ==> !s1.vm_owned[v].contains(p) && !s1.iommu_owned[v].contains(p))
+                ==> !s1.s2_private_pages[v].contains(p) && !s1.iommu_private_pages[v].contains(p))
     }
 
-    /// A global-shared IOMMU region is removable when its exact entries are installed.
-    /// Other physical aliases are permitted and keep their pages in `iommu_shared`.
-    pub open spec fn iommu_remove_global_shared_region_enabled(
+    /// A shared IOMMU region is removable when its exact entries are installed.
+    /// Other physical aliases are permitted and keep their pages in `iommu_shared_pages`.
+    pub open spec fn iommu_remove_shared_region_enabled(
         s1: SoftwareView,
         region: Region,
     ) -> bool {
         &&& region.wf()
         &&& s1.all_vms.contains(region.vm)
         &&& (forall|p: PhysPage| #[trigger]
-            region.pages().contains(p) ==> s1.iommu_shared.contains(p))
+            region.pages().contains(p) ==> s1.iommu_shared_pages.contains(p))
         &&& (forall|k: VmPageKey| #[trigger]
             region.entries().contains_key(k) ==> s1.iommu_s2_map.contains_key(k)
                 && s1.iommu_s2_map[k] == region.entries()[k])
@@ -624,37 +632,37 @@ impl SoftwareView {
             SoftwareOp::RemoveVm(vm) => {
                 Self::remove_vm_enabled(s1, vm) && Self::remove_vm_step(s1, s2, vm)
             },
-            SoftwareOp::CpuInsertZonePrivateRegion(region) => {
-                Self::cpu_insert_zone_private_region_enabled(s1, region)
-                    && Self::cpu_insert_zone_private_region_step(s1, s2, region)
+            SoftwareOp::CpuInsertPrivateRegion(region) => {
+                Self::cpu_insert_private_region_enabled(s1, region)
+                    && Self::cpu_insert_private_region_step(s1, s2, region)
             },
-            SoftwareOp::CpuRemoveZonePrivateRegion(region) => {
-                Self::cpu_remove_zone_private_region_enabled(s1, region)
-                    && Self::cpu_remove_zone_private_region_step(s1, s2, region)
+            SoftwareOp::CpuRemovePrivateRegion(region) => {
+                Self::cpu_remove_private_region_enabled(s1, region)
+                    && Self::cpu_remove_private_region_step(s1, s2, region)
             },
-            SoftwareOp::CpuInsertGlobalSharedRegion(region) => {
-                Self::cpu_insert_global_shared_region_enabled(s1, region)
-                    && Self::cpu_insert_global_shared_region_step(s1, s2, region)
+            SoftwareOp::CpuInsertSharedRegion(region) => {
+                Self::cpu_insert_shared_region_enabled(s1, region)
+                    && Self::cpu_insert_shared_region_step(s1, s2, region)
             },
-            SoftwareOp::CpuRemoveGlobalSharedRegion(region) => {
-                Self::cpu_remove_global_shared_region_enabled(s1, region)
-                    && Self::cpu_remove_global_shared_region_step(s1, s2, region)
+            SoftwareOp::CpuRemoveSharedRegion(region) => {
+                Self::cpu_remove_shared_region_enabled(s1, region)
+                    && Self::cpu_remove_shared_region_step(s1, s2, region)
             },
-            SoftwareOp::IommuInsertZonePrivateRegion(region) => {
-                Self::iommu_insert_zone_private_region_enabled(s1, region)
-                    && Self::iommu_insert_zone_private_region_step(s1, s2, region)
+            SoftwareOp::IommuInsertPrivateRegion(region) => {
+                Self::iommu_insert_private_region_enabled(s1, region)
+                    && Self::iommu_insert_private_region_step(s1, s2, region)
             },
-            SoftwareOp::IommuRemoveZonePrivateRegion(region) => {
-                Self::iommu_remove_zone_private_region_enabled(s1, region)
-                    && Self::iommu_remove_zone_private_region_step(s1, s2, region)
+            SoftwareOp::IommuRemovePrivateRegion(region) => {
+                Self::iommu_remove_private_region_enabled(s1, region)
+                    && Self::iommu_remove_private_region_step(s1, s2, region)
             },
-            SoftwareOp::IommuInsertGlobalSharedRegion(region) => {
-                Self::iommu_insert_global_shared_region_enabled(s1, region)
-                    && Self::iommu_insert_global_shared_region_step(s1, s2, region)
+            SoftwareOp::IommuInsertSharedRegion(region) => {
+                Self::iommu_insert_shared_region_enabled(s1, region)
+                    && Self::iommu_insert_shared_region_step(s1, s2, region)
             },
-            SoftwareOp::IommuRemoveGlobalSharedRegion(region) => {
-                Self::iommu_remove_global_shared_region_enabled(s1, region)
-                    && Self::iommu_remove_global_shared_region_step(s1, s2, region)
+            SoftwareOp::IommuRemoveSharedRegion(region) => {
+                Self::iommu_remove_shared_region_enabled(s1, region)
+                    && Self::iommu_remove_shared_region_step(s1, s2, region)
             },
         }
     }

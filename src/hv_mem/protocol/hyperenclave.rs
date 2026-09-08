@@ -1,4 +1,4 @@
-//! Token wrappers for the draft HyperEnclave four-class policy.
+//! Token wrappers for the HyperEnclave four-class policy.
 //!
 //! Unlike `BudgetProtocol`, enclave-private insertion consults a global
 //! `enclave_private_regions_view`.

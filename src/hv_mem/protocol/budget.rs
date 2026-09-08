@@ -22,8 +22,8 @@ use super::super::spec::budget::*;
 /// Parallel to `ClosureZoneState`, but wraps a `BudgetZoneToken`
 /// (map-sharded `BudgetSpec::zones` entry) instead of a `ClosureZoneToken`.
 /// Stored in the zone-level lock without a separate configured-budget token;
-/// configured pages are accessed through the pure `zone_private_pages(zid)` and
-/// `global_shared_pages()` functions.
+/// configured eligibility budgets are accessed through the pure
+/// `private_pages(zid)` and `shared_pages()` functions.
 pub tracked struct BudgetZoneState {
     pub zone_tok: BudgetZoneToken,
 }
@@ -49,8 +49,8 @@ impl ZoneStateOps for BudgetZoneState {
 /// Global tracked ghost state for `BudgetSpec`.
 ///
 /// Unlike `ClosureGlobalState`, there are no dynamic closure tokens here because
-/// `BudgetSpec` tracks authorization via static zone-private/global-shared page
-/// budgets rather than a dynamic global set. As a result,
+/// `BudgetSpec` tracks authorization via static Private/Shared eligibility
+/// budgets rather than dynamic classification state. As a result,
 /// `insert_region` does **not** need to acquire the `HvMem` write lock.
 pub tracked struct BudgetGlobalState {
     /// The `BudgetSpec` instance (constant-sharded; freely duplicable ghost value).
@@ -128,8 +128,8 @@ impl BudgetProtocol {
             zt.wf(gs.mem_inst_id()),
             region.spec_valid(),
             region_in_budget(zt.zone_id(), region),
-            region_in_zone_private_budget(zt.zone_id(), region)
-                ==> pmem_nonoverlap_with_zone_private_regions(
+            region_in_private_budget(zt.zone_id(), region)
+                ==> pmem_nonoverlap_with_private_regions(
                 zt.zone_id(),
                 zt.ghost_zone().cpu_mem_set,
                 region,
@@ -185,7 +185,7 @@ impl BudgetProtocol {
         BudgetZoneState { zone_tok: new_tok }
     }
 
-    /// Insert a zone-private or global-shared region into a zone's IOMMU mappings.
+    /// Insert a Private or Shared region into a zone's IOMMU mappings.
     pub proof fn iommu_insert_region(
         tracked gs: &BudgetGlobalState,
         tracked zt: BudgetZoneState,
@@ -195,8 +195,8 @@ impl BudgetProtocol {
             zt.wf(gs.mem_inst_id()),
             region.spec_valid(),
             region_in_budget(zt.zone_id(), region),
-            region_in_zone_private_budget(zt.zone_id(), region)
-                ==> pmem_nonoverlap_with_zone_private_regions(
+            region_in_private_budget(zt.zone_id(), region)
+                ==> pmem_nonoverlap_with_private_regions(
                 zt.zone_id(),
                 zt.ghost_zone().iommu_mem_set,
                 region,

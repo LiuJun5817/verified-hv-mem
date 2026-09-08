@@ -71,22 +71,22 @@ pub enum HypervisorOp {
     AddVm(VmId),
     /// Remove a VM from the system.
     RemoveVm(VmId),
-    /// Install one CPU mapping and classify its target as VM-private.
-    MapVmPrivate(VmId, GuestPage, S2Entry),
-    /// Remove one CPU mapping and its matching VM-private page classification.
-    UnmapVmPrivate(VmId, GuestPage, PhysPage),
-    /// Install a CPU mapping whose target belongs to global-shared memory.
-    MapGlobalShared(VmId, GuestPage, S2Entry),
-    /// Remove a CPU global-shared mapping and update its dynamic projection.
-    UnmapGlobalShared(VmId, GuestPage),
-    /// Install one IOMMU mapping and classify its target as VM-private.
-    IommuMapVmPrivate(VmId, GuestPage, S2Entry),
-    /// Remove one IOMMU mapping and its matching VM-private page classification.
-    IommuUnmapVmPrivate(VmId, GuestPage, PhysPage),
-    /// Install an IOMMU mapping whose target belongs to global-shared memory.
-    IommuMapGlobalShared(VmId, GuestPage, S2Entry),
-    /// Remove an IOMMU global-shared mapping and update its dynamic projection.
-    IommuUnmapGlobalShared(VmId, GuestPage),
+    /// Install one CPU mapping and classify its target as S2-Private.
+    MapS2Private(VmId, GuestPage, S2Entry),
+    /// Remove one CPU mapping and its matching S2-Private classification.
+    UnmapS2Private(VmId, GuestPage, PhysPage),
+    /// Install one CPU mapping and classify its target as S2-Shared.
+    MapS2Shared(VmId, GuestPage, S2Entry),
+    /// Remove one CPU mapping and update the dynamic S2-Shared projection.
+    UnmapS2Shared(VmId, GuestPage),
+    /// Install one IOMMU mapping and classify its target as IOMMU-Private.
+    MapIommuPrivate(VmId, GuestPage, S2Entry),
+    /// Remove one IOMMU mapping and its IOMMU-Private classification.
+    UnmapIommuPrivate(VmId, GuestPage, PhysPage),
+    /// Install one IOMMU mapping and classify its target as IOMMU-Shared.
+    MapIommuShared(VmId, GuestPage, S2Entry),
+    /// Remove one IOMMU mapping and update the dynamic IOMMU-Shared projection.
+    UnmapIommuShared(VmId, GuestPage),
 }
 
 /// A guest VM step and a hypervisor step are the two machine actions.  TLB

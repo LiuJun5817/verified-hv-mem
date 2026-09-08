@@ -21,8 +21,8 @@ impl MachineState {
         ensures
             s.wf(),
     {
-        assert(s.vm_owned.dom() =~= s.all_vms());
-        assert(s.ownership_wf());
+        assert(s.s2_private_pages.dom() =~= s.all_vms());
+        assert(s.s2_classification_wf());
         assert(s.translation_wf());
         assert(s.tlb_safe());
     }
@@ -94,19 +94,19 @@ impl MachineState {
         }
         assert(s.translation_wf());
         assert(s.all_vms().contains(vm));
-        assert(s.owned_or_shared(vm, page));
-        if s.vm_owned.contains_key(vm) && s.vm_owned[vm].contains(page) {
-            assert(s.ownership_wf());
-            assert(!s.vm_shared.contains(page));
+        assert(s.s2_private_or_shared(vm, page));
+        if s.s2_private_pages.contains_key(vm) && s.s2_private_pages[vm].contains(page) {
+            assert(s.s2_classification_wf());
+            assert(!s.s2_shared_pages.contains(page));
             assert(s.s2_private(vm, page));
         } else {
-            assert(s.vm_shared.contains(page));
+            assert(s.s2_shared_pages.contains(page));
             assert(s.s2_shared(page));
         }
     }
 
     /// Cross-VM S2-private sets are disjoint, and an S2-private page is outside
-    /// the installed all-VM-shared projection.
+    /// the installed shared projection.
     proof fn lemma_s2_target_excludes_other_private(
         s: MachineState,
         subject: VmId,
@@ -124,21 +124,23 @@ impl MachineState {
     {
         if target == protected {
             if s.s2_private(other, target) {
-                assert(s.ownership_wf());
-                assert(!s.vm_owned[other].contains(protected));
+                assert(s.s2_classification_wf());
+                assert(!s.s2_private_pages[other].contains(protected));
                 assert(false);
             } else {
                 assert(s.s2_shared(target));
-                assert(s.vm_shared.contains(protected));
+                assert(s.s2_shared_pages.contains(protected));
                 assert(false);
             }
         }
     }
 
     /// CPU isolation. In every reachable state, an environment VM cannot
-    /// translate any guest page to an S2-private page of the subject. The explicit
-    /// `cpu` parameter accounts for every per-CPU cached translation represented by
-    /// the machine model.
+    /// translate any guest page to an S2-Private page of the subject. S2-Shared
+    /// pages are deliberately outside this guarantee, but Shared does not imply
+    /// universal access: the installed S2 map determines which VMs can translate
+    /// to them. The explicit `cpu` parameter accounts for every per-CPU cached
+    /// translation represented by the machine model.
     pub proof fn lemma_cpu_isolation(
         s: MachineState,
         subject: VmId,
@@ -168,8 +170,8 @@ impl MachineState {
     }
 
     /// In a well-formed state, a successful effective DMA translation targets
-    /// either an IOMMU-private page of the translating VM or an installed
-    /// IOMMU-shared page. `iommu_tlb_safe`, `iommu_sync`, and
+    /// either an IOMMU-Private page of the translating VM or an installed
+    /// IOMMU-Shared page. `iommu_tlb_safe`, `iommu_sync`, and
     /// `iommu_translation_wf` establish the classification.
     proof fn lemma_dma_translation_authorized(
         s: MachineState,
@@ -182,7 +184,7 @@ impl MachineState {
             s.wf(),
             s.dma_translates_to(stream, vm, iova, page),
         ensures
-            s.iommu_private(vm, page) || s.iommu_shared_page(page),
+            s.iommu_private(vm, page) || s.iommu_shared(page),
     {
         let key = TlbKey::new(stream, vm, iova);
         let sk = VmPageKey::new(vm, iova);
@@ -196,20 +198,20 @@ impl MachineState {
         }
         assert(s.iommu_translation_wf());
         assert(s.all_vms().contains(vm));
-        assert(s.iommu_owned.contains_key(vm));
-        if s.iommu_owned[vm].contains(page) {
-            assert(s.iommu_ownership_wf());
-            assert(!s.iommu_shared.contains(page));
+        assert(s.iommu_private_pages.contains_key(vm));
+        if s.iommu_private_pages[vm].contains(page) {
+            assert(s.iommu_classification_wf());
+            assert(!s.iommu_shared_pages.contains(page));
             assert(s.iommu_private(vm, page));
         } else {
-            assert(s.iommu_shared.contains(page));
-            assert(s.iommu_shared_page(page));
+            assert(s.iommu_shared_pages.contains(page));
+            assert(s.iommu_shared(page));
         }
     }
 
-    /// A different VM's DMA-authorized target cannot be either an IOMMU-private
+    /// A different VM's DMA-authorized target cannot be either an IOMMU-Private
     /// or an S2-private page of the subject. The four clauses of
-    /// `iommu_ownership_wf` cover private-IOMMU/private-IOMMU,
+    /// `iommu_classification_wf` cover private-IOMMU/private-IOMMU,
     /// private-IOMMU/private-S2, and both private/shared cases.
     proof fn lemma_dma_target_excludes_other_private(
         s: MachineState,
@@ -222,24 +224,24 @@ impl MachineState {
             s.wf(),
             other != subject,
             s.iommu_private(subject, protected) || s.s2_private(subject, protected),
-            s.iommu_private(other, target) || s.iommu_shared_page(target),
+            s.iommu_private(other, target) || s.iommu_shared(target),
         ensures
             target != protected,
     {
         if target == protected {
-            assert(s.iommu_ownership_wf());
+            assert(s.iommu_classification_wf());
             if s.iommu_private(other, target) {
                 if s.iommu_private(subject, protected) {
-                    assert(!s.iommu_owned[other].contains(protected));
+                    assert(!s.iommu_private_pages[other].contains(protected));
                     assert(false);
                 } else {
                     assert(s.s2_private(subject, protected));
-                    assert(!s.vm_owned[subject].contains(protected));
+                    assert(!s.s2_private_pages[subject].contains(protected));
                     assert(false);
                 }
             } else {
-                assert(s.iommu_shared_page(target));
-                assert(s.iommu_shared.contains(protected));
+                assert(s.iommu_shared(target));
+                assert(s.iommu_shared_pages.contains(protected));
                 if s.iommu_private(subject, protected) {
                     assert(false);
                 } else {
@@ -251,9 +253,11 @@ impl MachineState {
     }
 
     /// DMA isolation. In every reachable state, a device assigned to an
-    /// environment VM cannot translate any IOVA page to either an IOMMU-private
-    /// or an S2-private page of the subject. The explicit `stream` parameter
-    /// accounts for every cached SMMU translation represented by the model.
+    /// environment VM cannot translate any IOVA page to either an IOMMU-Private
+    /// or an S2-Private page of the subject. CPU and IOMMU classifications are
+    /// independent, so S2 sharing does not remove IOMMU-Private protection. The
+    /// explicit `stream` parameter accounts for every cached SMMU translation
+    /// represented by the model.
     pub proof fn lemma_dma_isolation(
         s: MachineState,
         subject: VmId,

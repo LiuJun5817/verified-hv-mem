@@ -1,9 +1,10 @@
 //! Ghost state machine specifications for the hypervisor memory manager.
 //!
 //! - [`closure`]: `ClosureSpec` with global `all_regions`, plus its state-machine tokens.
-//! - [`budget`]: `BudgetSpec` with zone-private and global-shared physical-page budgets,
+//! - [`budget`]: `BudgetSpec` with static Private and Shared eligibility budgets,
 //!   plus its state-machine tokens.
-//! - [`hyperenclave`]: draft four-class, dynamically assigned enclave policy.
+//! - [`hyperenclave`]: a physical-class policy with dynamic, pairwise enclave
+//!   sharing.
 pub mod budget;
 pub mod closure;
 pub mod hyperenclave;
@@ -16,8 +17,8 @@ pub use closure::{
     ClosureSpec, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken, ClosureZonesViewToken,
 };
 pub use hyperenclave::{
-    HyperEnclavePrivateRegionsViewToken, HyperEnclaveSpec, HyperEnclaveSpecInstance,
-    HyperEnclaveSharedRegionsToken, HyperEnclaveZoneIdsToken, HyperEnclaveZoneToken,
+    HyperEnclavePrivateRegionsViewToken, HyperEnclaveSharedRegionsToken, HyperEnclaveSpec,
+    HyperEnclaveSpecInstance, HyperEnclaveZoneIdsToken, HyperEnclaveZoneToken,
 };
 
 verus! {

@@ -1,6 +1,6 @@
-//! Draft HyperEnclave memory-isolation policy.
+//! HyperEnclave memory-isolation policy.
 //!
-//! The demo separates physical pages into four externally checked classes:
+//! The policy separates physical pages into four externally checked classes:
 //! normal-world memory, EPC memory, monitor memory, and the allocator pool.
 //! DMA pages are a subset of normal-world memory.  The class partition is a
 //! trusted configuration fact; assignment of private pages to individual
@@ -9,6 +9,14 @@
 //! regions may additionally be mapped into an enclave through an explicit
 //! dynamic Shared transition; VeriHyMem's own page-table backing frames may
 //! not be leaf-mapped.
+//!
+//! Private and Shared are protection classifications, not permanent physical
+//! memory classes. EPC and enclave-owned GPT backing frames are eligible for
+//! enclave Private mappings. Normal-memory marshalling pages remain physically
+//! normal memory but enter the S2-Shared projection while an authorized enclave
+//! mapping exists. After the final enclave mapping is removed, a page still
+//! mapped by the root returns to the root's S2-Private projection. The
+//! enclave-normal-page authorization itself is an integration premise.
 //!
 //! Executable operations for this state machine live in
 //! `hv_mem::imp::hyperenclave`.  Refinement to the policy-neutral
@@ -318,7 +326,7 @@ tokenized_state_machine! {
             /// Exact per-enclave set of installed normal-memory Shared
             /// regions. Unlike `enclave_private_regions_view`, this state is not
             /// conservative: removing the final Shared mapping must allow the
-            /// affected pages to return to the root-private projection.
+            /// affected pages to return to the root's S2-Private projection.
             #[sharding(variable)]
             pub shared_regions: Map<nat, Set<MemoryRegion>>,
         }

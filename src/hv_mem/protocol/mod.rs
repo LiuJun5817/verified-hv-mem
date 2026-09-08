@@ -6,7 +6,7 @@
 //! Submodules:
 //! - [`closure`]: `ClosureSpec` ghost state (`ClosureGlobalState`) and `ClosureProtocol`.
 //! - [`budget`]: `BudgetSpec` ghost state (`BudgetGlobalState`) and `BudgetProtocol`.
-//! - [`hyperenclave`]: draft four-class `HyperEnclaveProtocol`.
+//! - [`hyperenclave`]: four-class `HyperEnclaveProtocol`.
 pub mod budget;
 pub mod closure;
 pub mod hyperenclave;

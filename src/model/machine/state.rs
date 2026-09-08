@@ -18,18 +18,20 @@ verus! {
 /// [`crate::model::machine::security`], not here.
 pub ghost struct MachineState {
     pub all_vms: Set<VmId>,
-    pub vm_owned: Map<VmId, Set<PhysPage>>,
-    /// CPU-mapped global-shared pages, copied from `SoftwareView`.
-    pub vm_shared: Set<PhysPage>,
+    /// Per-VM pages protected by the CPU isolation theorem.
+    pub s2_private_pages: Map<VmId, Set<PhysPage>>,
+    /// Pages explicitly outside the S2-Private guarantee. Actual access still
+    /// requires an installed translation.
+    pub s2_shared_pages: Set<PhysPage>,
     /// The **software-maintained** stage-2 map (page-table bytes; from `SoftwareView`).
     pub s2_map: Map<VmPageKey, S2Entry>,
     /// The **software-maintained IOMMU** stage-2 map (SMMU page-table bytes; from
     /// `SoftwareView`).
     pub iommu_s2_map: Map<VmPageKey, S2Entry>,
-    /// Per-VM private DMA ownership, copied from `SoftwareView`.
-    pub iommu_owned: Map<VmId, Set<PhysPage>>,
-    /// IOMMU-mapped global-shared pages, copied from `SoftwareView`.
-    pub iommu_shared: Set<PhysPage>,
+    /// Per-VM pages protected by the DMA isolation theorem.
+    pub iommu_private_pages: Map<VmId, Set<PhysPage>>,
+    /// Pages explicitly outside the IOMMU-Private guarantee.
+    pub iommu_shared_pages: Set<PhysPage>,
     /// The **hardware-reachable** stage-2 map (walker view; from `HardwareView`).  Equal to
     /// `s2_map` at well-formed states (the [`sync`](MachineState::sync) invariant);
     /// the TLB caches *this* map, and translation resolves through it.
@@ -47,12 +49,12 @@ impl MachineState {
     pub open spec fn assemble(sw: SoftwareView, hw: HardwareView) -> MachineState {
         MachineState {
             all_vms: sw.all_vms,
-            vm_owned: sw.vm_owned,
-            vm_shared: sw.vm_shared,
+            s2_private_pages: sw.s2_private_pages,
+            s2_shared_pages: sw.s2_shared_pages,
             s2_map: sw.s2_map,
             iommu_s2_map: sw.iommu_s2_map,
-            iommu_owned: sw.iommu_owned,
-            iommu_shared: sw.iommu_shared,
+            iommu_private_pages: sw.iommu_private_pages,
+            iommu_shared_pages: sw.iommu_shared_pages,
             hw_s2map: hw.s2map,
             iommu_hw_s2map: hw.iommu_s2map,
             tlb: hw.tlb,
@@ -66,39 +68,41 @@ impl MachineState {
     }
 
     /// Paper-level `S2Private(self, vm, page)`: `vm` is live and `page` belongs to
-    /// its private CPU stage-2 projection, not to the installed all-VM-shared
-    /// projection.
+    /// its S2-Private projection, not to the dynamic S2-Shared projection.
     pub open spec fn s2_private(&self, vm: VmId, page: PhysPage) -> bool {
         &&& self.all_vms().contains(vm)
-        &&& self.vm_owned[vm].contains(page)
-        &&& !self.vm_shared.contains(page)
+        &&& self.s2_private_pages[vm].contains(page)
+        &&& !self.s2_shared_pages.contains(page)
     }
 
-    /// Paper-level `S2Shared(self, page)`.  This is the dynamic projection of
-    /// installed global-shared CPU mappings.  The lower-level
-    /// `global_shared_pages()` set is the separate static authorization universe.
+    /// Paper-level `S2Shared(self, page)`. This is the dynamic projection of
+    /// installed Shared CPU mappings. It does not imply universal access; the
+    /// installed S2 map records which VMs can translate to the page. A policy's
+    /// static Shared eligibility set, if any, is a separate concept.
     pub open spec fn s2_shared(&self, page: PhysPage) -> bool {
-        self.vm_shared.contains(page)
+        self.s2_shared_pages.contains(page)
     }
 
     /// Paper-level `IOMMUPrivate(self, vm, page)`: `vm` is live and `page` belongs
-    /// to its private IOMMU projection, not to the installed all-VM-shared IOMMU
+    /// to its IOMMU-Private projection, not to the dynamic IOMMU-Shared
     /// projection.
     pub open spec fn iommu_private(&self, vm: VmId, page: PhysPage) -> bool {
         &&& self.all_vms().contains(vm)
-        &&& self.iommu_owned[vm].contains(page)
-        &&& !self.iommu_shared.contains(page)
+        &&& self.iommu_private_pages[vm].contains(page)
+        &&& !self.iommu_shared_pages.contains(page)
     }
 
     /// Paper-level `IOMMUShared(self, page)`, using the dynamic projection of
-    /// installed global-shared IOMMU mappings.
-    pub open spec fn iommu_shared_page(&self, page: PhysPage) -> bool {
-        self.iommu_shared.contains(page)
+    /// installed Shared IOMMU mappings.
+    pub open spec fn iommu_shared(&self, page: PhysPage) -> bool {
+        self.iommu_shared_pages.contains(page)
     }
 
-    pub open spec fn owned_or_shared(&self, vm: VmId, page: PhysPage) -> bool {
-        (self.vm_owned.contains_key(vm) && self.vm_owned[vm].contains(page))
-            || self.vm_shared.contains(page)
+    /// `page` has an S2 classification compatible with a mapping by `vm`.
+    /// Classification alone does not create access.
+    pub open spec fn s2_private_or_shared(&self, vm: VmId, page: PhysPage) -> bool {
+        (self.s2_private_pages.contains_key(vm) && self.s2_private_pages[vm].contains(page))
+            || self.s2_shared_pages.contains(page)
     }
 
     /// TLB keys whose cached translation would be stale after a change to
@@ -116,11 +120,11 @@ impl MachineState {
         self.all_vms == other.all_vms
     }
 
-    pub open spec fn same_ownership_as(&self, other: &Self) -> bool {
-        &&& self.vm_owned == other.vm_owned
-        &&& self.vm_shared == other.vm_shared
-        &&& self.iommu_owned == other.iommu_owned
-        &&& self.iommu_shared == other.iommu_shared
+    pub open spec fn same_classification_as(&self, other: &Self) -> bool {
+        &&& self.s2_private_pages == other.s2_private_pages
+        &&& self.s2_shared_pages == other.s2_shared_pages
+        &&& self.iommu_private_pages == other.iommu_private_pages
+        &&& self.iommu_shared_pages == other.iommu_shared_pages
     }
 
     pub open spec fn same_translation_as(&self, other: &Self) -> bool {
@@ -248,63 +252,63 @@ impl MachineState {
         self.iommu_hw_s2map == self.iommu_s2_map
     }
 
-    pub open spec fn ownership_wf(&self) -> bool {
-        &&& self.vm_owned.dom() == self.all_vms()
+    pub open spec fn s2_classification_wf(&self) -> bool {
+        &&& self.s2_private_pages.dom() == self.all_vms()
         &&& forall|vm1: VmId, vm2: VmId| #[trigger]
             self.all_vms().contains(vm1) && #[trigger] self.all_vms().contains(vm2) && vm1 != vm2
                 ==> forall|page: PhysPage| #[trigger]
-                self.vm_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(page)
+                self.s2_private_pages[vm1].contains(page) ==> !self.s2_private_pages[vm2].contains(page)
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.vm_owned[vm].contains(page) ==> !self.vm_shared.contains(page)
+                self.s2_private_pages[vm].contains(page) ==> !self.s2_shared_pages.contains(page)
     }
 
     pub open spec fn translation_wf(&self) -> bool {
         forall|key: VmPageKey| #[trigger]
             self.s2_map.contains_key(key) ==> {
                 &&& self.all_vms().contains(key.vm)
-                &&& self.owned_or_shared(key.vm, self.s2_map[key].page)
+                &&& self.s2_private_or_shared(key.vm, self.s2_map[key].page)
             }
     }
 
-    pub open spec fn iommu_ownership_wf(&self) -> bool {
-        &&& self.iommu_owned.dom() == self.all_vms()
+    pub open spec fn iommu_classification_wf(&self) -> bool {
+        &&& self.iommu_private_pages.dom() == self.all_vms()
         &&& forall|vm1: VmId, vm2: VmId| #[trigger]
             self.all_vms().contains(vm1) && #[trigger] self.all_vms().contains(vm2) && vm1 != vm2
                 ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm1].contains(page) ==> !self.iommu_owned[vm2].contains(page)
+                self.iommu_private_pages[vm1].contains(page) ==> !self.iommu_private_pages[vm2].contains(page)
         &&& forall|vm1: VmId, vm2: VmId| #[trigger]
             self.all_vms().contains(vm1) && #[trigger] self.all_vms().contains(vm2) && vm1 != vm2
                 ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(page)
+                self.iommu_private_pages[vm1].contains(page) ==> !self.s2_private_pages[vm2].contains(page)
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
-                // IOMMU-private pages may be CPU-shared: these sets classify
-                // different access paths. CPU-private pages remain disjoint
-                // from IOMMU-shared pages.
+                self.iommu_private_pages[vm].contains(page) ==> !self.iommu_shared_pages.contains(page)
+                // IOMMU-Private pages may be S2-Shared: these sets classify
+                // different access paths. S2-Private pages remain disjoint
+                // from IOMMU-Shared pages.
         &&& forall|vm: VmId| #[trigger]
             self.all_vms().contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.vm_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
+                self.s2_private_pages[vm].contains(page) ==> !self.iommu_shared_pages.contains(page)
     }
 
     pub open spec fn iommu_translation_wf(&self) -> bool {
         forall|key: VmPageKey| #[trigger]
             self.iommu_s2_map.contains_key(key) ==> {
                 &&& self.all_vms().contains(key.vm)
-                &&& self.iommu_owned.contains_key(key.vm)
-                &&& (self.iommu_owned[key.vm].contains(self.iommu_s2_map[key].page)
-                    || self.iommu_shared.contains(self.iommu_s2_map[key].page))
+                &&& self.iommu_private_pages.contains_key(key.vm)
+                &&& (self.iommu_private_pages[key.vm].contains(self.iommu_s2_map[key].page)
+                    || self.iommu_shared_pages.contains(self.iommu_s2_map[key].page))
             }
     }
 
     pub open spec fn iommu_wf(&self) -> bool {
-        &&& self.iommu_ownership_wf()
+        &&& self.iommu_classification_wf()
         &&& self.iommu_translation_wf()
     }
 
     pub open spec fn wf(&self) -> bool {
-        &&& self.ownership_wf()
+        &&& self.s2_classification_wf()
         &&& self.translation_wf()
         &&& self.iommu_wf()
         &&& self.tlb_safe()

@@ -41,7 +41,7 @@ impl MachineState {
         &&& s1.memory.contains_key(paddr->Some_0)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
-        &&& s2.same_ownership_as(&s1)
+        &&& s2.same_classification_as(&s1)
         &&& s2.same_translation_as(&s1)
         &&& s2.same_memory_as(&s1)
     }
@@ -62,7 +62,7 @@ impl MachineState {
         &&& paddr is Some
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
-        &&& s2.same_ownership_as(&s1)
+        &&& s2.same_classification_as(&s1)
         &&& s2.same_translation_as(&s1)
         &&& s2.memory == s1.memory.insert(paddr->Some_0, value)
     }
@@ -122,10 +122,10 @@ impl MachineState {
     // ------------------------------------------------------------------
     // Hypervisor operations
     // ------------------------------------------------------------------
-    /// Atomically classify one physical page as VM-private and install its CPU
-    /// stage-2 mapping. The same VM may already classify the page as IOMMU-private,
-    /// but no CPU-private or shared projection may already contain it.
-    pub open spec fn hv_map_vm_private_step(
+    /// Atomically classify one physical page as S2-Private for `vm` and install
+    /// its CPU stage-2 mapping. The same VM may already classify the page as
+    /// IOMMU-Private, but no other S2-Private or Shared projection may contain it.
+    pub open spec fn hv_map_s2_private_step(
         s1: Self,
         s2: Self,
         vm: VmId,
@@ -137,18 +137,18 @@ impl MachineState {
         &&& s1.all_vms().contains(vm)
         &&& !s1.s2_map.contains_key(key)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms().contains(v) ==> !s1.vm_owned[v].contains(entry.page))
-        &&& !s1.vm_shared.contains(entry.page)
+            s1.all_vms().contains(v) ==> !s1.s2_private_pages[v].contains(entry.page))
+        &&& !s1.s2_shared_pages.contains(entry.page)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms().contains(v) && v != vm ==> !s1.iommu_owned[v].contains(entry.page))
-        &&& !s1.iommu_shared.contains(entry.page)
+            s1.all_vms().contains(v) && v != vm ==> !s1.iommu_private_pages[v].contains(entry.page))
+        &&& !s1.iommu_shared_pages.contains(entry.page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].insert(entry.page))
-        &&& s2.vm_shared == s1.vm_shared
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages.insert(vm, s1.s2_private_pages[vm].insert(entry.page))
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
         &&& s2.s2_map == s1.s2_map.insert(key, entry)
         // the hardware-reachable map catches up in the same atomic step (sync preserved)
         &&& s2.hw_s2map == s1.hw_s2map.insert(key, entry)
@@ -162,9 +162,9 @@ impl MachineState {
 
     /// # TLB invalidation is modelled as atomic and global
     ///
-    /// The same step removes the VM-private classification and `s2_map` entry,
+    /// The same step removes the S2-Private classification and `s2_map` entry,
     /// then flushes *every* CPU's stale entry for `(vm, gpa)` via
-    /// `invalidation_targets`. Thus a CPU sees the ownership, page-table, and TLB
+    /// `invalidation_targets`. Thus a CPU sees the classification, page-table, and TLB
     /// updates simultaneously; there is no "being-invalidated" window in the model.
     ///
     /// Real hardware has an asynchronous shootdown window (invalidate, wait for all
@@ -172,7 +172,7 @@ impl MachineState {
     /// completion of that sequence. A faithful asynchronous model would add pending
     /// invalidations and per-CPU acknowledgements; that memory-model refinement is
     /// reserved for future work.
-    pub open spec fn hv_unmap_vm_private_step(
+    pub open spec fn hv_unmap_s2_private_step(
         s1: Self,
         s2: Self,
         vm: VmId,
@@ -185,17 +185,17 @@ impl MachineState {
         &&& s1.all_vms().contains(vm)
         &&& s1.s2_map.contains_key(key)
         &&& s1.s2_map[key].page == page
-        &&& s1.vm_owned[vm].contains(page)
-        &&& !s1.vm_shared.contains(page)
+        &&& s1.s2_private_pages[vm].contains(page)
+        &&& !s1.s2_shared_pages.contains(page)
         &&& (forall|k: VmPageKey| #[trigger]
             post_map.contains_key(k) ==> post_map[k].page != page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.vm_owned == s1.vm_owned.insert(vm, s1.vm_owned[vm].remove(page))
-        &&& s2.vm_shared == s1.vm_shared
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages.insert(vm, s1.s2_private_pages[vm].remove(page))
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
         &&& s2.s2_map == post_map
         &&& s2.hw_s2map == s1.hw_s2map.remove(key)
         &&& s2.tlb == s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))
@@ -205,10 +205,10 @@ impl MachineState {
         &&& s2.iommu_tlb == s1.iommu_tlb
     }
 
-    /// Atomically install a CPU mapping to global-shared memory and record its
-    /// target in the dynamic `vm_shared` projection. Physical aliases are
+    /// Atomically install a CPU mapping to shared memory and record its
+    /// target in the dynamic `s2_shared_pages` projection. Physical aliases are
     /// idempotent because the projection is a set.
-    pub open spec fn hv_map_global_shared_step(
+    pub open spec fn hv_map_s2_shared_step(
         s1: Self,
         s2: Self,
         vm: VmId,
@@ -219,15 +219,15 @@ impl MachineState {
         &&& s1.wf()
         &&& s1.all_vms().contains(vm)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms().contains(v) ==> !s1.vm_owned[v].contains(entry.page))
+            s1.all_vms().contains(v) ==> !s1.s2_private_pages[v].contains(entry.page))
         &&& !s1.s2_map.contains_key(key)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared.insert(entry.page)
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages.insert(entry.page)
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
         &&& s2.s2_map == s1.s2_map.insert(key, entry)
         &&& s2.hw_s2map == s1.hw_s2map.insert(key, entry)
         &&& s2.tlb == s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))
@@ -236,9 +236,9 @@ impl MachineState {
         &&& s2.iommu_tlb == s1.iommu_tlb
     }
 
-    /// Atomically remove a CPU global-shared mapping and drop its physical page
-    /// from `vm_shared` only when no surviving CPU mapping targets that page.
-    pub open spec fn hv_unmap_global_shared_step(
+    /// Atomically remove a CPU shared mapping and drop its physical page
+    /// from `s2_shared_pages` only when no surviving CPU mapping targets that page.
+    pub open spec fn hv_unmap_s2_shared_step(
         s1: Self,
         s2: Self,
         vm: VmId,
@@ -251,14 +251,14 @@ impl MachineState {
             post_map.contains_key(k) && post_map[k].page == page;
         &&& s1.wf()
         &&& s1.s2_map.contains_key(key)
-        &&& s1.vm_shared.contains(page)
+        &&& s1.s2_shared_pages.contains(page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == if aliased { s1.vm_shared } else { s1.vm_shared.remove(page) }
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == if aliased { s1.s2_shared_pages } else { s1.s2_shared_pages.remove(page) }
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
         &&& s2.s2_map == post_map
         &&& s2.hw_s2map == s1.hw_s2map.remove(key)
         &&& s2.tlb == s1.tlb.remove_keys(s1.invalidation_targets(vm, gpa))
@@ -267,10 +267,10 @@ impl MachineState {
         &&& s2.iommu_tlb == s1.iommu_tlb
     }
 
-    /// Atomically classify one physical page as VM-private for DMA and install
-    /// its IOMMU mapping. The page may already be CPU-private for the same VM or
-    /// CPU-shared; CPU and IOMMU classifications describe different access paths.
-    pub open spec fn hv_iommu_map_vm_private_step(
+    /// Atomically classify one physical page as IOMMU-Private for `vm` and
+    /// install its IOMMU mapping. The page may already be S2-Private for the same VM or
+    /// S2-Shared; CPU and IOMMU classifications describe different access paths.
+    pub open spec fn hv_map_iommu_private_step(
         s1: Self,
         s2: Self,
         vm: VmId,
@@ -282,18 +282,18 @@ impl MachineState {
         &&& s1.all_vms().contains(vm)
         &&& !s1.iommu_s2_map.contains_key(key)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms().contains(v) ==> !s1.iommu_owned[v].contains(entry.page))
+            s1.all_vms().contains(v) ==> !s1.iommu_private_pages[v].contains(entry.page))
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms().contains(v) && v != vm ==> !s1.vm_owned[v].contains(entry.page))
-        &&& !s1.iommu_shared.contains(entry.page)
+            s1.all_vms().contains(v) && v != vm ==> !s1.s2_private_pages[v].contains(entry.page))
+        &&& !s1.iommu_shared_pages.contains(entry.page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
-        &&& s2.iommu_owned
-            == s1.iommu_owned.insert(vm, s1.iommu_owned[vm].insert(entry.page))
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
+        &&& s2.iommu_private_pages
+            == s1.iommu_private_pages.insert(vm, s1.iommu_private_pages[vm].insert(entry.page))
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
         &&& s2.s2_map == s1.s2_map
         &&& s2.hw_s2map == s1.hw_s2map
         &&& s2.tlb == s1.tlb
@@ -302,9 +302,9 @@ impl MachineState {
         &&& s2.iommu_tlb == s1.iommu_tlb.remove_keys(s1.iommu_invalidation_targets(vm, gpa))
     }
 
-    /// Atomically remove one VM-private IOMMU mapping and release its DMA-private
+    /// Atomically remove one IOMMU-Private mapping and release its Private
     /// classification. No other IOMMU mapping may target the released page.
-    pub open spec fn hv_iommu_unmap_vm_private_step(
+    pub open spec fn hv_unmap_iommu_private_step(
         s1: Self,
         s2: Self,
         vm: VmId,
@@ -317,18 +317,18 @@ impl MachineState {
         &&& s1.all_vms().contains(vm)
         &&& s1.iommu_s2_map.contains_key(key)
         &&& s1.iommu_s2_map[key].page == page
-        &&& s1.iommu_owned[vm].contains(page)
-        &&& !s1.iommu_shared.contains(page)
+        &&& s1.iommu_private_pages[vm].contains(page)
+        &&& !s1.iommu_shared_pages.contains(page)
         &&& (forall|k: VmPageKey| #[trigger]
             post_map.contains_key(k) ==> post_map[k].page != page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
-        &&& s2.iommu_owned
-            == s1.iommu_owned.insert(vm, s1.iommu_owned[vm].remove(page))
-        &&& s2.iommu_shared == s1.iommu_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
+        &&& s2.iommu_private_pages
+            == s1.iommu_private_pages.insert(vm, s1.iommu_private_pages[vm].remove(page))
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
         &&& s2.s2_map == s1.s2_map
         &&& s2.hw_s2map == s1.hw_s2map
         &&& s2.tlb == s1.tlb
@@ -337,9 +337,9 @@ impl MachineState {
         &&& s2.iommu_tlb == s1.iommu_tlb.remove_keys(s1.iommu_invalidation_targets(vm, gpa))
     }
 
-    /// Atomically install an IOMMU mapping to global-shared memory and record
-    /// its target in the dynamic `iommu_shared` projection.
-    pub open spec fn hv_iommu_map_global_shared_step(
+    /// Atomically install an IOMMU mapping to shared memory and record
+    /// its target in the dynamic `iommu_shared_pages` projection.
+    pub open spec fn hv_map_iommu_shared_step(
         s1: Self,
         s2: Self,
         vm: VmId,
@@ -350,16 +350,16 @@ impl MachineState {
         &&& s1.wf()
         &&& s1.all_vms().contains(vm)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms().contains(v) ==> !s1.vm_owned[v].contains(entry.page)
-                && !s1.iommu_owned[v].contains(entry.page))
+            s1.all_vms().contains(v) ==> !s1.s2_private_pages[v].contains(entry.page)
+                && !s1.iommu_private_pages[v].contains(entry.page))
         &&& !s1.iommu_s2_map.contains_key(key)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == s1.iommu_shared.insert(entry.page)
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages.insert(entry.page)
         &&& s2.s2_map == s1.s2_map
         &&& s2.hw_s2map == s1.hw_s2map
         &&& s2.tlb == s1.tlb
@@ -368,9 +368,9 @@ impl MachineState {
         &&& s2.iommu_tlb == s1.iommu_tlb.remove_keys(s1.iommu_invalidation_targets(vm, gpa))
     }
 
-    /// Atomically remove an IOMMU global-shared mapping and drop its physical
+    /// Atomically remove an IOMMU shared mapping and drop its physical
     /// page only when no surviving IOMMU mapping aliases it.
-    pub open spec fn hv_iommu_unmap_global_shared_step(
+    pub open spec fn hv_unmap_iommu_shared_step(
         s1: Self,
         s2: Self,
         vm: VmId,
@@ -383,17 +383,17 @@ impl MachineState {
             post_map.contains_key(k) && post_map[k].page == page;
         &&& s1.wf()
         &&& s1.iommu_s2_map.contains_key(key)
-        &&& s1.iommu_shared.contains(page)
+        &&& s1.iommu_shared_pages.contains(page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.vm_owned == s1.vm_owned
-        &&& s2.vm_shared == s1.vm_shared
-        &&& s2.iommu_owned == s1.iommu_owned
-        &&& s2.iommu_shared == if aliased {
-            s1.iommu_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == if aliased {
+            s1.iommu_shared_pages
         } else {
-            s1.iommu_shared.remove(page)
+            s1.iommu_shared_pages.remove(page)
         }
         &&& s2.s2_map == s1.s2_map
         &&& s2.hw_s2map == s1.hw_s2map
@@ -409,61 +409,61 @@ impl MachineState {
         &&& !s1.all_vms().contains(vm)
         &&& s2.wf()
         &&& s2.all_vms == s1.all_vms.insert(vm)
-        &&& s2.vm_owned == s1.vm_owned.insert(vm, Set::empty())
-        &&& s2.iommu_owned == s1.iommu_owned.insert(vm, Set::empty())
-        &&& s2.iommu_shared == s1.iommu_shared
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages.insert(vm, Set::empty())
+        &&& s2.iommu_private_pages == s1.iommu_private_pages.insert(vm, Set::empty())
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.same_translation_as(&s1)
         &&& s2.same_memory_as(&s1)
     }
 
-    /// Deregister a VM that owns and maps nothing.
+    /// Deregister a VM with no Private pages or installed mappings.
     pub open spec fn hv_remove_vm_step(s1: Self, s2: Self, vm: VmId) -> bool {
         &&& s1.wf()
         &&& s1.all_vms().contains(vm)
-        &&& s1.vm_owned[vm] == Set::<PhysPage>::empty()
-        &&& s1.iommu_owned[vm] == Set::<PhysPage>::empty()
+        &&& s1.s2_private_pages[vm] == Set::<PhysPage>::empty()
+        &&& s1.iommu_private_pages[vm] == Set::<PhysPage>::empty()
         &&& (forall|k: VmPageKey| #[trigger] s1.s2_map.contains_key(k) ==> k.vm != vm)
         &&& (forall|k: VmPageKey| #[trigger] s1.iommu_s2_map.contains_key(k) ==> k.vm != vm)
         &&& (forall|k: TlbKey| #[trigger] s1.tlb.contains_key(k) ==> k.vm != vm)
         &&& (forall|k: TlbKey| #[trigger] s1.iommu_tlb.contains_key(k) ==> k.vm != vm)
         &&& s2.wf()
         &&& s2.all_vms == s1.all_vms.remove(vm)
-        &&& s2.vm_owned == s1.vm_owned.remove(vm)
-        &&& s2.iommu_owned == s1.iommu_owned.remove(vm)
-        &&& s2.iommu_shared == s1.iommu_shared
-        &&& s2.vm_shared == s1.vm_shared
+        &&& s2.s2_private_pages == s1.s2_private_pages.remove(vm)
+        &&& s2.iommu_private_pages == s1.iommu_private_pages.remove(vm)
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
+        &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.same_translation_as(&s1)
         &&& s2.same_memory_as(&s1)
     }
 
     pub open spec fn hypervisor_step(s1: Self, s2: Self, op: HypervisorOp) -> bool {
         match op {
-            HypervisorOp::MapVmPrivate(vm, gpa, entry) => {
-                Self::hv_map_vm_private_step(s1, s2, vm, gpa, entry)
+            HypervisorOp::MapS2Private(vm, gpa, entry) => {
+                Self::hv_map_s2_private_step(s1, s2, vm, gpa, entry)
             },
-            HypervisorOp::UnmapVmPrivate(vm, gpa, page) => {
-                Self::hv_unmap_vm_private_step(s1, s2, vm, gpa, page)
+            HypervisorOp::UnmapS2Private(vm, gpa, page) => {
+                Self::hv_unmap_s2_private_step(s1, s2, vm, gpa, page)
             },
-            HypervisorOp::MapGlobalShared(vm, gpa, entry) => {
-                Self::hv_map_global_shared_step(s1, s2, vm, gpa, entry)
+            HypervisorOp::MapS2Shared(vm, gpa, entry) => {
+                Self::hv_map_s2_shared_step(s1, s2, vm, gpa, entry)
             },
-            HypervisorOp::UnmapGlobalShared(vm, gpa) => {
-                Self::hv_unmap_global_shared_step(s1, s2, vm, gpa)
+            HypervisorOp::UnmapS2Shared(vm, gpa) => {
+                Self::hv_unmap_s2_shared_step(s1, s2, vm, gpa)
             },
             HypervisorOp::AddVm(vm) => Self::hv_add_vm_step(s1, s2, vm),
             HypervisorOp::RemoveVm(vm) => Self::hv_remove_vm_step(s1, s2, vm),
-            HypervisorOp::IommuMapVmPrivate(vm, gpa, entry) => {
-                Self::hv_iommu_map_vm_private_step(s1, s2, vm, gpa, entry)
+            HypervisorOp::MapIommuPrivate(vm, gpa, entry) => {
+                Self::hv_map_iommu_private_step(s1, s2, vm, gpa, entry)
             },
-            HypervisorOp::IommuUnmapVmPrivate(vm, gpa, page) => {
-                Self::hv_iommu_unmap_vm_private_step(s1, s2, vm, gpa, page)
+            HypervisorOp::UnmapIommuPrivate(vm, gpa, page) => {
+                Self::hv_unmap_iommu_private_step(s1, s2, vm, gpa, page)
             },
-            HypervisorOp::IommuMapGlobalShared(vm, gpa, entry) => {
-                Self::hv_iommu_map_global_shared_step(s1, s2, vm, gpa, entry)
+            HypervisorOp::MapIommuShared(vm, gpa, entry) => {
+                Self::hv_map_iommu_shared_step(s1, s2, vm, gpa, entry)
             },
-            HypervisorOp::IommuUnmapGlobalShared(vm, gpa) => {
-                Self::hv_iommu_unmap_global_shared_step(s1, s2, vm, gpa)
+            HypervisorOp::UnmapIommuShared(vm, gpa) => {
+                Self::hv_unmap_iommu_shared_step(s1, s2, vm, gpa)
             },
         }
     }
@@ -476,21 +476,21 @@ impl MachineState {
     ///
     /// Unlike the `*_step` predicates this is *post-only*: it constrains a single
     /// state rather than a transition.  At boot no guest exists yet, so the VM
-    /// population, ownership maps, shared sets, stage-2 maps, and TLBs
+    /// population, classification maps, stage-2 maps, and TLBs
     /// are all empty; every `wf` clause is then a `forall` over an empty domain and
     /// holds vacuously (see `lemma_init_wf` in `security.rs`). `memory` (initial DRAM)
     /// is left unconstrained as platform data irrelevant to `wf`. Guests and mappings are subsequently
-    /// created by `hv_add_vm` and the combined VM-private/shared mapping steps.
+    /// created by `hv_add_vm` and the combined Private/Shared mapping steps.
     pub open spec fn init(s: Self) -> bool {
         &&& s.all_vms == Set::<VmId>::empty()
-        &&& s.vm_owned == Map::<VmId, Set<PhysPage>>::empty()
-        &&& s.vm_shared == Set::<PhysPage>::empty()
+        &&& s.s2_private_pages == Map::<VmId, Set<PhysPage>>::empty()
+        &&& s.s2_shared_pages == Set::<PhysPage>::empty()
         &&& s.s2_map == Map::<VmPageKey, S2Entry>::empty()
         &&& s.hw_s2map == Map::<VmPageKey, S2Entry>::empty()
         &&& s.tlb == Map::<TlbKey, TlbEntry>::empty()
         &&& s.iommu_s2_map == Map::<VmPageKey, S2Entry>::empty()
-        &&& s.iommu_owned == Map::<VmId, Set<PhysPage>>::empty()
-        &&& s.iommu_shared == Set::<PhysPage>::empty()
+        &&& s.iommu_private_pages == Map::<VmId, Set<PhysPage>>::empty()
+        &&& s.iommu_shared_pages == Set::<PhysPage>::empty()
         &&& s.iommu_hw_s2map == Map::<VmPageKey, S2Entry>::empty()
         &&& s.iommu_tlb == Map::<TlbKey, TlbEntry>::empty()
     }

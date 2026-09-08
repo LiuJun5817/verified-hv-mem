@@ -8,119 +8,119 @@ verus! {
 /// The software-controlled portion of the machine state.
 ///
 /// All fields are derived from the hypervisor's data structures (zone list,
-/// stage-2 page tables, page allocator).  An exec type implementing
-/// `View<V = SoftwareView>` provides a spec-level mapping from its concrete fields.
+/// stage-2 page tables, and policy state). Private means protected by the
+/// corresponding isolation theorem; Shared means explicitly outside that
+/// Private guarantee. Neither classification creates access without an
+/// installed translation.
 pub ghost struct SoftwareView {
     /// Set of all VM identifiers currently managed by the hypervisor.
     pub all_vms: Set<VmId>,
-    /// Per-VM CPU-mapped pages drawn from the zone's private budget.
-    pub vm_owned: Map<VmId, Set<PhysPage>>,
-    /// Physical pages currently targeted by at least one CPU mapping and drawn
-    /// from the global-shared budget.  This is a dynamic projection of installed
-    /// mappings, not the static global-shared budget itself.
-    pub vm_shared: Set<PhysPage>,
-    /// Per-VM IOMMU-mapped pages drawn from the zone's private budget. Kept
-    /// separate from `vm_owned`: a VM may IOMMU-map a private page it has not
-    /// CPU-mapped, and vice versa.
-    pub iommu_owned: Map<VmId, Set<PhysPage>>,
-    /// Physical pages currently targeted by at least one IOMMU mapping and drawn
-    /// from the global-shared budget. `iommu_shared` and `vm_shared` are separate
-    /// dynamic subsets of that budget; neither need contain the other.
-    pub iommu_shared: Set<PhysPage>,
+    /// Per-VM pages currently classified S2-Private.
+    pub s2_private_pages: Map<VmId, Set<PhysPage>>,
+    /// Pages currently classified S2-Shared. This is a dynamic projection of
+    /// installed mappings, not a static eligibility budget or a claim that
+    /// every VM can access each page.
+    pub s2_shared_pages: Set<PhysPage>,
+    /// Per-VM pages currently classified IOMMU-Private. This is independent of
+    /// `s2_private_pages`: a VM may IOMMU-map a Private page it has not CPU-mapped,
+    /// and vice versa.
+    pub iommu_private_pages: Map<VmId, Set<PhysPage>>,
+    /// Pages currently classified IOMMU-Shared. CPU and IOMMU classifications
+    /// are independent, so neither Shared projection need contain the other.
+    pub iommu_shared_pages: Set<PhysPage>,
     /// Stage-2 page-table mappings installed by the hypervisor.
     pub s2_map: Map<VmPageKey, S2Entry>,
     /// IOMMU (SMMU) stage-2 mappings — a second stage-2 context per VM, for
-    /// device DMA. A VM's IOMMU may map its private pages (`iommu_owned`) or
-    /// global-shared pages (`iommu_shared`).
+    /// device DMA. A mapping target is classified either IOMMU-Private for its
+    /// VM or IOMMU-Shared.
     pub iommu_s2_map: Map<VmPageKey, S2Entry>,
 }
 
 impl SoftwareView {
-    /// `page` is accessible to `vm` either because it is CPU-mapped private
-    /// memory of `vm` or because it is currently mapped global-shared memory.
-    pub open spec fn owned_or_shared(&self, vm: VmId, page: PhysPage) -> bool {
-        (self.vm_owned.contains_key(vm) && self.vm_owned[vm].contains(page))
-            || self.vm_shared.contains(page)
+    /// `page` has an S2 classification compatible with a mapping by `vm`.
+    /// The stage-2 map, not this predicate, records actual access.
+    pub open spec fn s2_private_or_shared(&self, vm: VmId, page: PhysPage) -> bool {
+        (self.s2_private_pages.contains_key(vm) && self.s2_private_pages[vm].contains(page))
+            || self.s2_shared_pages.contains(page)
     }
 
-    /// Per-VM private ownership sets cover exactly `all_vms`, are pairwise
-    /// disjoint, and do not overlap CPU-shared pages.
-    pub open spec fn ownership_wf(&self) -> bool {
-        &&& self.vm_owned.dom() == self.all_vms
+    /// Per-VM S2-Private projections cover exactly `all_vms`, are pairwise
+    /// disjoint, and do not overlap S2-Shared pages.
+    pub open spec fn s2_classification_wf(&self) -> bool {
+        &&& self.s2_private_pages.dom() == self.all_vms
         &&& forall|vm1: VmId, vm2: VmId| #[trigger]
             self.all_vms.contains(vm1) && #[trigger] self.all_vms.contains(vm2) && vm1 != vm2
                 ==> forall|page: PhysPage| #[trigger]
-                self.vm_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(page)
+                self.s2_private_pages[vm1].contains(page) ==> !self.s2_private_pages[vm2].contains(page)
         &&& forall|vm: VmId| #[trigger]
             self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.vm_owned[vm].contains(page) ==> !self.vm_shared.contains(page)
+                self.s2_private_pages[vm].contains(page) ==> !self.s2_shared_pages.contains(page)
     }
 
-    /// Every stage-2 mapping targets a page owned or shared by the mapped VM.
+    /// Every stage-2 mapping targets a page classified S2-Private for the mapped
+    /// VM or S2-Shared.
     pub open spec fn translation_wf(&self) -> bool {
         forall|key: VmPageKey| #[trigger]
             self.s2_map.contains_key(key) ==> {
                 &&& self.all_vms.contains(key.vm)
-                &&& self.owned_or_shared(key.vm, self.s2_map[key].page)
+                &&& self.s2_private_or_shared(key.vm, self.s2_map[key].page)
             }
     }
 
-    /// IOMMU ownership separation. Private CPU/IOMMU pages are disjoint across
-    /// zones. IOMMU-private pages are disjoint from IOMMU-shared pages, but may
-    /// also be CPU-shared: the two classifications describe different access
-    /// paths. A VM may CPU-map and IOMMU-map the same private page.
-    pub open spec fn iommu_ownership_wf(&self) -> bool {
-        &&& self.iommu_owned.dom()
+    /// IOMMU classification separation. Private S2/IOMMU pages are disjoint
+    /// across VMs. IOMMU-Private pages are disjoint from IOMMU-Shared pages, but
+    /// may also be S2-Shared because the classifications describe independent
+    /// access paths. A VM may CPU-map and IOMMU-map the same Private page.
+    pub open spec fn iommu_classification_wf(&self) -> bool {
+        &&& self.iommu_private_pages.dom()
             == self.all_vms
         // (1) Private DMA pages are pairwise cross-VM disjoint.
         &&& forall|vm1: VmId, vm2: VmId| #[trigger]
             self.all_vms.contains(vm1) && #[trigger] self.all_vms.contains(vm2) && vm1 != vm2
                 ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm1].contains(page) ==> !self.iommu_owned[vm2].contains(
+                self.iommu_private_pages[vm1].contains(page) ==> !self.iommu_private_pages[vm2].contains(
                     page,
                 )
-                // (2) A VM's private DMA pages are never another VM's CPU-owned pages.
+                // (2) A VM's IOMMU-Private pages are never another VM's S2-Private pages.
         &&& forall|vm1: VmId, vm2: VmId| #[trigger]
             self.all_vms.contains(vm1) && #[trigger] self.all_vms.contains(vm2) && vm1 != vm2
                 ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm1].contains(page) ==> !self.vm_owned[vm2].contains(
+                self.iommu_private_pages[vm1].contains(page) ==> !self.s2_private_pages[vm2].contains(
                     page,
                 )
-                // (3) Private DMA pages are disjoint from IOMMU-shared pages.
+                // (3) IOMMU-Private pages are disjoint from IOMMU-Shared pages.
         &&& forall|vm: VmId| #[trigger]
             self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.iommu_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
-                // (4) CPU-private pages are disjoint from IOMMU-shared pages.
+                self.iommu_private_pages[vm].contains(page) ==> !self.iommu_shared_pages.contains(page)
+                // (4) S2-Private pages are disjoint from IOMMU-Shared pages.
         &&& forall|vm: VmId| #[trigger]
             self.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
-                self.vm_owned[vm].contains(page) ==> !self.iommu_shared.contains(page)
+                self.s2_private_pages[vm].contains(page) ==> !self.iommu_shared_pages.contains(page)
     }
 
-    /// Every IOMMU stage-2 mapping targets a page the mapped VM is allowed to DMA: one
-    /// of its private DMA pages (`iommu_owned`) or a currently mapped
-    /// global-shared page (`iommu_shared`).
+    /// Every IOMMU stage-2 mapping targets a page classified IOMMU-Private for
+    /// the mapped VM or IOMMU-Shared.
     pub open spec fn iommu_translation_wf(&self) -> bool {
         forall|key: VmPageKey| #[trigger]
             self.iommu_s2_map.contains_key(key) ==> {
                 &&& self.all_vms.contains(key.vm)
-                &&& self.iommu_owned.contains_key(key.vm)
-                &&& (self.iommu_owned[key.vm].contains(self.iommu_s2_map[key].page)
-                    || self.iommu_shared.contains(self.iommu_s2_map[key].page))
+                &&& self.iommu_private_pages.contains_key(key.vm)
+                &&& (self.iommu_private_pages[key.vm].contains(self.iommu_s2_map[key].page)
+                    || self.iommu_shared_pages.contains(self.iommu_s2_map[key].page))
             }
     }
 
-    /// Combined IOMMU well-formedness: private DMA pages are cross-zone
-    /// disjoint and every IOMMU entry targets either private or global-shared
-    /// memory. A VM may legitimately CPU-map and DMA-map the same private page,
-    /// so there is deliberately no same-VM `iommu_owned ∩ vm_owned = ∅` clause.
+    /// Combined IOMMU well-formedness. A VM may legitimately CPU-map and
+    /// DMA-map the same Private page, so there is deliberately no same-VM
+    /// `iommu_private_pages ∩ s2_private_pages = ∅` clause.
     pub open spec fn iommu_wf(&self) -> bool {
-        &&& self.iommu_ownership_wf()
+        &&& self.iommu_classification_wf()
         &&& self.iommu_translation_wf()
     }
 
     /// Combined software well-formedness invariant.
     pub open spec fn wf(&self) -> bool {
-        &&& self.ownership_wf()
+        &&& self.s2_classification_wf()
         &&& self.translation_wf()
         &&& self.iommu_wf()
     }
