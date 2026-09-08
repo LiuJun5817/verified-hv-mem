@@ -201,6 +201,105 @@ pub open spec fn regions_pmem_nonoverlap(
     forall|i: int| 0 <= i < existing.len() ==> !existing[i].spec_overlaps_pmem(candidate)
 }
 
+/// Whether all distinct regions in one memory set are physically disjoint.
+pub open spec fn memory_set_regions_pmem_disjoint(mem_set: SpecMemorySet) -> bool {
+    forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
+        mem_set.regions.contains(r1) && #[trigger] mem_set.regions.contains(r2) && r1 != r2
+            ==> !r1.spec_overlaps_pmem(r2)
+}
+
+/// Inserting a physically fresh region preserves pairwise physical disjointness.
+pub proof fn lemma_insert_region_preserves_pmem_disjoint(
+    mem_set: SpecMemorySet,
+    region: MemoryRegion,
+)
+    requires
+        mem_set.wf(),
+        memory_set_regions_pmem_disjoint(mem_set),
+        region.spec_valid(),
+        !mem_set.overlaps_pmem(region),
+    ensures
+        memory_set_regions_pmem_disjoint(mem_set.insert_region(region)),
+{
+    let new_mem_set = mem_set.insert_region(region);
+    assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
+        new_mem_set.regions.contains(r1) && #[trigger] new_mem_set.regions.contains(r2) && r1
+            != r2 implies !r1.spec_overlaps_pmem(r2) by {
+        if r1 == region {
+            r2.lemma_overlaps_pmem_symmetric(region);
+        }
+    }
+}
+
+/// Removing a region preserves pairwise physical disjointness.
+pub proof fn lemma_remove_region_preserves_pmem_disjoint(
+    mem_set: SpecMemorySet,
+    region: MemoryRegion,
+)
+    requires
+        memory_set_regions_pmem_disjoint(mem_set),
+    ensures
+        memory_set_regions_pmem_disjoint(mem_set.remove_region_exact(region)),
+{
+    let new_mem_set = mem_set.remove_region_exact(region);
+    assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
+        new_mem_set.regions.contains(r1) && #[trigger] new_mem_set.regions.contains(r2) && r1
+            != r2 implies !r1.spec_overlaps_pmem(r2) by {
+    }
+}
+
+/// A valid normal-memory region cannot also be enclave-private memory.
+pub proof fn lemma_normal_region_not_enclave_memory(zid: nat, region: MemoryRegion)
+    requires
+        region.spec_valid(),
+        region_in_normal_memory(region),
+    ensures
+        !region_in_enclave_memory(zid, region),
+{
+    let page = he_region_phys_page(region, 0);
+    assert(he_region_phys_pages(region).contains(page)) by { }
+    memory_classes_pairwise_disjoint();
+    enclave_gpt_backing_frames_are_allocator_memory();
+}
+
+/// The same class-separation fact in the direction used by private insertion.
+pub proof fn lemma_enclave_region_not_normal_memory(zid: nat, region: MemoryRegion)
+    requires
+        region.spec_valid(),
+        region_in_enclave_memory(zid, region),
+    ensures
+        !region_in_normal_memory(region),
+{
+    if region_in_normal_memory(region) {
+        lemma_normal_region_not_enclave_memory(zid, region);
+    }
+}
+
+/// Updating one zone and recording its exact live Shared set preserves the
+/// global exact-view relation.
+proof fn lemma_shared_regions_update_preserves_exact(
+    zone_ids: Set<nat>,
+    zones: Map<nat, GhostZone>,
+    shared_regions: Map<nat, Set<MemoryRegion>>,
+    zid: nat,
+    new_zone: GhostZone,
+)
+    requires
+        zones.dom() == zone_ids,
+        shared_regions.dom() == zone_ids,
+        zones.contains_key(zid),
+        forall|other: nat| #[trigger]
+            zones.contains_key(other) ==> shared_regions[other]
+                == live_shared_regions(other, zones[other]),
+    ensures
+        shared_regions.insert(zid, live_shared_regions(zid, new_zone)).dom() == zone_ids,
+        forall|other: nat| #[trigger]
+            zones.insert(zid, new_zone).contains_key(other) ==> shared_regions.insert(
+                zid,
+                live_shared_regions(zid, new_zone),
+            )[other] == live_shared_regions(other, zones.insert(zid, new_zone)[other]),
+{ }
+
 tokenized_state_machine! {
     HyperEnclaveSpec {
         fields {
@@ -295,6 +394,26 @@ tokenized_state_machine! {
                     && region_in_enclave_memory(zid2, r2)
                     && (zid1 != zid2 || r1 != r2)
                     ==> !r1.spec_overlaps_pmem(r2)
+        }
+
+        /// The executable root-IOMMU insertion rejects physical aliases. Keep
+        /// that fact in the TSM so a removed DMA region releases pages exactly
+        /// when its mappings disappear.
+        #[invariant]
+        pub fn inv_root_iommu_regions_pmem_disjoint(&self) -> bool {
+            self.zones.contains_key(root_zone_id()) ==> memory_set_regions_pmem_disjoint(
+                self.zones[root_zone_id()].iommu_mem_set,
+            )
+        }
+
+        /// Reachable memory sets contain finitely many operation units. This is
+        /// later used to refine clear operations to finite removal traces.
+        #[invariant]
+        pub fn inv_region_sets_finite(&self) -> bool {
+            forall|zid: nat| #[trigger] self.zones.contains_key(zid) ==> {
+                &&& self.zones[zid].cpu_mem_set.regions.finite()
+                &&& self.zones[zid].iommu_mem_set.regions.finite()
+            }
         }
 
         init! {
@@ -437,6 +556,7 @@ tokenized_state_machine! {
                 require(region_in_dma_memory(region));
                 require(!zone.iommu_mem_set.regions.contains(region));
                 require(!zone.iommu_mem_set.overlaps_vmem(region));
+                require(!zone.iommu_mem_set.overlaps_pmem(region));
                 add zones += [root_zone_id() => zone.iommu_insert_region(region)];
             }
         }
@@ -458,23 +578,18 @@ tokenized_state_machine! {
             }
         }
 
-        // Draft proof boundary: these obligations are intentionally visible as
-        // admits.  Replacing them with inductive proofs is the first production
-        // task; the later software/machine refinement is a separate layer.
         #[inductive(initialize)]
-        fn initialize_inductive(post: Self) {
-            admit();
-        }
+        fn initialize_inductive(post: Self) { }
 
         #[inductive(add_zone)]
         fn add_zone_inductive(pre: Self, post: Self, zid: nat) {
-            admit();
+            assert forall|other: nat| #[trigger]
+                post.zones.contains_key(other) implies post.shared_regions[other]
+                    == live_shared_regions(other, post.zones[other]) by { }
         }
 
         #[inductive(remove_zone)]
-        fn remove_zone_inductive(pre: Self, post: Self, zid: nat) {
-            admit();
-        }
+        fn remove_zone_inductive(pre: Self, post: Self, zid: nat) { }
 
         #[inductive(synchronize_enclave_private_regions_view)]
         fn synchronize_enclave_private_regions_view_inductive(
@@ -501,7 +616,9 @@ tokenized_state_machine! {
             post: Self,
             region: MemoryRegion,
         ) {
-            admit();
+            let old_zone = pre.zones[root_zone_id()];
+            assert(old_zone.wf());
+            old_zone.cpu_mem_set.lemma_insert_region_wf(region);
         }
 
         #[inductive(cpu_insert_enclave_private_region)]
@@ -511,7 +628,47 @@ tokenized_state_machine! {
             zid: nat,
             region: MemoryRegion,
         ) {
-            admit();
+            let old_zone = pre.zones[zid];
+            assert(old_zone.wf());
+            old_zone.cpu_mem_set.lemma_insert_region_wf(region);
+            let new_zone = old_zone.cpu_insert_region(region);
+            lemma_enclave_region_not_normal_memory(zid, region);
+            assert(post.enclave_private_regions_view.dom() =~= post.zone_ids);
+            assert forall|other: nat| #[trigger]
+                post.zones.contains_key(other) implies {
+                    &&& live_enclave_private_regions(other, post.zones[other]).subset_of(
+                        post.enclave_private_regions_view[other],
+                    )
+                    &&& forall|cached: MemoryRegion| #[trigger]
+                        post.enclave_private_regions_view[other].contains(cached) ==> {
+                            &&& other != root_zone_id()
+                            &&& cached.spec_valid()
+                            &&& region_in_enclave_memory(other, cached)
+                        }
+                } by { }
+            assert(live_shared_regions(zid, new_zone)
+                =~= live_shared_regions(zid, old_zone));
+            assert forall|other: nat| #[trigger]
+                post.zones.contains_key(other) implies post.shared_regions[other]
+                    == live_shared_regions(other, post.zones[other]) by { }
+            assert forall|zid1: nat, zid2: nat, r1: MemoryRegion, r2: MemoryRegion|
+                post.zones.contains_key(zid1) && post.zones.contains_key(zid2)
+                    && zid1 != root_zone_id() && zid2 != root_zone_id()
+                    && #[trigger] post.zones[zid1].cpu_mem_set.regions.contains(r1)
+                    && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r2)
+                    && region_in_enclave_memory(zid1, r1)
+                    && region_in_enclave_memory(zid2, r2)
+                    && (zid1 != zid2 || r1 != r2)
+                    implies !r1.spec_overlaps_pmem(r2) by {
+                let r1_is_new = !pre.zones[zid1].cpu_mem_set.regions.contains(r1);
+                let r2_is_new = !pre.zones[zid2].cpu_mem_set.regions.contains(r2);
+                if r1_is_new {
+                    assert(pre.enclave_private_regions_view[zid2].contains(r2));
+                    r2.lemma_overlaps_pmem_symmetric(region);
+                } else if r2_is_new {
+                    assert(pre.enclave_private_regions_view[zid1].contains(r1));
+                }
+            }
         }
 
         #[inductive(cpu_insert_enclave_shared_region)]
@@ -521,7 +678,17 @@ tokenized_state_machine! {
             zid: nat,
             region: MemoryRegion,
         ) {
-            admit();
+            let old_zone = pre.zones[zid];
+            assert(old_zone.wf());
+            old_zone.cpu_mem_set.lemma_insert_region_wf(region);
+            lemma_normal_region_not_enclave_memory(zid, region);
+            lemma_shared_regions_update_preserves_exact(
+                pre.zone_ids,
+                pre.zones,
+                pre.shared_regions,
+                zid,
+                old_zone.cpu_insert_region(region),
+            );
         }
 
         #[inductive(cpu_remove_region)]
@@ -531,12 +698,28 @@ tokenized_state_machine! {
             zid: nat,
             region: MemoryRegion,
         ) {
-            admit();
+            let old_zone = pre.zones[zid];
+            assert(old_zone.wf());
+            old_zone.cpu_mem_set.lemma_remove_region_exact_wf(region);
+            lemma_shared_regions_update_preserves_exact(
+                pre.zone_ids,
+                pre.zones,
+                pre.shared_regions,
+                zid,
+                old_zone.cpu_remove_region(region),
+            );
         }
 
         #[inductive(cpu_clear_enclave_regions)]
         fn cpu_clear_enclave_regions_inductive(pre: Self, post: Self, zid: nat) {
-            admit();
+            assert(live_shared_regions(zid, pre.zones[zid].cpu_clear()) =~= Set::empty());
+            lemma_shared_regions_update_preserves_exact(
+                pre.zone_ids,
+                pre.zones,
+                pre.shared_regions,
+                zid,
+                pre.zones[zid].cpu_clear(),
+            );
         }
 
         #[inductive(iommu_insert_region)]
@@ -545,7 +728,10 @@ tokenized_state_machine! {
             post: Self,
             region: MemoryRegion,
         ) {
-            admit();
+            let old_zone = pre.zones[root_zone_id()];
+            assert(old_zone.wf());
+            old_zone.iommu_mem_set.lemma_insert_region_wf(region);
+            lemma_insert_region_preserves_pmem_disjoint(old_zone.iommu_mem_set, region);
         }
 
         #[inductive(iommu_remove_region)]
@@ -554,13 +740,14 @@ tokenized_state_machine! {
             post: Self,
             region: MemoryRegion,
         ) {
-            admit();
+            let old_zone = pre.zones[root_zone_id()];
+            assert(old_zone.wf());
+            old_zone.iommu_mem_set.lemma_remove_region_exact_wf(region);
+            lemma_remove_region_preserves_pmem_disjoint(old_zone.iommu_mem_set, region);
         }
 
         #[inductive(iommu_clear_regions)]
-        fn iommu_clear_regions_inductive(pre: Self, post: Self) {
-            admit();
-        }
+        fn iommu_clear_regions_inductive(pre: Self, post: Self) { }
     }
 }
 
