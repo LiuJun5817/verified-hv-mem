@@ -41,7 +41,7 @@ pub const NPT_HUGE: u64 = 1 << 7;
 /// Execute-disable bit.
 pub const NPT_NX: u64 = 1 << 63;
 
-/// Physical-address bits, including HyperEnclave's possible SME C-bit.
+/// Physical-address bits, including an optional SME C-bit.
 pub const NPT_PHYS_ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
 
 /// Fields which make an entry occupied in the software page-table model.

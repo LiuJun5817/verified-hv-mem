@@ -1,27 +1,9 @@
-//! HyperEnclave memory-isolation policy.
+//! Memory-isolation policy for a root domain and isolated enclaves.
 //!
-//! The policy separates physical pages into four externally checked classes:
-//! normal-world memory, EPC memory, monitor memory, and the allocator pool.
-//! DMA pages are a subset of normal-world memory.  The class partition is a
-//! trusted configuration fact; assignment of private pages to individual
-//! enclaves is dynamic state checked on every enclave insertion. Enclave EPC
-//! pages and enclave GPT backing frames may be leaf-mapped. Normal-memory
-//! regions may additionally be mapped into an enclave through an explicit
-//! dynamic Shared transition; VeriHyMem's own page-table backing frames may
-//! not be leaf-mapped.
-//!
-//! Private and Shared are protection classifications, not permanent physical
-//! memory classes. EPC and enclave-owned GPT backing frames are eligible for
-//! enclave Private mappings. Normal-memory marshalling pages remain physically
-//! normal memory but enter the S2-Shared projection while an authorized enclave
-//! mapping exists. After the final enclave mapping is removed, a page still
-//! mapped by the root returns to the root's S2-Private projection. The
-//! enclave-normal-page authorization itself is an integration premise.
-//!
-//! Executable operations for this state machine live in
-//! `hv_mem::imp::hyperenclave`. Its policy-neutral software projection and
-//! complete transition-refinement proof live in
-//! `refinement::software::hyperenclave`.
+//! Integrations supply the memory classes, enclave GPT ownership, DMA range,
+//! and Shared-mapping authorization. Enclave-private pages are dynamically
+//! assigned to one enclave; normal pages are S2-Shared only while mapped into
+//! an enclave. The current profile supports IOMMU mappings only for the root.
 use super::GhostZone;
 use crate::{
     address::{addr::SpecPAddr, region::MemoryRegion},
@@ -41,28 +23,23 @@ pub open spec fn root_zone_id() -> nat {
     0
 }
 
-/// Physical pages that may be mapped by the normal-world CPU page table,
-/// including dedicated sanitized backing pages intentionally exposed read-only.
+/// Physical pages available to the normal-world CPU page table.
 pub uninterp spec fn normal_memory() -> Set<PhysPage>;
 
-/// Physical pages from which enclaves receive private code/data pages.
+/// Protected pages available for enclave-private code and data.
 pub uninterp spec fn epc_memory() -> Set<PhysPage>;
 
 /// Hypervisor code, data, heap, and metadata.  No guest leaf mapping may target
 /// this class.
 pub uninterp spec fn monitor_pool() -> Set<PhysPage>;
 
-/// Pages managed by VeriHyMem's global allocator for page tables and other
-/// internal structures. These pages are statically configured and are not
-/// inserted into a zone's leaf-mapping memory set.
+/// VeriHyMem allocator pages, which cannot be ordinary leaf mappings.
 pub uninterp spec fn allocator_pool() -> Set<PhysPage>;
 
-/// GPT backing frames privately owned by enclave zone `zid`. HyperEnclave's
-/// RAII allocator discipline supplies this dynamic ownership classification at
-/// the integration boundary.
+/// GPT backing frames privately owned by enclave `zid`.
 pub uninterp spec fn enclave_gpt_backing_frames(zid: nat) -> Set<PhysPage>;
 
-/// Pages reachable by the root-cell IOMMU page table.
+/// Pages reachable by the root-domain IOMMU page table.
 pub uninterp spec fn dma_memory() -> Set<PhysPage>;
 
 /// Trusted result of the external memory-layout checker.
@@ -91,45 +68,43 @@ pub axiom fn enclave_gpt_backing_frames_are_allocator_memory()
 ;
 
 /// Physical page occupied by page index `i` of `region`.
-pub open spec fn he_region_phys_page(region: MemoryRegion, i: nat) -> PhysPage {
+pub open spec fn enclave_region_phys_page(region: MemoryRegion, i: nat) -> PhysPage {
     PhysPage(region.pstart@.0 / SPEC_PAGE_SIZE + i)
 }
 
 /// Complete physical-page footprint of `region`.
-pub open spec fn he_region_phys_pages(region: MemoryRegion) -> Set<PhysPage> {
+pub open spec fn enclave_region_phys_pages(region: MemoryRegion) -> Set<PhysPage> {
     Set::new(
         |page: PhysPage|
             exists|i: nat|
-                0 <= i < region.pages && #[trigger] he_region_phys_page(region, i) == page,
+                0 <= i < region.pages && #[trigger] enclave_region_phys_page(region, i) == page,
     )
 }
 
 pub open spec fn region_in_normal_memory(region: MemoryRegion) -> bool {
-    he_region_phys_pages(region).subset_of(normal_memory())
+    enclave_region_phys_pages(region).subset_of(normal_memory())
 }
 
 pub open spec fn region_in_epc_memory(region: MemoryRegion) -> bool {
-    he_region_phys_pages(region).subset_of(epc_memory())
+    enclave_region_phys_pages(region).subset_of(epc_memory())
 }
 
 pub open spec fn region_in_monitor_pool(region: MemoryRegion) -> bool {
-    he_region_phys_pages(region).subset_of(monitor_pool())
+    enclave_region_phys_pages(region).subset_of(monitor_pool())
 }
 
 pub open spec fn region_in_allocator_pool(region: MemoryRegion) -> bool {
-    he_region_phys_pages(region).subset_of(allocator_pool())
+    enclave_region_phys_pages(region).subset_of(allocator_pool())
 }
 
 pub open spec fn region_in_enclave_gpt_backing_frames(
     zid: nat,
     region: MemoryRegion,
 ) -> bool {
-    he_region_phys_pages(region).subset_of(enclave_gpt_backing_frames(zid))
+    enclave_region_phys_pages(region).subset_of(enclave_gpt_backing_frames(zid))
 }
 
-/// Static integration obligation for the global allocator's complete backing
-/// range.  Page-table and internal frames are allocated only from this range;
-/// there is no runtime transition that changes its memory class.
+/// The global allocator's backing range lies in `allocator_pool`.
 pub open spec fn allocator_backing_in_allocator_pool(base: SpecPAddr, frames: nat) -> bool {
     forall|i: nat|
         0 <= i < frames ==> #[trigger]
@@ -137,19 +112,15 @@ pub open spec fn allocator_backing_in_allocator_pool(base: SpecPAddr, frames: na
 }
 
 pub open spec fn region_in_dma_memory(region: MemoryRegion) -> bool {
-    he_region_phys_pages(region).subset_of(dma_memory())
+    enclave_region_phys_pages(region).subset_of(dma_memory())
 }
 
-/// Enclave leaf mappings come from private EPC pages or the enclave's GPT
-/// backing frames. VeriHyMem's own page-table backing frames are not in either
-/// class and therefore remain outside this authorization.
+/// Pages authorized for enclave-private leaf mappings.
 pub open spec fn region_in_enclave_memory(zid: nat, region: MemoryRegion) -> bool {
     region_in_epc_memory(region) || region_in_enclave_gpt_backing_frames(zid, region)
 }
 
-/// Currently installed enclave-private CPU regions. This is the semantic
-/// source used by the HyperEnclave policy; `enclave_private_regions_view`
-/// below is a conservative cache used by the serialized overlap check.
+/// Currently installed enclave-private CPU regions.
 pub open spec fn live_enclave_private_regions(
     zid: nat,
     zone: GhostZone,
@@ -165,10 +136,7 @@ pub open spec fn live_enclave_private_regions(
     }
 }
 
-/// Currently installed normal-memory CPU regions in an enclave zone. These
-/// are the exact dynamic Shared regions for the HyperEnclave policy. Sharing
-/// scope is deliberately not represented here: the caller supplies the
-/// marshalling-buffer authorization as an interface premise.
+/// Currently installed normal-memory CPU regions in an enclave.
 pub open spec fn live_shared_regions(
     zid: nat,
     zone: GhostZone,
@@ -184,11 +152,7 @@ pub open spec fn live_shared_regions(
     }
 }
 
-/// Runtime overlap guard used while constructing an enclave. The candidate is
-/// compared with the conservative private-region entry for every other live
-/// enclave. Same-enclave physical aliases are permitted. Root mappings need no
-/// such scan because normal memory is statically disjoint from both EPC memory
-/// and the allocator pool.
+/// Rejects private-page overlap with every other enclave owner.
 pub open spec fn enclave_insert_allowed(
     enclave_private_regions_view: Map<nat, Set<MemoryRegion>>,
     zid: nat,
@@ -211,8 +175,8 @@ pub proof fn lemma_normal_region_not_enclave_memory(zid: nat, region: MemoryRegi
     ensures
         !region_in_enclave_memory(zid, region),
 {
-    let page = he_region_phys_page(region, 0);
-    assert(he_region_phys_pages(region).contains(page));
+    let page = enclave_region_phys_page(region, 0);
+    assert(enclave_region_phys_pages(region).contains(page));
     memory_classes_pairwise_disjoint();
     enclave_gpt_backing_frames_are_allocator_memory();
 }
@@ -256,7 +220,7 @@ pub proof fn lemma_shared_regions_update_preserves_exact(
 { }
 
 tokenized_state_machine! {
-    HyperEnclaveSpec {
+    EnclaveSpec {
         fields {
             #[sharding(variable)]
             pub zone_ids: Set<nat>,
@@ -264,17 +228,11 @@ tokenized_state_machine! {
             #[sharding(map)]
             pub zones: Map<nat, GhostZone>,
 
-            /// Conservative per-zone private-region cache used by serialized
-            /// runtime overlap checks. An entry may contain regions that have
-            /// since been removed, but never omits a live enclave-private
-            /// region. Normal-memory Shared regions never enter this cache.
+            /// Conservative private-region cache used by overlap checks.
             #[sharding(variable)]
             pub enclave_private_regions_view: Map<nat, Set<MemoryRegion>>,
 
-            /// Exact per-enclave set of installed normal-memory Shared
-            /// regions. Unlike `enclave_private_regions_view`, this state is not
-            /// conservative: removing the final Shared mapping must allow the
-            /// affected pages to return to the root's S2-Private projection.
+            /// Exact installed normal-memory Shared regions per enclave.
             #[sharding(variable)]
             pub shared_regions: Map<nat, Set<MemoryRegion>>,
         }
@@ -301,9 +259,7 @@ tokenized_state_machine! {
                 }
         }
 
-        /// The Shared-region view is exact. Its root entry is empty, and every
-        /// non-root entry is precisely the normal-memory subset of that
-        /// enclave's installed CPU regions.
+        /// The Shared-region view exactly tracks installed enclave mappings.
         #[invariant]
         pub fn inv_shared_regions_exact(&self) -> bool {
             &&& self.shared_regions.dom() == self.zone_ids
@@ -312,10 +268,7 @@ tokenized_state_machine! {
                     == live_shared_regions(zid, self.zones[zid])
         }
 
-        /// Per-zone class policy. The normal world may map normal pages and root DMA
-        /// pages. An enclave may map private EPC/GPT backing frames or dynamic
-        /// normal-memory Shared regions on the CPU side and has no IOMMU
-        /// mappings in the initial integration profile.
+        /// Restricts each zone to its authorized CPU and IOMMU memory classes.
         #[invariant]
         pub fn inv_class_policy(&self) -> bool {
             forall|zid: nat| #[trigger] self.zones.contains_key(zid) ==> {
@@ -336,9 +289,7 @@ tokenized_state_machine! {
             }
         }
 
-        /// Dynamic exclusivity invariant across enclave owners. Physical
-        /// aliases within one enclave are permitted; normal-memory Shared
-        /// regions are intentionally excluded.
+        /// Private regions owned by different enclaves do not overlap.
         #[invariant]
         pub fn inv_enclave_regions_cross_zone_disjoint(&self) -> bool {
             forall|zid1: nat, zid2: nat, r1: MemoryRegion, r2: MemoryRegion|
@@ -352,8 +303,7 @@ tokenized_state_machine! {
                     ==> !r1.spec_overlaps_pmem(r2)
         }
 
-        /// Reachable memory sets contain finitely many operation units. This is
-        /// later used to refine clear operations to finite removal traces.
+        /// Memory sets are finite so clear operations have finite refinements.
         #[invariant]
         pub fn inv_region_sets_finite(&self) -> bool {
             forall|zid: nat| #[trigger] self.zones.contains_key(zid) ==> {
@@ -407,9 +357,7 @@ tokenized_state_machine! {
             }
         }
 
-        /// Refresh one entry of the conservative global cache from its
-        /// map-sharded zone token. This is a ghost-only operation used by the
-        /// serialized private-region insertion scan.
+        /// Refresh one entry of the conservative private-region cache.
         transition! {
             synchronize_enclave_private_regions_view(zid: nat) {
                 remove zones -= [zid => let zone];
@@ -450,9 +398,7 @@ tokenized_state_machine! {
             }
         }
 
-        /// Install an explicitly authorized normal-memory Shared region in an
-        /// enclave CPU stage-2 table. The sharing scope is an integration
-        /// premise; the TSM records only the active Shared mapping.
+        /// Install an authorized normal-memory Shared mapping in an enclave.
         transition! {
             cpu_insert_enclave_shared_region(zid: nat, region: MemoryRegion) {
                 remove zones -= [zid => let zone];
@@ -514,8 +460,7 @@ tokenized_state_machine! {
             }
         }
 
-        /// Tear down all root-cell IOMMU mappings. Enclave IOMMU sets are
-        /// always empty and therefore have no executable mutation operation.
+        /// Tear down all root IOMMU mappings.
         transition! {
             iommu_clear_regions() {
                 remove zones -= [root_zone_id() => let zone];
@@ -694,14 +639,14 @@ tokenized_state_machine! {
     }
 }
 
-pub type HyperEnclaveSpecInstance = HyperEnclaveSpec::Instance;
+pub type EnclaveSpecInstance = EnclaveSpec::Instance;
 
-pub type HyperEnclaveZoneIdsToken = HyperEnclaveSpec::zone_ids;
+pub type EnclaveZoneIdsToken = EnclaveSpec::zone_ids;
 
-pub type HyperEnclaveZoneToken = HyperEnclaveSpec::zones;
+pub type EnclaveZoneToken = EnclaveSpec::zones;
 
-pub type HyperEnclavePrivateRegionsViewToken = HyperEnclaveSpec::enclave_private_regions_view;
+pub type EnclavePrivateRegionsViewToken = EnclaveSpec::enclave_private_regions_view;
 
-pub type HyperEnclaveSharedRegionsToken = HyperEnclaveSpec::shared_regions;
+pub type EnclaveSharedRegionsToken = EnclaveSpec::shared_regions;
 
 } // verus!

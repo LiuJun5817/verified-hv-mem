@@ -1,12 +1,12 @@
 //! Common software-refinement contracts and proof helpers.
 //!
 //! Policy-specific projections and transition proofs live in [`budget`] and
-//! [`hyperenclave`]. This module retains the policy-neutral region rendering,
+//! [`enclave`]. This module retains the policy-neutral region rendering,
 //! memory-set projections, and refinement interface shared by those policies.
 use vstd::prelude::*;
 
 pub mod budget;
-pub mod hyperenclave;
+pub mod enclave;
 
 pub use budget::*;
 

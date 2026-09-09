@@ -3,11 +3,11 @@
 //! - [`closure`]: `ClosureSpec` with global `all_regions`, plus its state-machine tokens.
 //! - [`budget`]: `BudgetSpec` with static Private and Shared eligibility budgets,
 //!   plus its state-machine tokens.
-//! - [`hyperenclave`]: a physical-class policy with dynamic, pairwise enclave
-//!   sharing.
+//! - [`enclave`]: an extensible physical-class policy for enclave hypervisors,
+//!   with dynamic per-enclave sharing.
 pub mod budget;
 pub mod closure;
-pub mod hyperenclave;
+pub mod enclave;
 
 use crate::{address::region::MemoryRegion, memory_set::SpecMemorySet};
 use vstd::prelude::*;
@@ -16,9 +16,9 @@ pub use budget::{BudgetSpec, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneT
 pub use closure::{
     ClosureSpec, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken, ClosureZonesViewToken,
 };
-pub use hyperenclave::{
-    HyperEnclavePrivateRegionsViewToken, HyperEnclaveSharedRegionsToken, HyperEnclaveSpec,
-    HyperEnclaveSpecInstance, HyperEnclaveZoneIdsToken, HyperEnclaveZoneToken,
+pub use enclave::{
+    EnclavePrivateRegionsViewToken, EnclaveSharedRegionsToken, EnclaveSpec, EnclaveSpecInstance,
+    EnclaveZoneIdsToken, EnclaveZoneToken,
 };
 
 verus! {

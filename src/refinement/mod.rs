@@ -6,8 +6,8 @@
 //! ```text
 //!         software                              hardware
 //!   SoftwareRefinement   (software/)      HardwareRefinement   (hardware.rs)
-//!     impl for SoftwareSpec                 impl for HardwareSpec
-//!      (BudgetSpec::State)               (MmuSpec::State, MmuSpec::State)
+//!     policy-specific impls                 impl for HardwareSpec
+//!   (BudgetSpec / EnclaveSpec)           (MmuSpec::State, MmuSpec::State)
 //!         │ view                                 │ view
 //!     SoftwareView ◄──────── sync ──────────► HardwareView
 //!         └────────────► MachineState ◄──────────┘   (machine.rs)
@@ -23,7 +23,7 @@
 //!
 //! | module       | role                                                                 |
 //! |--------------|----------------------------------------------------------------------|
-//! | [`software`] | common software helpers plus policy-specific BudgetSpec/HyperEnclave refinements |
+//! | [`software`] | common helpers plus `BudgetSpec` and extensible `EnclaveSpec` refinements       |
 //! | [`hardware`] | `HardwareSpec` projection + `HardwareRefinement` contract/impl        |
 //! | [`sync`]     | concrete BudgetSpec/MMU token synchronization bridge                   |
 //! | [`machine`]  | view-only `(SoftwareView, HardwareView)` → `MachineState`              |

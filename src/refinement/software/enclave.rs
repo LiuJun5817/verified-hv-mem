@@ -1,8 +1,4 @@
-//! HyperEnclave-specific projection and transition-refinement proofs.
-//!
-//! It establishes the policy-neutral [`SoftwareView`] projection and proves
-//! that every HyperEnclave transition simulates a finite software-operation
-//! trace.
+//! `SoftwareView` projection and transition refinement for `EnclaveSpec`.
 use vstd::prelude::*;
 
 verus! {
@@ -12,7 +8,7 @@ use crate::address::addr::SpecVAddr;
 use crate::address::frame::SpecFrame;
 use crate::address::region::MemoryRegion;
 use crate::constants::*;
-use crate::hv_mem::spec::hyperenclave::*;
+use crate::hv_mem::spec::enclave::*;
 use crate::hv_mem::spec::GhostZone;
 use crate::memory_set::SpecMemorySet;
 use crate::model::convert::*;
@@ -21,21 +17,21 @@ use crate::model::software::proof::*;
 use crate::model::types::{GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 
 // ---------------------------------------------------------------------------
-// HyperEnclave-specific page classifications and projections
+// Enclave-policy page classifications and projections
 // ---------------------------------------------------------------------------
 /// Combines every live zone's CPU entries into the policy-neutral S2 map.
-pub open spec fn state_s2_map(state: HyperEnclaveSpec::State) -> Map<VmPageKey, S2Entry> {
+pub open spec fn state_s2_map(state: EnclaveSpec::State) -> Map<VmPageKey, S2Entry> {
     zones_s2_map(state.zone_ids, state.zones)
 }
 
 /// Combines every live zone's IOMMU entries into the policy-neutral IOMMU map.
-/// HyperEnclave's class invariant makes every non-root contribution empty.
-pub open spec fn state_iommu_s2_map(state: HyperEnclaveSpec::State) -> Map<VmPageKey, S2Entry> {
+/// `EnclaveSpec`'s class invariant makes every non-root contribution empty.
+pub open spec fn state_iommu_s2_map(state: EnclaveSpec::State) -> Map<VmPageKey, S2Entry> {
     zones_iommu_s2_map(state.zone_ids, state.zones)
 }
 
 /// Physical pages in the exact per-enclave Shared-region projection.
-pub open spec fn state_s2_shared_pages(state: HyperEnclaveSpec::State) -> Set<PhysPage> {
+pub open spec fn state_s2_shared_pages(state: EnclaveSpec::State) -> Set<PhysPage> {
     Set::new(
         |page: PhysPage|
             exists|zid: nat, region: MemoryRegion|
@@ -48,8 +44,8 @@ pub open spec fn state_s2_shared_pages(state: HyperEnclaveSpec::State) -> Set<Ph
 }
 
 /// Per-VM S2-Private pages. A mapped page is Private exactly while it is not
-/// present in HyperEnclave's exact dynamic Shared projection.
-pub open spec fn state_s2_private_pages(state: HyperEnclaveSpec::State) -> Map<
+/// present in `EnclaveSpec`'s exact dynamic Shared projection.
+pub open spec fn state_s2_private_pages(state: EnclaveSpec::State) -> Map<
     VmId,
     Set<PhysPage>,
 > {
@@ -61,8 +57,8 @@ pub open spec fn state_s2_private_pages(state: HyperEnclaveSpec::State) -> Map<
 }
 
 /// Per-VM IOMMU-Private pages. Only the root entry can be nonempty under the
-/// HyperEnclave class invariant.
-pub open spec fn state_iommu_private_pages(state: HyperEnclaveSpec::State) -> Map<
+/// `EnclaveSpec` class invariant.
+pub open spec fn state_iommu_private_pages(state: EnclaveSpec::State) -> Map<
     VmId,
     Set<PhysPage>,
 > {
@@ -72,17 +68,17 @@ pub open spec fn state_iommu_private_pages(state: HyperEnclaveSpec::State) -> Ma
     )
 }
 
-/// HyperEnclave's current integration profile has no IOMMU-Shared mappings.
-pub open spec fn state_iommu_shared_pages(_state: HyperEnclaveSpec::State) -> Set<PhysPage> {
+/// The current `EnclaveSpec` profile has no IOMMU-Shared mappings.
+pub open spec fn state_iommu_shared_pages(_state: EnclaveSpec::State) -> Set<PhysPage> {
     Set::empty()
 }
 
-/// HyperEnclave state equipped with its policy-neutral [`SoftwareView`].
-pub ghost struct HyperEnclaveSoftwareSpec {
-    pub state: HyperEnclaveSpec::State,
+/// `EnclaveSpec` state equipped with its policy-neutral [`SoftwareView`].
+pub ghost struct EnclaveSoftwareSpec {
+    pub state: EnclaveSpec::State,
 }
 
-impl HyperEnclaveSoftwareSpec {
+impl EnclaveSoftwareSpec {
     pub open spec fn view(&self) -> SoftwareView {
         SoftwareView {
             all_vms: Set::new(|vm: VmId| self.state.zone_ids.contains(vm.0)),
@@ -99,26 +95,26 @@ impl HyperEnclaveSoftwareSpec {
 // ---------------------------------------------------------------------------
 // Projection facts
 // ---------------------------------------------------------------------------
-/// The common refinement geometry and HyperEnclave's policy geometry denote
+/// The common refinement geometry and the enclave policy's geometry denote
 /// the same physical pages.
-proof fn lemma_region_pages_match_hyper(region: MemoryRegion)
+proof fn lemma_region_pages_match_enclave(region: MemoryRegion)
     ensures
-        region_pages(region) == he_region_phys_pages(region),
+        region_pages(region) == enclave_region_phys_pages(region),
 {
     assert forall|page: PhysPage|
-        region_pages(region).contains(page) <==> he_region_phys_pages(region).contains(page) by {
+        region_pages(region).contains(page) <==> enclave_region_phys_pages(region).contains(page) by {
         if region_pages(region).contains(page) {
             let i = choose|i: nat|
                 0 <= i < region.pages && crate::hv_mem::spec::budget::region_phys_page(region, i)
                     == page;
-            assert(crate::hv_mem::spec::budget::region_phys_page(region, i) == he_region_phys_page(
+            assert(crate::hv_mem::spec::budget::region_phys_page(region, i) == enclave_region_phys_page(
                 region,
                 i,
             ));
         }
-        if he_region_phys_pages(region).contains(page) {
-            let i = choose|i: nat| 0 <= i < region.pages && he_region_phys_page(region, i) == page;
-            assert(crate::hv_mem::spec::budget::region_phys_page(region, i) == he_region_phys_page(
+        if enclave_region_phys_pages(region).contains(page) {
+            let i = choose|i: nat| 0 <= i < region.pages && enclave_region_phys_page(region, i) == page;
+            assert(crate::hv_mem::spec::budget::region_phys_page(region, i) == enclave_region_phys_page(
                 region,
                 i,
             ));
@@ -129,7 +125,7 @@ proof fn lemma_region_pages_match_hyper(region: MemoryRegion)
 /// Every page of an installed non-root normal-memory region is in the exact
 /// dynamic Shared projection.
 proof fn lemma_nonroot_normal_region_page_is_shared(
-    spec: HyperEnclaveSoftwareSpec,
+    spec: EnclaveSoftwareSpec,
     zid: nat,
     region: MemoryRegion,
     page: PhysPage,
@@ -156,7 +152,7 @@ proof fn lemma_nonroot_normal_region_page_is_shared(
 /// page.  This hides the exact `shared_regions` cache from later refinement
 /// arguments.
 proof fn lemma_shared_page_has_normal_region(
-    spec: HyperEnclaveSoftwareSpec,
+    spec: EnclaveSoftwareSpec,
     page: PhysPage,
 ) -> (witness: (nat, MemoryRegion))
     requires
@@ -183,7 +179,7 @@ proof fn lemma_shared_page_has_normal_region(
 
 /// Every Shared page has a concrete non-root CPU mapping witness.
 proof fn lemma_shared_page_has_nonroot_entry(
-    spec: HyperEnclaveSoftwareSpec,
+    spec: EnclaveSoftwareSpec,
     page: PhysPage,
 ) -> (key: VmPageKey)
     requires
@@ -206,7 +202,7 @@ proof fn lemma_shared_page_has_nonroot_entry(
 /// A non-root mapped page outside the Shared projection is backed by an
 /// enclave-private EPC or GPT-backing region.
 proof fn lemma_nonroot_unshared_mapped_page_has_private_region(
-    spec: HyperEnclaveSoftwareSpec,
+    spec: EnclaveSoftwareSpec,
     zid: nat,
     page: PhysPage,
 )
@@ -250,8 +246,8 @@ proof fn lemma_normal_and_enclave_page_disjoint(
     ensures
         false,
 {
-    lemma_region_pages_match_hyper(normal_region);
-    lemma_region_pages_match_hyper(enclave_region);
+    lemma_region_pages_match_enclave(normal_region);
+    lemma_region_pages_match_enclave(enclave_region);
     assert(normal_memory().contains(page));
     memory_classes_pairwise_disjoint();
     if region_in_epc_memory(enclave_region) {
@@ -264,8 +260,8 @@ proof fn lemma_normal_and_enclave_page_disjoint(
     }
 }
 
-/// Every invariant HyperEnclave state projects to a well-formed SoftwareView.
-pub proof fn lemma_hyperenclave_projection_wf(spec: HyperEnclaveSoftwareSpec)
+/// Every invariant `EnclaveSpec` state projects to a well-formed SoftwareView.
+pub proof fn lemma_enclave_projection_wf(spec: EnclaveSoftwareSpec)
     requires
         spec.state.invariant(),
     ensures
@@ -400,7 +396,7 @@ pub proof fn lemma_hyperenclave_projection_wf(spec: HyperEnclaveSoftwareSpec)
                     let normal_region = choose|region: MemoryRegion| #[trigger]
                         iommu_set.regions.contains(region) && region_pages(region).contains(page);
                     assert(region_in_dma_memory(normal_region));
-                    lemma_region_pages_match_hyper(normal_region);
+                    lemma_region_pages_match_enclave(normal_region);
                     dma_memory_is_normal_memory();
                     assert(region_in_normal_memory(normal_region));
 
@@ -449,7 +445,7 @@ pub proof fn lemma_hyperenclave_projection_wf(spec: HyperEnclaveSoftwareSpec)
     assert(sw.wf());
 }
 
-proof fn lemma_cpu_mapped_page_has_entry(spec: HyperEnclaveSoftwareSpec, zid: nat, page: PhysPage)
+proof fn lemma_cpu_mapped_page_has_entry(spec: EnclaveSoftwareSpec, zid: nat, page: PhysPage)
     requires
         spec.state.invariant(),
         spec.state.zones.contains_key(zid),
@@ -476,7 +472,7 @@ proof fn lemma_cpu_mapped_page_has_entry(spec: HyperEnclaveSoftwareSpec, zid: na
     assert(spec.view().s2_map[key].page == page);
 }
 
-proof fn lemma_cpu_entry_maps_page(spec: HyperEnclaveSoftwareSpec, key: VmPageKey)
+proof fn lemma_cpu_entry_maps_page(spec: EnclaveSoftwareSpec, key: VmPageKey)
     requires
         spec.state.invariant(),
         spec.view().s2_map.contains_key(key),
@@ -1591,23 +1587,23 @@ proof fn lemma_make_region_private(
 // Lifecycle and stuttering transitions
 // ---------------------------------------------------------------------------
 proof fn lemma_add_zone_step_refines(
-    pre: HyperEnclaveSoftwareSpec,
-    post: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
+    post: EnclaveSoftwareSpec,
     zid: nat,
 ) -> (ops: Seq<SoftwareOp>)
     requires
         pre.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             post.state,
-            HyperEnclaveSpec::Step::add_zone(zid),
+            EnclaveSpec::Step::add_zone(zid),
         ),
     ensures
         post.state.invariant(),
         run_software_ops(pre.view(), post.view(), ops),
 {
-    reveal(HyperEnclaveSpec::State::next_by);
-    let next = HyperEnclaveSpec::take_step::add_zone(pre.state, zid);
+    reveal(EnclaveSpec::State::next_by);
+    let next = EnclaveSpec::take_step::add_zone(pre.state, zid);
     let vm = VmId(zid);
     let empty_zone = GhostZone {
         cpu_mem_set: SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
@@ -1677,22 +1673,22 @@ proof fn lemma_add_zone_step_refines(
 }
 
 proof fn lemma_remove_zone_step_refines(
-    pre: HyperEnclaveSoftwareSpec,
-    post: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
+    post: EnclaveSoftwareSpec,
     zid: nat,
 ) -> (ops: Seq<SoftwareOp>)
     requires
         pre.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             post.state,
-            HyperEnclaveSpec::Step::remove_zone(zid),
+            EnclaveSpec::Step::remove_zone(zid),
         ),
     ensures
         post.state.invariant(),
         run_software_ops(pre.view(), post.view(), ops),
 {
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     let vm = VmId(zid);
     assert(pre.state.zones.contains_key(zid));
     assert(pre.state.zones[zid].cpu_mem_set.empty());
@@ -1759,23 +1755,23 @@ proof fn lemma_remove_zone_step_refines(
 }
 
 proof fn lemma_synchronize_step_refines(
-    pre: HyperEnclaveSoftwareSpec,
-    post: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
+    post: EnclaveSoftwareSpec,
     zid: nat,
 ) -> (ops: Seq<SoftwareOp>)
     requires
         pre.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             post.state,
-            HyperEnclaveSpec::Step::synchronize_enclave_private_regions_view(zid),
+            EnclaveSpec::Step::synchronize_enclave_private_regions_view(zid),
         ),
     ensures
         post.state.invariant(),
         run_software_ops(pre.view(), post.view(), ops),
 {
-    reveal(HyperEnclaveSpec::State::next_by);
-    let next = HyperEnclaveSpec::take_step::synchronize_enclave_private_regions_view(
+    reveal(EnclaveSpec::State::next_by);
+    let next = EnclaveSpec::take_step::synchronize_enclave_private_regions_view(
         pre.state,
         zid,
     );
@@ -1790,22 +1786,22 @@ proof fn lemma_synchronize_step_refines(
 // Root CPU transitions
 // ---------------------------------------------------------------------------
 proof fn lemma_cpu_insert_normal_region_step_refines(
-    pre: HyperEnclaveSoftwareSpec,
-    post: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
+    post: EnclaveSoftwareSpec,
     concrete: MemoryRegion,
 ) -> (ops: Seq<SoftwareOp>)
     requires
         pre.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             post.state,
-            HyperEnclaveSpec::Step::cpu_insert_normal_region(concrete),
+            EnclaveSpec::Step::cpu_insert_normal_region(concrete),
         ),
     ensures
         post.state.invariant(),
         run_software_ops(pre.view(), post.view(), ops),
 {
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     let zid = root_zone_id();
     let vm = VmId(zid);
     let old_zone = pre.state.zones[zid];
@@ -1815,7 +1811,7 @@ proof fn lemma_cpu_insert_normal_region_step_refines(
     assert(post.state.shared_regions == pre.state.shared_regions);
     assert(old_zone.wf());
     old_zone.cpu_mem_set.lemma_insert_region_wf(concrete);
-    lemma_hyperenclave_projection_wf(pre);
+    lemma_enclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
     lemma_zones_s2_entries_fresh(pre.state.zone_ids, pre.state.zones, zid, concrete);
@@ -1884,19 +1880,19 @@ proof fn lemma_cpu_insert_normal_region_step_refines(
 }
 
 proof fn lemma_cpu_remove_root_normal_region_refines(
-    pre: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
     concrete: MemoryRegion,
-) -> (result: (HyperEnclaveSoftwareSpec, Seq<SoftwareOp>))
+) -> (result: (EnclaveSoftwareSpec, Seq<SoftwareOp>))
     requires
         pre.state.invariant(),
         pre.state.zones.contains_key(root_zone_id()),
         pre.state.zones[root_zone_id()].cpu_mem_set.regions.contains(concrete),
     ensures
         result.0.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             result.0.state,
-            HyperEnclaveSpec::Step::cpu_remove_region(root_zone_id(), concrete),
+            EnclaveSpec::Step::cpu_remove_region(root_zone_id(), concrete),
         ),
         run_software_ops(pre.view(), result.0.view(), result.1),
 {
@@ -1904,10 +1900,10 @@ proof fn lemma_cpu_remove_root_normal_region_refines(
     let vm = VmId(zid);
     let old_zone = pre.state.zones[zid];
     let region = region_to_abstract(zid, concrete);
-    let post = HyperEnclaveSoftwareSpec {
-        state: HyperEnclaveSpec::take_step::cpu_remove_region(pre.state, zid, concrete),
+    let post = EnclaveSoftwareSpec {
+        state: EnclaveSpec::take_step::cpu_remove_region(pre.state, zid, concrete),
     };
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     assert(post.state.zone_ids == pre.state.zone_ids);
     assert(post.state.zones == pre.state.zones.insert(zid, old_zone.cpu_remove_region(concrete)));
     assert(old_zone.wf());
@@ -1928,7 +1924,7 @@ proof fn lemma_cpu_remove_root_normal_region_refines(
             }
         }
     }
-    lemma_hyperenclave_projection_wf(pre);
+    lemma_enclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
     lemma_zones_s2_remove(pre.state.zone_ids, pre.state.zones, zid, concrete);
@@ -2038,24 +2034,24 @@ proof fn lemma_cpu_remove_root_normal_region_refines(
 // Enclave-private CPU transitions
 // ---------------------------------------------------------------------------
 proof fn lemma_cpu_insert_enclave_private_region_step_refines(
-    pre: HyperEnclaveSoftwareSpec,
-    post: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
+    post: EnclaveSoftwareSpec,
     zid: nat,
     concrete: MemoryRegion,
 ) -> (ops: Seq<SoftwareOp>)
     requires
         pre.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             post.state,
-            HyperEnclaveSpec::Step::cpu_insert_enclave_private_region(zid, concrete),
+            EnclaveSpec::Step::cpu_insert_enclave_private_region(zid, concrete),
         ),
     ensures
         post.state.invariant(),
         run_software_ops(pre.view(), post.view(), ops),
 {
-    reveal(HyperEnclaveSpec::State::next_by);
-    let next = HyperEnclaveSpec::take_step::cpu_insert_enclave_private_region(
+    reveal(EnclaveSpec::State::next_by);
+    let next = EnclaveSpec::take_step::cpu_insert_enclave_private_region(
         pre.state,
         zid,
         concrete,
@@ -2069,7 +2065,7 @@ proof fn lemma_cpu_insert_enclave_private_region_step_refines(
     assert(old_zone.wf());
     old_zone.cpu_mem_set.lemma_insert_region_wf(concrete);
     lemma_enclave_region_not_normal_memory(zid, concrete);
-    lemma_hyperenclave_projection_wf(pre);
+    lemma_enclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
     lemma_zones_s2_entries_fresh(pre.state.zone_ids, pre.state.zones, zid, concrete);
@@ -2119,7 +2115,7 @@ proof fn lemma_cpu_insert_enclave_private_region_step_refines(
             let normal_region = choose|stored: MemoryRegion| #[trigger]
                 iommu_set.regions.contains(stored) && region_pages(stored).contains(page);
             assert(region_in_dma_memory(normal_region));
-            lemma_region_pages_match_hyper(normal_region);
+            lemma_region_pages_match_enclave(normal_region);
             dma_memory_is_normal_memory();
             assert(region_in_normal_memory(normal_region));
             lemma_normal_and_enclave_page_disjoint(normal_region, concrete, zid, page);
@@ -2162,10 +2158,10 @@ proof fn lemma_cpu_insert_enclave_private_region_step_refines(
 }
 
 proof fn lemma_cpu_remove_enclave_private_region_refines(
-    pre: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
     zid: nat,
     concrete: MemoryRegion,
-) -> (result: (HyperEnclaveSoftwareSpec, Seq<SoftwareOp>))
+) -> (result: (EnclaveSoftwareSpec, Seq<SoftwareOp>))
     requires
         pre.state.invariant(),
         pre.state.zones.contains_key(zid),
@@ -2174,20 +2170,20 @@ proof fn lemma_cpu_remove_enclave_private_region_refines(
         region_in_enclave_memory(zid, concrete),
     ensures
         result.0.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             result.0.state,
-            HyperEnclaveSpec::Step::cpu_remove_region(zid, concrete),
+            EnclaveSpec::Step::cpu_remove_region(zid, concrete),
         ),
         run_software_ops(pre.view(), result.0.view(), result.1),
 {
     let vm = VmId(zid);
     let old_zone = pre.state.zones[zid];
     let region = region_to_abstract(zid, concrete);
-    let post = HyperEnclaveSoftwareSpec {
-        state: HyperEnclaveSpec::take_step::cpu_remove_region(pre.state, zid, concrete),
+    let post = EnclaveSoftwareSpec {
+        state: EnclaveSpec::take_step::cpu_remove_region(pre.state, zid, concrete),
     };
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     assert(post.state.zone_ids == pre.state.zone_ids);
     assert(post.state.zones == pre.state.zones.insert(zid, old_zone.cpu_remove_region(concrete)));
     assert(old_zone.wf());
@@ -2217,7 +2213,7 @@ proof fn lemma_cpu_remove_enclave_private_region_refines(
             }
         }
     }
-    lemma_hyperenclave_projection_wf(pre);
+    lemma_enclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
     lemma_zones_s2_remove(pre.state.zone_ids, pre.state.zones, zid, concrete);
@@ -2309,23 +2305,23 @@ proof fn lemma_cpu_remove_enclave_private_region_refines(
 // Dynamic enclave Shared insertion
 // ---------------------------------------------------------------------------
 proof fn lemma_cpu_insert_enclave_shared_region_step_refines(
-    pre: HyperEnclaveSoftwareSpec,
-    post: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
+    post: EnclaveSoftwareSpec,
     zid: nat,
     concrete: MemoryRegion,
 ) -> (ops: Seq<SoftwareOp>)
     requires
         pre.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             post.state,
-            HyperEnclaveSpec::Step::cpu_insert_enclave_shared_region(zid, concrete),
+            EnclaveSpec::Step::cpu_insert_enclave_shared_region(zid, concrete),
         ),
     ensures
         post.state.invariant(),
         run_software_ops(pre.view(), post.view(), ops),
 {
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     let root = VmId(root_zone_id());
     let vm = VmId(zid);
     let old_zone = pre.state.zones[zid];
@@ -2335,7 +2331,7 @@ proof fn lemma_cpu_insert_enclave_shared_region_step_refines(
     assert(old_zone.wf());
     old_zone.cpu_mem_set.lemma_insert_region_wf(concrete);
     lemma_normal_region_not_enclave_memory(zid, concrete);
-    lemma_hyperenclave_projection_wf(pre);
+    lemma_enclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
     lemma_zones_s2_entries_fresh(pre.state.zone_ids, pre.state.zones, zid, concrete);
@@ -2496,10 +2492,10 @@ proof fn lemma_cpu_insert_enclave_shared_region_step_refines(
 // Dynamic Shared removal and root-Private restoration
 // ---------------------------------------------------------------------------
 proof fn lemma_cpu_remove_enclave_shared_region_refines(
-    pre: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
     zid: nat,
     concrete: MemoryRegion,
-) -> (result: (HyperEnclaveSoftwareSpec, Seq<SoftwareOp>))
+) -> (result: (EnclaveSoftwareSpec, Seq<SoftwareOp>))
     requires
         pre.state.invariant(),
         pre.state.zones.contains_key(zid),
@@ -2508,10 +2504,10 @@ proof fn lemma_cpu_remove_enclave_shared_region_refines(
         region_in_normal_memory(concrete),
     ensures
         result.0.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             result.0.state,
-            HyperEnclaveSpec::Step::cpu_remove_region(zid, concrete),
+            EnclaveSpec::Step::cpu_remove_region(zid, concrete),
         ),
         run_software_ops(pre.view(), result.0.view(), result.1),
 {
@@ -2519,15 +2515,15 @@ proof fn lemma_cpu_remove_enclave_shared_region_refines(
     let vm = VmId(zid);
     let old_zone = pre.state.zones[zid];
     let region = region_to_abstract(zid, concrete);
-    let post = HyperEnclaveSoftwareSpec {
-        state: HyperEnclaveSpec::take_step::cpu_remove_region(pre.state, zid, concrete),
+    let post = EnclaveSoftwareSpec {
+        state: EnclaveSpec::take_step::cpu_remove_region(pre.state, zid, concrete),
     };
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     assert(post.state.zone_ids == pre.state.zone_ids);
     assert(post.state.zones == pre.state.zones.insert(zid, old_zone.cpu_remove_region(concrete)));
     assert(old_zone.wf());
     old_zone.cpu_mem_set.lemma_remove_region_exact_wf(concrete);
-    lemma_hyperenclave_projection_wf(pre);
+    lemma_enclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
     lemma_zones_s2_remove(pre.state.zone_ids, pre.state.zones, zid, concrete);
@@ -2811,20 +2807,20 @@ proof fn lemma_cpu_remove_enclave_shared_region_refines(
 // CPU removal dispatch and enclave clear
 // ---------------------------------------------------------------------------
 proof fn lemma_cpu_remove_region_refines(
-    pre: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
     zid: nat,
     concrete: MemoryRegion,
-) -> (result: (HyperEnclaveSoftwareSpec, Seq<SoftwareOp>))
+) -> (result: (EnclaveSoftwareSpec, Seq<SoftwareOp>))
     requires
         pre.state.invariant(),
         pre.state.zones.contains_key(zid),
         pre.state.zones[zid].cpu_mem_set.regions.contains(concrete),
     ensures
         result.0.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             result.0.state,
-            HyperEnclaveSpec::Step::cpu_remove_region(zid, concrete),
+            EnclaveSpec::Step::cpu_remove_region(zid, concrete),
         ),
         run_software_ops(pre.view(), result.0.view(), result.1),
 {
@@ -2840,29 +2836,29 @@ proof fn lemma_cpu_remove_region_refines(
 }
 
 proof fn lemma_cpu_remove_region_step_refines(
-    pre: HyperEnclaveSoftwareSpec,
-    post: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
+    post: EnclaveSoftwareSpec,
     zid: nat,
     concrete: MemoryRegion,
 ) -> (ops: Seq<SoftwareOp>)
     requires
         pre.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             post.state,
-            HyperEnclaveSpec::Step::cpu_remove_region(zid, concrete),
+            EnclaveSpec::Step::cpu_remove_region(zid, concrete),
         ),
     ensures
         post.state.invariant(),
         run_software_ops(pre.view(), post.view(), ops),
 {
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     let trace = lemma_cpu_remove_region_refines(pre, zid, concrete);
     trace.1
 }
 
-proof fn lemma_cpu_clear_enclave_refines(pre: HyperEnclaveSoftwareSpec, zid: nat) -> (result: (
-    HyperEnclaveSoftwareSpec,
+proof fn lemma_cpu_clear_enclave_refines(pre: EnclaveSoftwareSpec, zid: nat) -> (result: (
+    EnclaveSoftwareSpec,
     Seq<SoftwareOp>,
 ))
     requires
@@ -2905,7 +2901,7 @@ proof fn lemma_cpu_clear_enclave_refines(pre: HyperEnclaveSoftwareSpec, zid: nat
         let concrete = regions.choose();
         let first = lemma_cpu_remove_region_refines(pre, zid, concrete);
         let middle = first.0;
-        reveal(HyperEnclaveSpec::State::next_by);
+        reveal(EnclaveSpec::State::next_by);
         assert(middle.state.zone_ids == pre.state.zone_ids);
         assert(middle.state.zones == pre.state.zones.insert(
             zid,
@@ -2928,22 +2924,22 @@ proof fn lemma_cpu_clear_enclave_refines(pre: HyperEnclaveSoftwareSpec, zid: nat
 }
 
 proof fn lemma_cpu_clear_enclave_regions_step_refines(
-    pre: HyperEnclaveSoftwareSpec,
-    post: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
+    post: EnclaveSoftwareSpec,
     zid: nat,
 ) -> (ops: Seq<SoftwareOp>)
     requires
         pre.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             post.state,
-            HyperEnclaveSpec::Step::cpu_clear_enclave_regions(zid),
+            EnclaveSpec::Step::cpu_clear_enclave_regions(zid),
         ),
     ensures
         post.state.invariant(),
         run_software_ops(pre.view(), post.view(), ops),
 {
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     let trace = lemma_cpu_clear_enclave_refines(pre, zid);
     assert(trace.0.state == post.state);
     trace.1
@@ -2953,22 +2949,22 @@ proof fn lemma_cpu_clear_enclave_regions_step_refines(
 // Root IOMMU transitions
 // ---------------------------------------------------------------------------
 proof fn lemma_iommu_insert_region_step_refines(
-    pre: HyperEnclaveSoftwareSpec,
-    post: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
+    post: EnclaveSoftwareSpec,
     concrete: MemoryRegion,
 ) -> (ops: Seq<SoftwareOp>)
     requires
         pre.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             post.state,
-            HyperEnclaveSpec::Step::iommu_insert_region(concrete),
+            EnclaveSpec::Step::iommu_insert_region(concrete),
         ),
     ensures
         post.state.invariant(),
         run_software_ops(pre.view(), post.view(), ops),
 {
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     let zid = root_zone_id();
     let vm = VmId(zid);
     let old_zone = pre.state.zones[zid];
@@ -2980,13 +2976,13 @@ proof fn lemma_iommu_insert_region_step_refines(
     assert(post.state.shared_regions == pre.state.shared_regions);
     assert(old_zone.wf());
     old_set.lemma_insert_region_wf(concrete);
-    lemma_hyperenclave_projection_wf(pre);
+    lemma_enclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
     lemma_zones_iommu_s2_entries_fresh(pre.state.zone_ids, pre.state.zones, zid, concrete);
     lemma_zones_iommu_s2_insert(pre.state.zone_ids, pre.state.zones, zid, concrete);
     lemma_memory_set_mapped_pages_insert(old_set, concrete);
-    lemma_region_pages_match_hyper(concrete);
+    lemma_region_pages_match_enclave(concrete);
     dma_memory_is_normal_memory();
     assert(region_in_normal_memory(concrete));
     assert(region.wf());
@@ -3047,19 +3043,19 @@ proof fn lemma_iommu_insert_region_step_refines(
 }
 
 proof fn lemma_iommu_remove_region_refines(
-    pre: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
     concrete: MemoryRegion,
-) -> (result: (HyperEnclaveSoftwareSpec, Seq<SoftwareOp>))
+) -> (result: (EnclaveSoftwareSpec, Seq<SoftwareOp>))
     requires
         pre.state.invariant(),
         pre.state.zones.contains_key(root_zone_id()),
         pre.state.zones[root_zone_id()].iommu_mem_set.regions.contains(concrete),
     ensures
         result.0.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             result.0.state,
-            HyperEnclaveSpec::Step::iommu_remove_region(concrete),
+            EnclaveSpec::Step::iommu_remove_region(concrete),
         ),
         run_software_ops(pre.view(), result.0.view(), result.1),
 {
@@ -3068,17 +3064,17 @@ proof fn lemma_iommu_remove_region_refines(
     let old_zone = pre.state.zones[zid];
     let old_set = old_zone.iommu_mem_set;
     let region = region_to_abstract(zid, concrete);
-    let post = HyperEnclaveSoftwareSpec {
-        state: HyperEnclaveSpec::take_step::iommu_remove_region(pre.state, concrete),
+    let post = EnclaveSoftwareSpec {
+        state: EnclaveSpec::take_step::iommu_remove_region(pre.state, concrete),
     };
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     assert(post.state.zone_ids == pre.state.zone_ids);
     assert(post.state.zones == pre.state.zones.insert(zid, old_zone.iommu_remove_region(concrete)));
     assert(post.state.enclave_private_regions_view == pre.state.enclave_private_regions_view);
     assert(post.state.shared_regions == pre.state.shared_regions);
     assert(old_zone.wf());
     old_set.lemma_remove_region_exact_wf(concrete);
-    lemma_hyperenclave_projection_wf(pre);
+    lemma_enclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
     lemma_region_in_memory_set_maps_entries(zid, old_set, concrete);
@@ -3167,28 +3163,28 @@ proof fn lemma_iommu_remove_region_refines(
 }
 
 proof fn lemma_iommu_remove_region_step_refines(
-    pre: HyperEnclaveSoftwareSpec,
-    post: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
+    post: EnclaveSoftwareSpec,
     concrete: MemoryRegion,
 ) -> (ops: Seq<SoftwareOp>)
     requires
         pre.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             post.state,
-            HyperEnclaveSpec::Step::iommu_remove_region(concrete),
+            EnclaveSpec::Step::iommu_remove_region(concrete),
         ),
     ensures
         post.state.invariant(),
         run_software_ops(pre.view(), post.view(), ops),
 {
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     let trace = lemma_iommu_remove_region_refines(pre, concrete);
     trace.1
 }
 
-proof fn lemma_iommu_clear_refines(pre: HyperEnclaveSoftwareSpec) -> (result: (
-    HyperEnclaveSoftwareSpec,
+proof fn lemma_iommu_clear_refines(pre: EnclaveSoftwareSpec) -> (result: (
+    EnclaveSoftwareSpec,
     Seq<SoftwareOp>,
 ))
     requires
@@ -3230,7 +3226,7 @@ proof fn lemma_iommu_clear_refines(pre: HyperEnclaveSoftwareSpec) -> (result: (
         let concrete = regions.choose();
         let first = lemma_iommu_remove_region_refines(pre, concrete);
         let middle = first.0;
-        reveal(HyperEnclaveSpec::State::next_by);
+        reveal(EnclaveSpec::State::next_by);
         assert(middle.state.zone_ids == pre.state.zone_ids);
         assert(middle.state.zones == pre.state.zones.insert(
             zid,
@@ -3248,31 +3244,31 @@ proof fn lemma_iommu_clear_refines(pre: HyperEnclaveSoftwareSpec) -> (result: (
 }
 
 proof fn lemma_iommu_clear_regions_step_refines(
-    pre: HyperEnclaveSoftwareSpec,
-    post: HyperEnclaveSoftwareSpec,
+    pre: EnclaveSoftwareSpec,
+    post: EnclaveSoftwareSpec,
 ) -> (ops: Seq<SoftwareOp>)
     requires
         pre.state.invariant(),
-        HyperEnclaveSpec::State::next_by(
+        EnclaveSpec::State::next_by(
             pre.state,
             post.state,
-            HyperEnclaveSpec::Step::iommu_clear_regions(),
+            EnclaveSpec::Step::iommu_clear_regions(),
         ),
     ensures
         post.state.invariant(),
         run_software_ops(pre.view(), post.view(), ops),
 {
-    reveal(HyperEnclaveSpec::State::next_by);
+    reveal(EnclaveSpec::State::next_by);
     let trace = lemma_iommu_clear_refines(pre);
     assert(trace.0.state == post.state);
     trace.1
 }
 
-impl super::SoftwareRefinement for HyperEnclaveSoftwareSpec {
-    type Step = HyperEnclaveSpec::Step;
+impl super::SoftwareRefinement for EnclaveSoftwareSpec {
+    type Step = EnclaveSpec::Step;
 
     open spec fn view(&self) -> SoftwareView {
-        HyperEnclaveSoftwareSpec::view(self)
+        EnclaveSoftwareSpec::view(self)
     }
 
     open spec fn invariants(&self) -> bool {
@@ -3280,49 +3276,49 @@ impl super::SoftwareRefinement for HyperEnclaveSoftwareSpec {
     }
 
     open spec fn next(pre: Self, post: Self, step: Self::Step) -> bool {
-        HyperEnclaveSpec::State::next_by(pre.state, post.state, step)
+        EnclaveSpec::State::next_by(pre.state, post.state, step)
     }
 
     proof fn invariants_imply_view_wf(&self) {
-        lemma_hyperenclave_projection_wf(*self);
+        lemma_enclave_projection_wf(*self);
     }
 
     proof fn step_refines(pre: Self, post: Self, step: Self::Step) -> (ops: Seq<SoftwareOp>) {
         match step {
-            HyperEnclaveSpec::Step::add_zone(zid) => { lemma_add_zone_step_refines(pre, post, zid)
+            EnclaveSpec::Step::add_zone(zid) => { lemma_add_zone_step_refines(pre, post, zid)
             },
-            HyperEnclaveSpec::Step::remove_zone(zid) => {
+            EnclaveSpec::Step::remove_zone(zid) => {
                 lemma_remove_zone_step_refines(pre, post, zid)
             },
-            HyperEnclaveSpec::Step::synchronize_enclave_private_regions_view(zid) => {
+            EnclaveSpec::Step::synchronize_enclave_private_regions_view(zid) => {
                 lemma_synchronize_step_refines(pre, post, zid)
             },
-            HyperEnclaveSpec::Step::cpu_insert_normal_region(region) => {
+            EnclaveSpec::Step::cpu_insert_normal_region(region) => {
                 lemma_cpu_insert_normal_region_step_refines(pre, post, region)
             },
-            HyperEnclaveSpec::Step::cpu_insert_enclave_private_region(zid, region) => {
+            EnclaveSpec::Step::cpu_insert_enclave_private_region(zid, region) => {
                 lemma_cpu_insert_enclave_private_region_step_refines(pre, post, zid, region)
             },
-            HyperEnclaveSpec::Step::cpu_insert_enclave_shared_region(zid, region) => {
+            EnclaveSpec::Step::cpu_insert_enclave_shared_region(zid, region) => {
                 lemma_cpu_insert_enclave_shared_region_step_refines(pre, post, zid, region)
             },
-            HyperEnclaveSpec::Step::cpu_remove_region(zid, region) => {
+            EnclaveSpec::Step::cpu_remove_region(zid, region) => {
                 lemma_cpu_remove_region_step_refines(pre, post, zid, region)
             },
-            HyperEnclaveSpec::Step::cpu_clear_enclave_regions(zid) => {
+            EnclaveSpec::Step::cpu_clear_enclave_regions(zid) => {
                 lemma_cpu_clear_enclave_regions_step_refines(pre, post, zid)
             },
-            HyperEnclaveSpec::Step::iommu_insert_region(region) => {
+            EnclaveSpec::Step::iommu_insert_region(region) => {
                 lemma_iommu_insert_region_step_refines(pre, post, region)
             },
-            HyperEnclaveSpec::Step::iommu_remove_region(region) => {
+            EnclaveSpec::Step::iommu_remove_region(region) => {
                 lemma_iommu_remove_region_step_refines(pre, post, region)
             },
-            HyperEnclaveSpec::Step::iommu_clear_regions() => {
+            EnclaveSpec::Step::iommu_clear_regions() => {
                 lemma_iommu_clear_regions_step_refines(pre, post)
             },
-            HyperEnclaveSpec::Step::dummy_to_use_type_params(_) => {
-                reveal(HyperEnclaveSpec::State::next_by);
+            EnclaveSpec::Step::dummy_to_use_type_params(_) => {
+                reveal(EnclaveSpec::State::next_by);
                 assert(false);
                 Seq::empty()
             },

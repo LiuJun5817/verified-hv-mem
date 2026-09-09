@@ -1,29 +1,19 @@
-//! Region-assignment protocol abstraction.
-//!
-//! Abstracts over the `ClosureSpec` and `BudgetSpec` region-assignment policies so
-//! that `Zone` and `HvMem` are generic over `P: ZoneGhostProtocol` rather than hard-wired.
-//!
-//! Submodules:
-//! - [`closure`]: `ClosureSpec` ghost state (`ClosureGlobalState`) and `ClosureProtocol`.
-//! - [`budget`]: `BudgetSpec` ghost state (`BudgetGlobalState`) and `BudgetProtocol`.
-//! - [`hyperenclave`]: four-class `HyperEnclaveProtocol`.
+//! Ghost protocols used by the policy-generic `Zone` and `HvMem` layers.
 pub mod budget;
 pub mod closure;
-pub mod hyperenclave;
+pub mod enclave;
 
 use super::spec::GhostZone;
 use crate::memory_set::SpecMemorySet;
 pub use budget::{BudgetGlobalState, BudgetProtocol, BudgetZoneState};
 pub use closure::{ClosureGlobalState, ClosureProtocol, ClosureZoneState};
-pub use hyperenclave::{HyperEnclaveGlobalState, HyperEnclaveProtocol, HyperEnclaveZoneState};
+pub use enclave::{EnclaveGlobalState, EnclaveProtocol, EnclaveZoneState};
 
 use vstd::prelude::*;
 
 verus! {
 
-/// Minimal spec interface shared by `ClosureZoneState` and `BudgetZoneState`.
-///
-/// Used as the bound `P::ZoneState: ZoneStateOps` in the `ZoneGhostProtocol` trait.
+/// Common view of a policy's per-zone ghost token.
 pub trait ZoneStateOps {
     /// The zone ID (key in the `zones` map sharding).
     spec fn zone_id(&self) -> nat;
@@ -35,35 +25,15 @@ pub trait ZoneStateOps {
     spec fn wf(&self, mem_inst_id: InstanceId) -> bool;
 }
 
-/// Ghost-state trait for **zone lifecycle** operations (add / remove a zone).
+/// Ghost interface for zone lifecycle operations.
 ///
-/// `Zone<PT, M, A, P, I>` and `HvMem<PT, M, A, P, I>` are parameterized by `P: ZoneGhostProtocol`.
-/// Swapping `P` switches the entire ghost-state bookkeeping strategy without changing
-/// any exec code.
-///
-/// ## Scope
-/// This trait abstracts only the *globally-serialized* zone add/remove operations,
-/// because both `ClosureProtocol` and `BudgetProtocol` require `&mut GlobalState`
-/// for these (they both update `zone_ids_tok`).
-///
-/// Region insert/remove are **not** in this trait because their required borrow of
-/// `GlobalState` differs by protocol and cannot be unified in a Rust trait:
-///
-/// | Protocol          | region insert/remove borrow | Why                              |
-/// |-------------------|-----------------------------|----------------------------------|
-/// | `ClosureProtocol` | `&mut ClosureGlobalState`   | must update the prototype `zones_view` token |
-/// | `BudgetProtocol`  | `&BudgetGlobalState`        | zone-local only; `gs` unchanged  |
-///
-/// Region operations live in protocol-specific `impl Zone<..., P>` blocks and are
-/// called from protocol-specific `impl HvMem<..., P>` blocks.
+/// Region operations remain policy-specific because their global-state access
+/// and transition obligations differ.
 pub trait ZoneGhostProtocol: Sized {
     /// Per-zone tracked ghost state (map-sharded token from `zones[zid]`).
     type ZoneState: ZoneStateOps;
 
-    /// Global tracked ghost state stored inside `HvMem`'s write-lock content.
-    ///
-    /// `ClosureProtocol`: `ClosureGlobalState` (holds the prototype `zones_view` token).
-    /// `BudgetProtocol`:  `BudgetGlobalState` (zone-local insert).
+    /// Global tracked ghost state stored in `HvMem`'s lock content.
     type GlobalState;
 
     // ─── Spec predicates ─────────────────────────────────────────────────────
@@ -89,9 +59,7 @@ pub trait ZoneGhostProtocol: Sized {
             Self::mem_inst_id(gs) == Self::mem_inst_id(old(gs)),
             zt.zone_id() == zid,
             zt.ghost_zone().regions() =~= Set::empty(),
-            // The new zone is *fully* empty (regions and mappings, CPU and IOMMU) —
-            // exactly the literal both spec SMs' `add_zone` transitions construct.
-            // `Zone::new` needs this to establish `ZonePred::inv` at birth.
+            // `Zone::new` requires a fully empty CPU and IOMMU state.
             zt.ghost_zone() == (GhostZone {
                 cpu_mem_set: SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
                 iommu_mem_set: SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },

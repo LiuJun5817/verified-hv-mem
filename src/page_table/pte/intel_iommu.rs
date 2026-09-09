@@ -8,7 +8,7 @@ use vstd::prelude::*;
 
 verus! {
 
-// Fields used by a HyperEnclave Intel VT-d second-level entry:
+// Fields used by an Intel VT-d second-level entry:
 //
 // | Bits  | Field            | Encoding used here                        |
 // |-------|------------------|-------------------------------------------|
@@ -17,13 +17,13 @@ verus! {
 // | 1     | write            | DMA write permission                      |
 // | 0     | read             | DMA read permission and present indicator |
 
-/// DMA read permission. HyperEnclave treats this bit as the present marker.
+/// DMA read permission. This backend treats the bit as the present marker.
 pub const VTD_R: u64 = 1 << 0;
 /// DMA write permission.
 pub const VTD_W: u64 = 1 << 1;
 /// Large-page marker for a second-level PDE or PDPTE.
 pub const VTD_HUGE: u64 = 1 << 7;
-/// Physical-address bits used by HyperEnclave's VT-d implementation.
+/// Physical-address bits used by the VT-d implementation.
 pub const VTD_PHYS_ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
 
 /// Intel VT-d second-level translation entry.

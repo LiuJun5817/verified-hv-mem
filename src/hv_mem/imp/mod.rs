@@ -3,9 +3,9 @@
 //! - [`zone`]: protocol-generic per-zone definitions and operations.
 //! - [`mem`]: protocol-generic global memory-manager definitions and operations.
 //! - [`budget`]: executable operations specialized for `BudgetProtocol`.
-//! - [`hyperenclave`]: executable operations specialized for `HyperEnclaveProtocol`.
+//! - [`enclave`]: executable operations specialized for `EnclaveProtocol`.
 pub mod budget;
-pub mod hyperenclave;
+pub mod enclave;
 pub mod mem;
 pub mod zone;
 

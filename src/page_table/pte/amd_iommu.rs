@@ -8,7 +8,7 @@ use vstd::prelude::*;
 
 verus! {
 
-// Fields used by a HyperEnclave AMD IOMMU page-table entry:
+// Fields used by an AMD IOMMU page-table entry:
 //
 // | Bits  | Field            | Encoding used here                              |
 // |-------|------------------|-------------------------------------------------|
@@ -22,7 +22,7 @@ verus! {
 pub const AMD_IOMMU_VALID: u64 = 1 << 0;
 /// Next-level field used by AMD IOMMU page-table entries.
 pub const AMD_IOMMU_NEXT_LEVEL_MASK: u64 = 0b111 << 9;
-/// Physical-address bits used by HyperEnclave's AMD IOMMU implementation.
+/// Physical-address bits used by the AMD IOMMU implementation.
 pub const AMD_IOMMU_PHYS_ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
 /// DMA read permission.
 pub const AMD_IOMMU_IR: u64 = 1 << 61;
