@@ -356,6 +356,58 @@ pub proof fn refine_hv_unmap_s2_shared(
     lemma_synced_views_wf(sw2, hw2);
 }
 
+/// A software-only S2-Private-to-Shared classification transfer refines one
+/// machine operation while leaving the hardware view unchanged.
+pub proof fn refine_hv_make_s2_shared(
+    sw1: SoftwareView,
+    sw2: SoftwareView,
+    hw: HardwareView,
+    vm: VmId,
+    page: PhysPage,
+)
+    requires
+        SoftwareView::make_s2_shared_step(sw1, sw2, vm, page),
+        MachineState::assemble(sw1, hw).wf(),
+    ensures
+        MachineState::hv_make_s2_shared_step(
+            MachineState::assemble(sw1, hw),
+            MachineState::assemble(sw2, hw),
+            vm,
+            page,
+        ),
+{
+    lemma_sw_machine_wf_equiv(sw1, hw);
+    lemma_machine_hw_wf(sw1, hw);
+    lemma_make_s2_shared_step_preserves_wf(sw1, sw2, vm, page);
+    lemma_synced_views_wf(sw2, hw);
+}
+
+/// A software-only S2-Shared-to-Private classification transfer refines one
+/// machine operation while leaving the hardware view unchanged.
+pub proof fn refine_hv_make_s2_private(
+    sw1: SoftwareView,
+    sw2: SoftwareView,
+    hw: HardwareView,
+    vm: VmId,
+    page: PhysPage,
+)
+    requires
+        SoftwareView::make_s2_private_step(sw1, sw2, vm, page),
+        MachineState::assemble(sw1, hw).wf(),
+    ensures
+        MachineState::hv_make_s2_private_step(
+            MachineState::assemble(sw1, hw),
+            MachineState::assemble(sw2, hw),
+            vm,
+            page,
+        ),
+{
+    lemma_sw_machine_wf_equiv(sw1, hw);
+    lemma_machine_hw_wf(sw1, hw);
+    lemma_make_s2_private_step_preserves_wf(sw1, sw2, vm, page);
+    lemma_synced_views_wf(sw2, hw);
+}
+
 /// An IOMMU shared SoftwareView map and hardware SMMU update refine the
 /// corresponding atomic machine operation.
 pub proof fn refine_hv_map_iommu_shared(
@@ -889,10 +941,10 @@ proof fn lemma_cpu_private_insert_edge(sw1: SoftwareView, hw: HardwareView, regi
     }
     assert(!entry_prefix(region, k).dom().contains(key));
     assert(!from_sw.s2_map.contains_key(key));
-    assert(sw1.s2_private_pages[vm].union(phys_prefix(region, k)).insert(page) =~= sw1.s2_private_pages[vm].union(
-        phys_prefix(region, (k + 1) as nat),
-    ));
-    assert(from_sw.s2_private_pages.insert(vm, from_sw.s2_private_pages[vm].insert(page)) =~= to_sw.s2_private_pages);
+    assert(sw1.s2_private_pages[vm].union(phys_prefix(region, k)).insert(page)
+        =~= sw1.s2_private_pages[vm].union(phys_prefix(region, (k + 1) as nat)));
+    assert(from_sw.s2_private_pages.insert(vm, from_sw.s2_private_pages[vm].insert(page))
+        =~= to_sw.s2_private_pages);
     assert(from_sw.s2_map.insert(key, entry) =~= to_sw.s2_map);
     assert(SoftwareView::map_s2_private_step(from_sw, to_sw, vm, gpa, entry));
 
@@ -969,9 +1021,12 @@ pub proof fn lemma_cpu_insert_private_region_machine_trace(
     assert(entry_prefix(region, n) =~= region.entries());
     lemma_sw_machine_wf_equiv(sw1, hw);
     assert(cpu_private_insert_partial(sw1, region, 0) == sw1) by {
-        assert(sw1.s2_private_pages[region.vm].union(phys_prefix(region, 0)) =~= sw1.s2_private_pages[region.vm]);
-        assert(sw1.s2_private_pages.insert(region.vm, sw1.s2_private_pages[region.vm].union(phys_prefix(region, 0)))
-            =~= sw1.s2_private_pages);
+        assert(sw1.s2_private_pages[region.vm].union(phys_prefix(region, 0))
+            =~= sw1.s2_private_pages[region.vm]);
+        assert(sw1.s2_private_pages.insert(
+            region.vm,
+            sw1.s2_private_pages[region.vm].union(phys_prefix(region, 0)),
+        ) =~= sw1.s2_private_pages);
         assert(sw1.s2_map.union_prefer_right(entry_prefix(region, 0)) =~= sw1.s2_map);
     }
     assert(states[0] == MachineState::assemble(sw1, hw)) by {
@@ -1090,7 +1145,8 @@ proof fn lemma_cpu_private_remove_edge(sw1: SoftwareView, hw: HardwareView, regi
     }
     assert(sw1.s2_private_pages[vm].difference(phys_prefix(region, k)).remove(page)
         =~= sw1.s2_private_pages[vm].difference(phys_prefix(region, (k + 1) as nat)));
-    assert(from_sw.s2_private_pages.insert(vm, from_sw.s2_private_pages[vm].remove(page)) =~= to_sw.s2_private_pages);
+    assert(from_sw.s2_private_pages.insert(vm, from_sw.s2_private_pages[vm].remove(page))
+        =~= to_sw.s2_private_pages);
     assert(SoftwareView::unmap_s2_private_step(from_sw, to_sw, vm, gpa, page));
 
     assert(to_hw.s2map =~= from_hw.s2map.remove(key));
@@ -1272,9 +1328,8 @@ proof fn lemma_cpu_shared_insert_edge(sw1: SoftwareView, hw: HardwareView, regio
     }
     assert(!entry_prefix(region, k).dom().contains(key));
     assert(!from_sw.s2_map.contains_key(key));
-    assert(sw1.s2_shared_pages.union(phys_prefix(region, k)).insert(page) =~= sw1.s2_shared_pages.union(
-        phys_prefix(region, (k + 1) as nat),
-    ));
+    assert(sw1.s2_shared_pages.union(phys_prefix(region, k)).insert(page)
+        =~= sw1.s2_shared_pages.union(phys_prefix(region, (k + 1) as nat)));
     assert(from_sw.s2_map.insert(key, entry) =~= to_sw.s2_map);
     assert(SoftwareView::map_s2_shared_step(from_sw, to_sw, vm, gpa, entry));
     assert(HardwareView::map_step(from_hw, to_hw, vm, gpa, entry));
@@ -1372,9 +1427,11 @@ pub open spec fn cpu_shared_remove_prefix_map(s1: SoftwareView, region: Region, 
     s1.s2_map.remove_keys(entry_prefix(region, k).dom())
 }
 
-pub open spec fn s2_shared_pages_after_remove_prefix(s1: SoftwareView, region: Region, k: nat) -> Set<
-    PhysPage,
-> {
+pub open spec fn s2_shared_pages_after_remove_prefix(
+    s1: SoftwareView,
+    region: Region,
+    k: nat,
+) -> Set<PhysPage> {
     let post_map = cpu_shared_remove_prefix_map(s1, region, k);
     Set::new(
         |p: PhysPage|
@@ -1470,7 +1527,9 @@ proof fn lemma_cpu_shared_remove_projection_succ(s1: SoftwareView, region: Regio
     } else {
         assert(to.s2_shared_pages =~= from.s2_shared_pages.remove(page)) by {
             assert forall|p: PhysPage| #[trigger]
-                to.s2_shared_pages.contains(p) <==> from.s2_shared_pages.remove(page).contains(p) by {
+                to.s2_shared_pages.contains(p) <==> from.s2_shared_pages.remove(page).contains(
+                    p,
+                ) by {
                 if p != page && pp.contains(p) {
                     assert((exists|q: VmPageKey| #[trigger]
                         from.s2_map.contains_key(q) && from.s2_map[q].page == p) <==> (exists|
@@ -2105,9 +2164,8 @@ proof fn lemma_iommu_shared_insert_edge(sw1: SoftwareView, hw: HardwareView, reg
     }
     assert(!entry_prefix(region, k).dom().contains(key));
     assert(!from_sw.iommu_s2_map.contains_key(key));
-    assert(sw1.iommu_shared_pages.union(phys_prefix(region, k)).insert(page) =~= sw1.iommu_shared_pages.union(
-        phys_prefix(region, (k + 1) as nat),
-    ));
+    assert(sw1.iommu_shared_pages.union(phys_prefix(region, k)).insert(page)
+        =~= sw1.iommu_shared_pages.union(phys_prefix(region, (k + 1) as nat)));
     assert(from_sw.iommu_s2_map.insert(key, entry) =~= to_sw.iommu_s2_map);
     assert(SoftwareView::map_iommu_shared_step(from_sw, to_sw, vm, gpa, entry));
     assert(HardwareView::iommu_map_step(from_hw, to_hw, vm, gpa, entry));
@@ -2206,9 +2264,11 @@ pub open spec fn iommu_shared_remove_prefix_map(s1: SoftwareView, region: Region
     s1.iommu_s2_map.remove_keys(entry_prefix(region, k).dom())
 }
 
-pub open spec fn iommu_shared_pages_after_remove_prefix(s1: SoftwareView, region: Region, k: nat) -> Set<
-    PhysPage,
-> {
+pub open spec fn iommu_shared_pages_after_remove_prefix(
+    s1: SoftwareView,
+    region: Region,
+    k: nat,
+) -> Set<PhysPage> {
     let post_map = iommu_shared_remove_prefix_map(s1, region, k);
     Set::new(
         |p: PhysPage|
@@ -2305,7 +2365,9 @@ proof fn lemma_iommu_shared_remove_projection_succ(s1: SoftwareView, region: Reg
     } else {
         assert(to.iommu_shared_pages =~= from.iommu_shared_pages.remove(page)) by {
             assert forall|p: PhysPage| #[trigger]
-                to.iommu_shared_pages.contains(p) <==> from.iommu_shared_pages.remove(page).contains(p) by {
+                to.iommu_shared_pages.contains(p) <==> from.iommu_shared_pages.remove(
+                    page,
+                ).contains(p) by {
                 if p != page && pp.contains(p) {
                     assert((exists|q: VmPageKey| #[trigger]
                         from.iommu_s2_map.contains_key(q) && from.iommu_s2_map[q].page == p) <==> (
@@ -2495,6 +2557,8 @@ pub open spec fn hardware_after_software_op(
         SoftwareOp::CpuRemoveSharedRegion(region) => {
             synced_hw(sw_post, hw_after_unmap_region(hw, region))
         },
+        SoftwareOp::MakeS2Shared(vm, page) => hw,
+        SoftwareOp::MakeS2Private(vm, page) => hw,
         SoftwareOp::IommuInsertPrivateRegion(region) => synced_hw(sw_post, hw),
         SoftwareOp::IommuRemovePrivateRegion(region) => {
             synced_hw(sw_post, iommu_hw_after_unmap_region(hw, region))
@@ -2515,6 +2579,12 @@ pub open spec fn machine_ops_for_software_op(op: SoftwareOp) -> Seq<MachineActio
         SoftwareOp::CpuRemovePrivateRegion(region) => cpu_private_remove_ops(region),
         SoftwareOp::CpuInsertSharedRegion(region) => cpu_shared_insert_ops(region),
         SoftwareOp::CpuRemoveSharedRegion(region) => cpu_shared_remove_ops(region),
+        SoftwareOp::MakeS2Shared(vm, page) => {
+            seq![MachineAction::Hypervisor(HypervisorOp::MakeS2Shared(vm, page))]
+        },
+        SoftwareOp::MakeS2Private(vm, page) => {
+            seq![MachineAction::Hypervisor(HypervisorOp::MakeS2Private(vm, page))]
+        },
         SoftwareOp::IommuInsertPrivateRegion(region) => iommu_private_insert_ops(region),
         SoftwareOp::IommuRemovePrivateRegion(region) => iommu_private_remove_ops(region),
         SoftwareOp::IommuInsertSharedRegion(region) => iommu_shared_insert_ops(region),
@@ -2581,6 +2651,24 @@ pub proof fn lemma_software_op_refines_machine_trace(
         },
         SoftwareOp::CpuRemoveSharedRegion(region) => {
             lemma_cpu_remove_shared_region_machine_trace(sw_pre, sw_post, hw, region);
+        },
+        SoftwareOp::MakeS2Shared(vm, page) => {
+            refine_hv_make_s2_shared(sw_pre, sw_post, hw, vm, page);
+            let action = MachineAction::Hypervisor(HypervisorOp::MakeS2Shared(vm, page));
+            lemma_run_op_sequence_single(
+                MachineState::assemble(sw_pre, hw),
+                MachineState::assemble(sw_post, hw),
+                action,
+            );
+        },
+        SoftwareOp::MakeS2Private(vm, page) => {
+            refine_hv_make_s2_private(sw_pre, sw_post, hw, vm, page);
+            let action = MachineAction::Hypervisor(HypervisorOp::MakeS2Private(vm, page));
+            lemma_run_op_sequence_single(
+                MachineState::assemble(sw_pre, hw),
+                MachineState::assemble(sw_post, hw),
+                action,
+            );
         },
         SoftwareOp::IommuInsertPrivateRegion(region) => {
             lemma_iommu_insert_private_region_machine_trace(sw_pre, sw_post, hw, region);

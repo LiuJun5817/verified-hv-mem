@@ -394,6 +394,78 @@ pub open spec fn abstract_region_installed(map: Map<VmPageKey, S2Entry>, region:
             == region.entries()[key]
 }
 
+/// Shows that an installed concrete region contributes all of its abstract entries.
+pub proof fn lemma_region_in_memory_set_maps_entries(
+    zid: nat,
+    mem_set: SpecMemorySet,
+    region: MemoryRegion,
+)
+    requires
+        mem_set.wf(),
+        mem_set.regions.contains(region),
+    ensures
+        abstract_region_installed(
+            memory_set_s2_entries(zid, mem_set),
+            region_to_abstract(zid, region),
+        ),
+{
+    lemma_region_to_abstract_entries(zid, region);
+}
+
+/// Relates concrete memory-set insertion to abstract stage-2 map insertion.
+pub proof fn lemma_memory_set_s2_insert(zid: nat, mem_set: SpecMemorySet, region: MemoryRegion)
+    requires
+        mem_set.wf(),
+        region.spec_valid(),
+        !mem_set.overlaps_vmem(region),
+    ensures
+        memory_set_s2_entries(zid, mem_set.insert_region(region)) =~= memory_set_s2_entries(
+            zid,
+            mem_set,
+        ).union_prefer_right(region_s2_entries(zid, region)),
+{
+    let old = memory_set_s2_entries(zid, mem_set);
+    let added = region_s2_entries(zid, region);
+    let new = memory_set_s2_entries(zid, mem_set.insert_region(region));
+    assert forall|key: VmPageKey| #[trigger]
+        new.contains_key(key) <==> old.union_prefer_right(added).contains_key(key) by {
+        lemma_region_gpa_mapped_iff(region, key.gpa);
+    }
+    assert forall|key: VmPageKey|
+        #![trigger new[key]]
+        #![trigger old.union_prefer_right(added)[key]]
+        new.contains_key(key) implies new[key] == old.union_prefer_right(added)[key] by {
+        lemma_region_gpa_mapped_iff(region, key.gpa);
+        if region.spec_mappings().contains_key(vaddr_of_gpa(key.gpa)) {
+            lemma_region_s2_value(zid, region, key);
+        }
+    }
+}
+
+/// Relates concrete memory-set removal to abstract stage-2 map removal.
+pub proof fn lemma_memory_set_s2_remove(zid: nat, mem_set: SpecMemorySet, region: MemoryRegion)
+    requires
+        mem_set.wf(),
+        mem_set.regions.contains(region),
+    ensures
+        memory_set_s2_entries(zid, mem_set.remove_region_exact(region)) =~= memory_set_s2_entries(
+            zid,
+            mem_set,
+        ).remove_keys(region_s2_entries(zid, region).dom()),
+{
+    let old = memory_set_s2_entries(zid, mem_set);
+    let removed = region_s2_entries(zid, region);
+    let new = memory_set_s2_entries(zid, mem_set.remove_region_exact(region));
+    assert forall|key: VmPageKey| #[trigger]
+        new.contains_key(key) <==> old.remove_keys(removed.dom()).contains_key(key) by {
+        lemma_region_gpa_mapped_iff(region, key.gpa);
+    }
+    assert(forall|key: VmPageKey|
+        #![trigger new[key]]
+        #![trigger old.remove_keys(removed.dom())[key]]
+        new.contains_key(key) ==> new[key] == old.remove_keys(removed.dom())[key]);
+}
+
 // ---------------------------------------------------------------------------
 // Common memory-set projections
 // ---------------------------------------------------------------------------
@@ -405,6 +477,163 @@ pub open spec fn memory_set_mapped_pages(mem_set: SpecMemorySet) -> Set<PhysPage
                 mem_set.mappings.contains_key(vaddr) && frame_phys_page(mem_set.mappings[vaddr])
                     == page,
     )
+}
+
+/// Finds an installed region whose footprint contains a mapped physical page.
+pub proof fn lemma_memory_set_mapped_page_has_region(mem_set: SpecMemorySet, page: PhysPage)
+    requires
+        mem_set.wf(),
+        memory_set_mapped_pages(mem_set).contains(page),
+    ensures
+        exists|region: MemoryRegion| #[trigger]
+            mem_set.regions.contains(region) && region_pages(region).contains(page),
+{
+    let vaddr = choose|vaddr: SpecVAddr| #[trigger]
+        mem_set.mappings.contains_key(vaddr) && frame_phys_page(mem_set.mappings[vaddr]) == page;
+    let frame = mem_set.mappings[vaddr];
+    assert(mem_set.mappings.contains_pair(vaddr, frame));
+    assert(exists|region: MemoryRegion, i: nat|
+        #![trigger mem_set.regions.contains(region), region.spec_page_vaddr(i)]
+        mem_set.regions.contains(region) && 0 <= i < region.pages && vaddr
+            == region.spec_page_vaddr(i) && frame == region.spec_frame(i));
+    let (region, i) = choose|region: MemoryRegion, i: nat|
+        mem_set.regions.contains(region) && 0 <= i < region.pages && vaddr
+            == region.spec_page_vaddr(i) && frame == region.spec_frame(i);
+    lemma_region_phys_page_linear(region, i);
+    assert(region_phys_page(region, i) == page);
+    assert(region_pages(region).contains(page));
+}
+
+/// Every physical page of an installed region is represented by a mapping in
+/// the containing memory set.
+pub proof fn lemma_memory_set_region_page_is_mapped(
+    mem_set: SpecMemorySet,
+    region: MemoryRegion,
+    page: PhysPage,
+)
+    requires
+        mem_set.wf(),
+        mem_set.regions.contains(region),
+        region_pages(region).contains(page),
+    ensures
+        memory_set_mapped_pages(mem_set).contains(page),
+{
+    let i = choose|i: nat| 0 <= i < region.pages && region_phys_page(region, i) == page;
+    let vaddr = region.spec_page_vaddr(i);
+    lemma_region_phys_page_linear(region, i);
+    assert(mem_set.mappings.contains_pair(vaddr, region.spec_frame(i)));
+    assert(frame_phys_page(mem_set.mappings[vaddr]) == page);
+}
+
+/// A well-formed memory set maps exactly the union of its stored regions'
+/// physical footprints.
+pub proof fn lemma_memory_set_mapped_pages_iff_region_page(mem_set: SpecMemorySet, page: PhysPage)
+    requires
+        mem_set.wf(),
+    ensures
+        memory_set_mapped_pages(mem_set).contains(page) <==> exists|region: MemoryRegion|
+         #[trigger]
+            mem_set.regions.contains(region) && region_pages(region).contains(page),
+{
+    if memory_set_mapped_pages(mem_set).contains(page) {
+        lemma_memory_set_mapped_page_has_region(mem_set, page);
+    }
+    if exists|region: MemoryRegion| #[trigger]
+        mem_set.regions.contains(region) && region_pages(region).contains(page) {
+        let region = choose|region: MemoryRegion| #[trigger]
+            mem_set.regions.contains(region) && region_pages(region).contains(page);
+        lemma_memory_set_region_page_is_mapped(mem_set, region, page);
+    }
+}
+
+/// Inserting a virtually fresh region adds exactly its physical footprint to
+/// the set of mapped physical pages. Existing physical aliases are harmless
+/// because the projection is a set.
+pub proof fn lemma_memory_set_mapped_pages_insert(mem_set: SpecMemorySet, region: MemoryRegion)
+    requires
+        mem_set.wf(),
+        region.spec_valid(),
+        !mem_set.regions.contains(region),
+        !mem_set.overlaps_vmem(region),
+    ensures
+        memory_set_mapped_pages(mem_set.insert_region(region)) =~= memory_set_mapped_pages(
+            mem_set,
+        ).union(region_pages(region)),
+{
+    mem_set.lemma_insert_region_wf(region);
+    assert forall|page: PhysPage| #[trigger]
+        memory_set_mapped_pages(mem_set.insert_region(region)).contains(page)
+            <==> memory_set_mapped_pages(mem_set).union(region_pages(region)).contains(page) by {
+        lemma_memory_set_mapped_pages_iff_region_page(mem_set.insert_region(region), page);
+        lemma_memory_set_mapped_pages_iff_region_page(mem_set, page);
+        if memory_set_mapped_pages(mem_set.insert_region(region)).contains(page) {
+            let stored = choose|stored: MemoryRegion| #[trigger]
+                mem_set.insert_region(region).regions.contains(stored) && region_pages(
+                    stored,
+                ).contains(page);
+            if stored != region {
+                assert(mem_set.regions.contains(stored));
+                lemma_memory_set_region_page_is_mapped(mem_set, stored, page);
+            }
+        }
+        if region_pages(region).contains(page) {
+            lemma_memory_set_region_page_is_mapped(mem_set.insert_region(region), region, page);
+        }
+        if memory_set_mapped_pages(mem_set).contains(page) {
+            let stored = choose|stored: MemoryRegion| #[trigger]
+                mem_set.regions.contains(stored) && region_pages(stored).contains(page);
+            lemma_memory_set_region_page_is_mapped(mem_set.insert_region(region), stored, page);
+        }
+    }
+}
+
+/// Removing a region that is physically disjoint from every other stored
+/// region removes exactly its physical footprint from the mapped-page set.
+pub proof fn lemma_memory_set_mapped_pages_remove_disjoint(
+    mem_set: SpecMemorySet,
+    region: MemoryRegion,
+)
+    requires
+        mem_set.wf(),
+        mem_set.regions.contains(region),
+        forall|other: MemoryRegion| #[trigger]
+            mem_set.regions.contains(other) && other != region ==> !other.spec_overlaps_pmem(
+                region,
+            ),
+    ensures
+        memory_set_mapped_pages(mem_set.remove_region_exact(region)) =~= memory_set_mapped_pages(
+            mem_set,
+        ).difference(region_pages(region)),
+{
+    mem_set.lemma_remove_region_exact_wf(region);
+    assert forall|page: PhysPage| #[trigger]
+        memory_set_mapped_pages(mem_set.remove_region_exact(region)).contains(page)
+            <==> memory_set_mapped_pages(mem_set).difference(region_pages(region)).contains(
+            page,
+        ) by {
+        lemma_memory_set_mapped_pages_iff_region_page(mem_set.remove_region_exact(region), page);
+        lemma_memory_set_mapped_pages_iff_region_page(mem_set, page);
+        if memory_set_mapped_pages(mem_set.remove_region_exact(region)).contains(page) {
+            let stored = choose|stored: MemoryRegion| #[trigger]
+                mem_set.remove_region_exact(region).regions.contains(stored) && region_pages(
+                    stored,
+                ).contains(page);
+            assert(stored != region);
+            if region_pages(region).contains(page) {
+                lemma_shared_page_implies_pmem_overlap(stored, region, page);
+            }
+        }
+        if memory_set_mapped_pages(mem_set).contains(page) && !region_pages(region).contains(page) {
+            let stored = choose|stored: MemoryRegion| #[trigger]
+                mem_set.regions.contains(stored) && region_pages(stored).contains(page);
+            assert(stored != region);
+            lemma_memory_set_region_page_is_mapped(
+                mem_set.remove_region_exact(region),
+                stored,
+                page,
+            );
+        }
+    }
 }
 
 /// Physical pages targeted by the zone's current CPU mappings.

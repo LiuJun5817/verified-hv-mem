@@ -17,6 +17,8 @@ pub enum SoftwareOp {
     CpuRemovePrivateRegion(Region),
     CpuInsertSharedRegion(Region),
     CpuRemoveSharedRegion(Region),
+    MakeS2Shared(VmId, PhysPage),
+    MakeS2Private(VmId, PhysPage),
     IommuInsertPrivateRegion(Region),
     IommuRemovePrivateRegion(Region),
     IommuInsertSharedRegion(Region),
@@ -188,6 +190,57 @@ impl SoftwareView {
         &&& s2.s2_private_pages == s1.s2_private_pages
         &&& s2.s2_shared_pages == if aliased { s1.s2_shared_pages } else { s1.s2_shared_pages.remove(page) }
         &&& s2.s2_map == post_map
+        &&& s2.iommu_s2_map == s1.iommu_s2_map
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
+    }
+
+    /// Reclassify a currently mapped page from S2-Private for `vm` to
+    /// S2-Shared. The stage-2 mappings themselves do not change.
+    pub open spec fn make_s2_shared_step(
+        s1: SoftwareView,
+        s2: SoftwareView,
+        vm: VmId,
+        page: PhysPage,
+    ) -> bool {
+        &&& s1.all_vms.contains(vm)
+        &&& s1.s2_private_pages[vm].contains(page)
+        &&& !s1.s2_shared_pages.contains(page)
+        &&& (exists|key: VmPageKey| #[trigger]
+            s1.s2_map.contains_key(key) && key.vm == vm && s1.s2_map[key].page == page)
+        &&& s2.all_vms == s1.all_vms
+        &&& s2.s2_private_pages
+            == s1.s2_private_pages.insert(vm, s1.s2_private_pages[vm].remove(page))
+        &&& s2.s2_shared_pages == s1.s2_shared_pages.insert(page)
+        &&& s2.s2_map == s1.s2_map
+        &&& s2.iommu_s2_map == s1.iommu_s2_map
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
+    }
+
+    /// Reclassify a currently mapped page from S2-Shared to S2-Private for
+    /// `vm`. Every surviving CPU mapping to the page must belong to that VM.
+    pub open spec fn make_s2_private_step(
+        s1: SoftwareView,
+        s2: SoftwareView,
+        vm: VmId,
+        page: PhysPage,
+    ) -> bool {
+        &&& s1.all_vms.contains(vm)
+        &&& s1.s2_shared_pages.contains(page)
+        &&& (exists|key: VmPageKey| #[trigger]
+            s1.s2_map.contains_key(key) && key.vm == vm && s1.s2_map[key].page == page)
+        &&& (forall|key: VmPageKey| #[trigger]
+            s1.s2_map.contains_key(key) && s1.s2_map[key].page == page ==> key.vm == vm)
+        &&& (forall|other: VmId| #[trigger]
+            s1.all_vms.contains(other) && other != vm
+                ==> !s1.iommu_private_pages[other].contains(page))
+        &&& !s1.iommu_shared_pages.contains(page)
+        &&& s2.all_vms == s1.all_vms
+        &&& s2.s2_private_pages
+            == s1.s2_private_pages.insert(vm, s1.s2_private_pages[vm].insert(page))
+        &&& s2.s2_shared_pages == s1.s2_shared_pages.remove(page)
+        &&& s2.s2_map == s1.s2_map
         &&& s2.iommu_s2_map == s1.iommu_s2_map
         &&& s2.iommu_private_pages == s1.iommu_private_pages
         &&& s2.iommu_shared_pages == s1.iommu_shared_pages
@@ -647,6 +700,12 @@ impl SoftwareView {
             SoftwareOp::CpuRemoveSharedRegion(region) => {
                 Self::cpu_remove_shared_region_enabled(s1, region)
                     && Self::cpu_remove_shared_region_step(s1, s2, region)
+            },
+            SoftwareOp::MakeS2Shared(vm, page) => {
+                Self::make_s2_shared_step(s1, s2, vm, page)
+            },
+            SoftwareOp::MakeS2Private(vm, page) => {
+                Self::make_s2_private_step(s1, s2, vm, page)
             },
             SoftwareOp::IommuInsertPrivateRegion(region) => {
                 Self::iommu_insert_private_region_enabled(s1, region)

@@ -267,6 +267,61 @@ impl MachineState {
         &&& s2.iommu_tlb == s1.iommu_tlb
     }
 
+    /// Reclassify a mapped page from S2-Private for `vm` to S2-Shared without
+    /// changing CPU/IOMMU mappings, TLBs, or memory.
+    pub open spec fn hv_make_s2_shared_step(
+        s1: Self,
+        s2: Self,
+        vm: VmId,
+        page: PhysPage,
+    ) -> bool {
+        &&& s1.wf()
+        &&& s1.all_vms().contains(vm)
+        &&& s1.s2_private_pages[vm].contains(page)
+        &&& !s1.s2_shared_pages.contains(page)
+        &&& (exists|key: VmPageKey| #[trigger]
+            s1.s2_map.contains_key(key) && key.vm == vm && s1.s2_map[key].page == page)
+        &&& s2.wf()
+        &&& s2.same_identity_as(&s1)
+        &&& s2.same_translation_as(&s1)
+        &&& s2.same_memory_as(&s1)
+        &&& s2.s2_private_pages
+            == s1.s2_private_pages.insert(vm, s1.s2_private_pages[vm].remove(page))
+        &&& s2.s2_shared_pages == s1.s2_shared_pages.insert(page)
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
+    }
+
+    /// Reclassify a mapped page from S2-Shared to S2-Private for `vm` without
+    /// changing CPU/IOMMU mappings, TLBs, or memory.
+    pub open spec fn hv_make_s2_private_step(
+        s1: Self,
+        s2: Self,
+        vm: VmId,
+        page: PhysPage,
+    ) -> bool {
+        &&& s1.wf()
+        &&& s1.all_vms().contains(vm)
+        &&& s1.s2_shared_pages.contains(page)
+        &&& (exists|key: VmPageKey| #[trigger]
+            s1.s2_map.contains_key(key) && key.vm == vm && s1.s2_map[key].page == page)
+        &&& (forall|key: VmPageKey| #[trigger]
+            s1.s2_map.contains_key(key) && s1.s2_map[key].page == page ==> key.vm == vm)
+        &&& (forall|other: VmId| #[trigger]
+            s1.all_vms().contains(other) && other != vm
+                ==> !s1.iommu_private_pages[other].contains(page))
+        &&& !s1.iommu_shared_pages.contains(page)
+        &&& s2.wf()
+        &&& s2.same_identity_as(&s1)
+        &&& s2.same_translation_as(&s1)
+        &&& s2.same_memory_as(&s1)
+        &&& s2.s2_private_pages
+            == s1.s2_private_pages.insert(vm, s1.s2_private_pages[vm].insert(page))
+        &&& s2.s2_shared_pages == s1.s2_shared_pages.remove(page)
+        &&& s2.iommu_private_pages == s1.iommu_private_pages
+        &&& s2.iommu_shared_pages == s1.iommu_shared_pages
+    }
+
     /// Atomically classify one physical page as IOMMU-Private for `vm` and
     /// install its IOMMU mapping. The page may already be S2-Private for the same VM or
     /// S2-Shared; CPU and IOMMU classifications describe different access paths.
@@ -450,6 +505,12 @@ impl MachineState {
             },
             HypervisorOp::UnmapS2Shared(vm, gpa) => {
                 Self::hv_unmap_s2_shared_step(s1, s2, vm, gpa)
+            },
+            HypervisorOp::MakeS2Shared(vm, page) => {
+                Self::hv_make_s2_shared_step(s1, s2, vm, page)
+            },
+            HypervisorOp::MakeS2Private(vm, page) => {
+                Self::hv_make_s2_private_step(s1, s2, vm, page)
             },
             HypervisorOp::AddVm(vm) => Self::hv_add_vm_step(s1, s2, vm),
             HypervisorOp::RemoveVm(vm) => Self::hv_remove_vm_step(s1, s2, vm),

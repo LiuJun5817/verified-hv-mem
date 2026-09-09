@@ -23,10 +23,8 @@ pub open spec fn zone_s2_private_pages(zid: nat, zone: GhostZone) -> Set<PhysPag
     Set::new(
         |page: PhysPage|
             exists|region: MemoryRegion| #[trigger]
-                zone.cpu_mem_set.regions.contains(region) && region_in_private_budget(
-                    zid,
-                    region,
-                ) && region_pages(region).contains(page),
+                zone.cpu_mem_set.regions.contains(region) && region_in_private_budget(zid, region)
+                    && region_pages(region).contains(page),
     )
 }
 
@@ -45,10 +43,8 @@ pub open spec fn zone_iommu_private_pages(zid: nat, zone: GhostZone) -> Set<Phys
     Set::new(
         |page: PhysPage|
             exists|region: MemoryRegion| #[trigger]
-                zone.iommu_mem_set.regions.contains(region) && region_in_private_budget(
-                    zid,
-                    region,
-                ) && region_pages(region).contains(page),
+                zone.iommu_mem_set.regions.contains(region) && region_in_private_budget(zid, region)
+                    && region_pages(region).contains(page),
     )
 }
 
@@ -57,9 +53,8 @@ pub open spec fn zone_iommu_shared_pages(zone: GhostZone) -> Set<PhysPage> {
     Set::new(
         |page: PhysPage|
             exists|region: MemoryRegion| #[trigger]
-                zone.iommu_mem_set.regions.contains(region) && region_in_shared_budget(
-                    region,
-                ) && region_pages(region).contains(page),
+                zone.iommu_mem_set.regions.contains(region) && region_in_shared_budget(region)
+                    && region_pages(region).contains(page),
     )
 }
 
@@ -166,53 +161,6 @@ impl SoftwareSpec {
 // ---------------------------------------------------------------------------
 // Projection facts
 // ---------------------------------------------------------------------------
-/// Finds an installed region whose footprint contains a mapped physical page.
-proof fn lemma_memory_set_mapped_page_has_region(mem_set: SpecMemorySet, page: PhysPage)
-    requires
-        mem_set.wf(),
-        memory_set_mapped_pages(mem_set).contains(page),
-    ensures
-        exists|region: MemoryRegion| #[trigger]
-            mem_set.regions.contains(region) && region_pages(region).contains(page),
-{
-    let vaddr = choose|vaddr: SpecVAddr| #[trigger]
-        mem_set.mappings.contains_key(vaddr) && frame_phys_page(mem_set.mappings[vaddr]) == page;
-    let frame = mem_set.mappings[vaddr];
-    assert(mem_set.mappings.contains_pair(vaddr, frame));
-    assert(exists|region: MemoryRegion, i: nat|
-        #![trigger mem_set.regions.contains(region), region.spec_page_vaddr(i)]
-        mem_set.regions.contains(region) && 0 <= i < region.pages && vaddr
-            == region.spec_page_vaddr(i) && frame == region.spec_frame(i));
-    let (region, i) = choose|region: MemoryRegion, i: nat|
-        mem_set.regions.contains(region) && 0 <= i < region.pages && vaddr
-            == region.spec_page_vaddr(i) && frame == region.spec_frame(i);
-    lemma_region_phys_page_linear(region, i);
-    assert(region_phys_page(region, i) == page);
-    assert(region_pages(region).contains(page));
-}
-
-/// Shows that an installed concrete region contributes all of its abstract entries.
-proof fn lemma_region_in_memory_set_maps_entries(
-    zid: nat,
-    mem_set: SpecMemorySet,
-    region: MemoryRegion,
-)
-    requires
-        mem_set.wf(),
-        mem_set.regions.contains(region),
-    ensures
-        abstract_region_installed(
-            Map::new(
-                |key: VmPageKey|
-                    key.vm == VmId(zid) && mem_set.mappings.contains_key(vaddr_of_gpa(key.gpa)),
-                |key: VmPageKey| frame_to_s2(mem_set.mappings[vaddr_of_gpa(key.gpa)]),
-            ),
-            region_to_abstract(zid, region),
-        ),
-{
-    lemma_region_to_abstract_entries(zid, region);
-}
-
 /// Proves that every invariant BudgetSpec state projects to a well-formed SoftwareView.
 proof fn lemma_budget_projection_wf(spec: SoftwareSpec)
     requires
@@ -269,12 +217,16 @@ proof fn lemma_budget_projection_wf(spec: SoftwareSpec)
         sw.all_vms.contains(vm1) && #[trigger] sw.all_vms.contains(vm2) && vm1 != vm2 ==> forall|
             page: PhysPage,
         | #[trigger]
-            sw.iommu_private_pages[vm1].contains(page) ==> !sw.iommu_private_pages[vm2].contains(page));
+            sw.iommu_private_pages[vm1].contains(page) ==> !sw.iommu_private_pages[vm2].contains(
+                page,
+            ));
     assert(forall|vm1: VmId, vm2: VmId| #[trigger]
         sw.all_vms.contains(vm1) && #[trigger] sw.all_vms.contains(vm2) && vm1 != vm2 ==> forall|
             page: PhysPage,
         | #[trigger]
-            sw.iommu_private_pages[vm1].contains(page) ==> !sw.s2_private_pages[vm2].contains(page));
+            sw.iommu_private_pages[vm1].contains(page) ==> !sw.s2_private_pages[vm2].contains(
+                page,
+            ));
     assert(forall|vm: VmId| #[trigger]
         sw.all_vms.contains(vm) ==> forall|page: PhysPage| #[trigger]
             sw.iommu_private_pages[vm].contains(page) ==> !sw.iommu_shared_pages.contains(page));
@@ -286,9 +238,8 @@ proof fn lemma_budget_projection_wf(spec: SoftwareSpec)
     assert forall|key: VmPageKey| #[trigger] sw.iommu_s2_map.contains_key(key) implies {
         &&& sw.all_vms.contains(key.vm)
         &&& sw.iommu_private_pages.contains_key(key.vm)
-        &&& (sw.iommu_private_pages[key.vm].contains(sw.iommu_s2_map[key].page) || sw.iommu_shared_pages.contains(
-            sw.iommu_s2_map[key].page,
-        ))
+        &&& (sw.iommu_private_pages[key.vm].contains(sw.iommu_s2_map[key].page)
+            || sw.iommu_shared_pages.contains(sw.iommu_s2_map[key].page))
     } by {
         let zid = key.vm.0;
         let page = sw.iommu_s2_map[key].page;
@@ -312,60 +263,6 @@ proof fn lemma_budget_projection_wf(spec: SoftwareSpec)
     assert(sw.iommu_translation_wf());
     assert(sw.iommu_wf());
     assert(sw.wf());
-}
-
-/// Relates concrete memory-set insertion to abstract stage-2 map insertion.
-proof fn lemma_memory_set_s2_insert(zid: nat, mem_set: SpecMemorySet, region: MemoryRegion)
-    requires
-        mem_set.wf(),
-        region.spec_valid(),
-        !mem_set.overlaps_vmem(region),
-    ensures
-        memory_set_s2_entries(zid, mem_set.insert_region(region)) =~= memory_set_s2_entries(
-            zid,
-            mem_set,
-        ).union_prefer_right(region_s2_entries(zid, region)),
-{
-    let old = memory_set_s2_entries(zid, mem_set);
-    let added = region_s2_entries(zid, region);
-    let new = memory_set_s2_entries(zid, mem_set.insert_region(region));
-    assert forall|key: VmPageKey| #[trigger]
-        new.contains_key(key) <==> old.union_prefer_right(added).contains_key(key) by {
-        lemma_region_gpa_mapped_iff(region, key.gpa);
-    }
-    assert forall|key: VmPageKey|
-        #![trigger new[key]]
-        #![trigger old.union_prefer_right(added)[key]]
-        new.contains_key(key) implies new[key] == old.union_prefer_right(added)[key] by {
-        lemma_region_gpa_mapped_iff(region, key.gpa);
-        if region.spec_mappings().contains_key(vaddr_of_gpa(key.gpa)) {
-            lemma_region_s2_value(zid, region, key);
-        }
-    }
-}
-
-/// Relates concrete memory-set removal to abstract stage-2 map removal.
-proof fn lemma_memory_set_s2_remove(zid: nat, mem_set: SpecMemorySet, region: MemoryRegion)
-    requires
-        mem_set.wf(),
-        mem_set.regions.contains(region),
-    ensures
-        memory_set_s2_entries(zid, mem_set.remove_region_exact(region)) =~= memory_set_s2_entries(
-            zid,
-            mem_set,
-        ).remove_keys(region_s2_entries(zid, region).dom()),
-{
-    let old = memory_set_s2_entries(zid, mem_set);
-    let removed = region_s2_entries(zid, region);
-    let new = memory_set_s2_entries(zid, mem_set.remove_region_exact(region));
-    assert forall|key: VmPageKey| #[trigger]
-        new.contains_key(key) <==> old.remove_keys(removed.dom()).contains_key(key) by {
-        lemma_region_gpa_mapped_iff(region, key.gpa);
-    }
-    assert(forall|key: VmPageKey|
-        #![trigger new[key]]
-        #![trigger old.remove_keys(removed.dom())[key]]
-        new.contains_key(key) ==> new[key] == old.remove_keys(removed.dom())[key]);
 }
 
 /// Lifts a CPU memory-set insertion into the global CPU map projection.
@@ -560,9 +457,8 @@ proof fn lemma_cpu_insert_private_projection(
             =~= target_private[vm] by {
             if vm.0 == zid {
                 assert forall|page: PhysPage|
-                    post.view().s2_private_pages[vm].contains(page) <==> target_private[vm].contains(
-                        page,
-                    ) by {
+                    post.view().s2_private_pages[vm].contains(page)
+                        <==> target_private[vm].contains(page) by {
                     if post.view().s2_private_pages[vm].contains(page) {
                         let stored = choose|stored: MemoryRegion| #[trigger]
                             post.budget.zones[zid].cpu_mem_set.regions.contains(stored)
@@ -591,7 +487,9 @@ proof fn lemma_cpu_insert_private_projection(
     }
     assert(post.view().s2_shared_pages =~= pre.view().s2_shared_pages) by {
         assert forall|page: PhysPage|
-            post.view().s2_shared_pages.contains(page) <==> pre.view().s2_shared_pages.contains(page) by {
+            post.view().s2_shared_pages.contains(page) <==> pre.view().s2_shared_pages.contains(
+                page,
+            ) by {
             if post.view().s2_shared_pages.contains(page) {
                 let zone_id = choose|zone_id: nat| #[trigger]
                     post.budget.zone_ids.contains(zone_id) && zone_s2_shared_pages(
@@ -600,9 +498,9 @@ proof fn lemma_cpu_insert_private_projection(
                 if zone_id == zid {
                     let stored = choose|stored: MemoryRegion| #[trigger]
                         post.budget.zones[zid].cpu_mem_set.regions.contains(stored)
-                            && region_in_shared_budget(stored) && region_pages(
-                            stored,
-                        ).contains(page);
+                            && region_in_shared_budget(stored) && region_pages(stored).contains(
+                            page,
+                        );
                     assert(stored != concrete);
                 }
             }
@@ -613,9 +511,7 @@ proof fn lemma_cpu_insert_private_projection(
                     ).contains(page);
                 let stored = choose|stored: MemoryRegion| #[trigger]
                     pre.budget.zones[zone_id].cpu_mem_set.regions.contains(stored)
-                        && region_in_shared_budget(stored) && region_pages(stored).contains(
-                        page,
-                    );
+                        && region_in_shared_budget(stored) && region_pages(stored).contains(page);
                 assert(post.budget.zones[zone_id].cpu_mem_set.regions.contains(stored));
                 assert(post.view().s2_shared_pages.contains(page));
             }
@@ -668,9 +564,8 @@ proof fn lemma_cpu_insert_shared_projection(
             =~= pre.view().s2_private_pages[vm] by {
             if vm.0 == zid {
                 assert forall|page: PhysPage|
-                    post.view().s2_private_pages[vm].contains(page) <==> pre.view().s2_private_pages[vm].contains(
-                        page,
-                    ) by {
+                    post.view().s2_private_pages[vm].contains(page)
+                        <==> pre.view().s2_private_pages[vm].contains(page) by {
                     if post.view().s2_private_pages[vm].contains(page) {
                         let stored = choose|stored: MemoryRegion| #[trigger]
                             post.budget.zones[zid].cpu_mem_set.regions.contains(stored)
@@ -692,7 +587,8 @@ proof fn lemma_cpu_insert_shared_projection(
             }
         }
     }
-    assert(post.view().s2_shared_pages =~= pre.view().s2_shared_pages.union(region_pages(concrete))) by {
+    assert(post.view().s2_shared_pages =~= pre.view().s2_shared_pages.union(region_pages(concrete)))
+        by {
         assert forall|page: PhysPage|
             post.view().s2_shared_pages.contains(page) <==> pre.view().s2_shared_pages.union(
                 region_pages(concrete),
@@ -705,9 +601,9 @@ proof fn lemma_cpu_insert_shared_projection(
                 if zone_id == zid {
                     let stored = choose|stored: MemoryRegion| #[trigger]
                         post.budget.zones[zid].cpu_mem_set.regions.contains(stored)
-                            && region_in_shared_budget(stored) && region_pages(
-                            stored,
-                        ).contains(page);
+                            && region_in_shared_budget(stored) && region_pages(stored).contains(
+                            page,
+                        );
                     if stored != concrete {
                         assert(pre.budget.zones[zid].cpu_mem_set.regions.contains(stored));
                     }
@@ -723,9 +619,7 @@ proof fn lemma_cpu_insert_shared_projection(
                     ).contains(page);
                 let stored = choose|stored: MemoryRegion| #[trigger]
                     pre.budget.zones[zone_id].cpu_mem_set.regions.contains(stored)
-                        && region_in_shared_budget(stored) && region_pages(stored).contains(
-                        page,
-                    );
+                        && region_in_shared_budget(stored) && region_pages(stored).contains(page);
                 assert(post.budget.zones[zone_id].cpu_mem_set.regions.contains(stored));
                 assert(post.view().s2_shared_pages.contains(page));
             }
@@ -783,9 +677,8 @@ proof fn lemma_cpu_remove_private_projection(
             =~= target_private[vm] by {
             if vm.0 == zid {
                 assert forall|page: PhysPage|
-                    post.view().s2_private_pages[vm].contains(page) <==> target_private[vm].contains(
-                        page,
-                    ) by {
+                    post.view().s2_private_pages[vm].contains(page)
+                        <==> target_private[vm].contains(page) by {
                     if post.view().s2_private_pages[vm].contains(page) {
                         let stored = choose|stored: MemoryRegion| #[trigger]
                             post.budget.zones[zid].cpu_mem_set.regions.contains(stored)
@@ -815,7 +708,9 @@ proof fn lemma_cpu_remove_private_projection(
     }
     assert(post.view().s2_shared_pages =~= pre.view().s2_shared_pages) by {
         assert forall|page: PhysPage|
-            post.view().s2_shared_pages.contains(page) <==> pre.view().s2_shared_pages.contains(page) by {
+            post.view().s2_shared_pages.contains(page) <==> pre.view().s2_shared_pages.contains(
+                page,
+            ) by {
             if pre.view().s2_shared_pages.contains(page) {
                 let zone_id = choose|zone_id: nat| #[trigger]
                     pre.budget.zone_ids.contains(zone_id) && zone_s2_shared_pages(
@@ -824,9 +719,9 @@ proof fn lemma_cpu_remove_private_projection(
                 if zone_id == zid {
                     let stored = choose|stored: MemoryRegion| #[trigger]
                         pre.budget.zones[zid].cpu_mem_set.regions.contains(stored)
-                            && region_in_shared_budget(stored) && region_pages(
-                            stored,
-                        ).contains(page);
+                            && region_in_shared_budget(stored) && region_pages(stored).contains(
+                            page,
+                        );
                     assert(stored != concrete);
                 }
             }
@@ -878,9 +773,8 @@ proof fn lemma_cpu_remove_shared_projection(
             =~= pre.view().s2_private_pages[vm] by {
             if vm.0 == zid {
                 assert forall|page: PhysPage|
-                    post.view().s2_private_pages[vm].contains(page) <==> pre.view().s2_private_pages[vm].contains(
-                        page,
-                    ) by {
+                    post.view().s2_private_pages[vm].contains(page)
+                        <==> pre.view().s2_private_pages[vm].contains(page) by {
                     if pre.view().s2_private_pages[vm].contains(page) {
                         let stored = choose|stored: MemoryRegion| #[trigger]
                             pre.budget.zones[zid].cpu_mem_set.regions.contains(stored)
@@ -918,9 +812,7 @@ proof fn lemma_cpu_remove_shared_projection(
                     ).contains(page);
                 let stored = choose|stored: MemoryRegion| #[trigger]
                     post.budget.zones[zone_id].cpu_mem_set.regions.contains(stored)
-                        && region_in_shared_budget(stored) && region_pages(stored).contains(
-                        page,
-                    );
+                        && region_in_shared_budget(stored) && region_pages(stored).contains(page);
                 assert(pre.view().s2_shared_pages.contains(page));
                 if region_pages(concrete).contains(page) {
                     assert(post.budget.zones[zone_id].wf());
@@ -945,9 +837,9 @@ proof fn lemma_cpu_remove_shared_projection(
                         ).contains(page);
                     let stored = choose|stored: MemoryRegion| #[trigger]
                         pre.budget.zones[zone_id].cpu_mem_set.regions.contains(stored)
-                            && region_in_shared_budget(stored) && region_pages(
-                            stored,
-                        ).contains(page);
+                            && region_in_shared_budget(stored) && region_pages(stored).contains(
+                            page,
+                        );
                     if zone_id == zid {
                         assert(stored != concrete);
                     }
@@ -996,11 +888,7 @@ proof fn lemma_cpu_remove_shared_projection(
     assert(post.view().iommu_private_pages == pre.view().iommu_private_pages);
     assert(post.view().iommu_shared_pages == pre.view().iommu_shared_pages);
     assert(post.view().iommu_s2_map == pre.view().iommu_s2_map);
-    assert(SoftwareView::cpu_remove_shared_region_step(
-        pre.view(),
-        post.view(),
-        abstract_region,
-    ));
+    assert(SoftwareView::cpu_remove_shared_region_step(pre.view(), post.view(), abstract_region));
 }
 
 /// Proves the SoftwareView effect of inserting one private IOMMU region.
@@ -1049,13 +937,13 @@ proof fn lemma_iommu_insert_private_projection(
     assert(post.view().iommu_private_pages =~= target_private) by {
         assert(post.view().iommu_private_pages.dom() =~= target_private.dom());
         assert forall|vm: VmId| #[trigger]
-            post.view().iommu_private_pages.contains_key(vm) implies post.view().iommu_private_pages[vm]
-            =~= target_private[vm] by {
+            post.view().iommu_private_pages.contains_key(
+                vm,
+            ) implies post.view().iommu_private_pages[vm] =~= target_private[vm] by {
             if vm.0 == zid {
                 assert forall|page: PhysPage|
-                    post.view().iommu_private_pages[vm].contains(page) <==> target_private[vm].contains(
-                        page,
-                    ) by {
+                    post.view().iommu_private_pages[vm].contains(page)
+                        <==> target_private[vm].contains(page) by {
                     if post.view().iommu_private_pages[vm].contains(page) {
                         let stored = choose|stored: MemoryRegion| #[trigger]
                             post.budget.zones[zid].iommu_mem_set.regions.contains(stored)
@@ -1084,7 +972,8 @@ proof fn lemma_iommu_insert_private_projection(
     }
     assert(post.view().iommu_shared_pages =~= pre.view().iommu_shared_pages) by {
         assert forall|page: PhysPage|
-            post.view().iommu_shared_pages.contains(page) <==> pre.view().iommu_shared_pages.contains(page) by {
+            post.view().iommu_shared_pages.contains(page)
+                <==> pre.view().iommu_shared_pages.contains(page) by {
             if post.view().iommu_shared_pages.contains(page) {
                 let zone_id = choose|zone_id: nat| #[trigger]
                     post.budget.zone_ids.contains(zone_id) && zone_iommu_shared_pages(
@@ -1093,9 +982,9 @@ proof fn lemma_iommu_insert_private_projection(
                 if zone_id == zid {
                     let stored = choose|stored: MemoryRegion| #[trigger]
                         post.budget.zones[zid].iommu_mem_set.regions.contains(stored)
-                            && region_in_shared_budget(stored) && region_pages(
-                            stored,
-                        ).contains(page);
+                            && region_in_shared_budget(stored) && region_pages(stored).contains(
+                            page,
+                        );
                     assert(stored != concrete);
                 }
             }
@@ -1106,9 +995,7 @@ proof fn lemma_iommu_insert_private_projection(
                     ).contains(page);
                 let stored = choose|stored: MemoryRegion| #[trigger]
                     pre.budget.zones[zone_id].iommu_mem_set.regions.contains(stored)
-                        && region_in_shared_budget(stored) && region_pages(stored).contains(
-                        page,
-                    );
+                        && region_in_shared_budget(stored) && region_pages(stored).contains(page);
                 assert(post.budget.zones[zone_id].iommu_mem_set.regions.contains(stored));
                 assert(post.view().iommu_shared_pages.contains(page));
             }
@@ -1157,7 +1044,9 @@ proof fn lemma_iommu_insert_shared_projection(
     lemma_shared_region_not_private(zid, concrete);
     assert(post.view().iommu_private_pages =~= pre.view().iommu_private_pages) by {
         assert forall|vm: VmId| #[trigger]
-            post.view().iommu_private_pages.contains_key(vm) implies post.view().iommu_private_pages[vm]
+            post.view().iommu_private_pages.contains_key(
+                vm,
+            ) implies post.view().iommu_private_pages[vm]
             =~= pre.view().iommu_private_pages[vm] by {
             if vm.0 == zid {
                 assert forall|page: PhysPage|
@@ -1184,7 +1073,9 @@ proof fn lemma_iommu_insert_shared_projection(
             }
         }
     }
-    assert(post.view().iommu_shared_pages =~= pre.view().iommu_shared_pages.union(region_pages(concrete))) by {
+    assert(post.view().iommu_shared_pages =~= pre.view().iommu_shared_pages.union(
+        region_pages(concrete),
+    )) by {
         assert forall|page: PhysPage|
             post.view().iommu_shared_pages.contains(page) <==> pre.view().iommu_shared_pages.union(
                 region_pages(concrete),
@@ -1197,9 +1088,9 @@ proof fn lemma_iommu_insert_shared_projection(
                 if zone_id == zid {
                     let stored = choose|stored: MemoryRegion| #[trigger]
                         post.budget.zones[zid].iommu_mem_set.regions.contains(stored)
-                            && region_in_shared_budget(stored) && region_pages(
-                            stored,
-                        ).contains(page);
+                            && region_in_shared_budget(stored) && region_pages(stored).contains(
+                            page,
+                        );
                     if stored != concrete {
                         assert(pre.budget.zones[zid].iommu_mem_set.regions.contains(stored));
                     }
@@ -1215,9 +1106,7 @@ proof fn lemma_iommu_insert_shared_projection(
                     ).contains(page);
                 let stored = choose|stored: MemoryRegion| #[trigger]
                     pre.budget.zones[zone_id].iommu_mem_set.regions.contains(stored)
-                        && region_in_shared_budget(stored) && region_pages(stored).contains(
-                        page,
-                    );
+                        && region_in_shared_budget(stored) && region_pages(stored).contains(page);
                 assert(post.budget.zones[zone_id].iommu_mem_set.regions.contains(stored));
                 assert(post.view().iommu_shared_pages.contains(page));
             }
@@ -1271,13 +1160,13 @@ proof fn lemma_iommu_remove_private_projection(
     assert(post.view().iommu_private_pages =~= target_private) by {
         assert(post.view().iommu_private_pages.dom() =~= target_private.dom());
         assert forall|vm: VmId| #[trigger]
-            post.view().iommu_private_pages.contains_key(vm) implies post.view().iommu_private_pages[vm]
-            =~= target_private[vm] by {
+            post.view().iommu_private_pages.contains_key(
+                vm,
+            ) implies post.view().iommu_private_pages[vm] =~= target_private[vm] by {
             if vm.0 == zid {
                 assert forall|page: PhysPage|
-                    post.view().iommu_private_pages[vm].contains(page) <==> target_private[vm].contains(
-                        page,
-                    ) by {
+                    post.view().iommu_private_pages[vm].contains(page)
+                        <==> target_private[vm].contains(page) by {
                     if post.view().iommu_private_pages[vm].contains(page) {
                         let stored = choose|stored: MemoryRegion| #[trigger]
                             post.budget.zones[zid].iommu_mem_set.regions.contains(stored)
@@ -1307,7 +1196,8 @@ proof fn lemma_iommu_remove_private_projection(
     }
     assert(post.view().iommu_shared_pages =~= pre.view().iommu_shared_pages) by {
         assert forall|page: PhysPage|
-            post.view().iommu_shared_pages.contains(page) <==> pre.view().iommu_shared_pages.contains(page) by {
+            post.view().iommu_shared_pages.contains(page)
+                <==> pre.view().iommu_shared_pages.contains(page) by {
             if pre.view().iommu_shared_pages.contains(page) {
                 let zone_id = choose|zone_id: nat| #[trigger]
                     pre.budget.zone_ids.contains(zone_id) && zone_iommu_shared_pages(
@@ -1316,9 +1206,9 @@ proof fn lemma_iommu_remove_private_projection(
                 if zone_id == zid {
                     let stored = choose|stored: MemoryRegion| #[trigger]
                         pre.budget.zones[zid].iommu_mem_set.regions.contains(stored)
-                            && region_in_shared_budget(stored) && region_pages(
-                            stored,
-                        ).contains(page);
+                            && region_in_shared_budget(stored) && region_pages(stored).contains(
+                            page,
+                        );
                     assert(stored != concrete);
                 }
             }
@@ -1366,7 +1256,9 @@ proof fn lemma_iommu_remove_shared_projection(
     lemma_shared_region_not_private(zid, concrete);
     assert(post.view().iommu_private_pages =~= pre.view().iommu_private_pages) by {
         assert forall|vm: VmId| #[trigger]
-            post.view().iommu_private_pages.contains_key(vm) implies post.view().iommu_private_pages[vm]
+            post.view().iommu_private_pages.contains_key(
+                vm,
+            ) implies post.view().iommu_private_pages[vm]
             =~= pre.view().iommu_private_pages[vm] by {
             if vm.0 == zid {
                 assert forall|page: PhysPage|
@@ -1409,9 +1301,7 @@ proof fn lemma_iommu_remove_shared_projection(
                     ).contains(page);
                 let stored = choose|stored: MemoryRegion| #[trigger]
                     post.budget.zones[zone_id].iommu_mem_set.regions.contains(stored)
-                        && region_in_shared_budget(stored) && region_pages(stored).contains(
-                        page,
-                    );
+                        && region_in_shared_budget(stored) && region_pages(stored).contains(page);
                 assert(pre.view().iommu_shared_pages.contains(page));
                 if region_pages(concrete).contains(page) {
                     assert(post.budget.zones[zone_id].wf());
@@ -1436,9 +1326,9 @@ proof fn lemma_iommu_remove_shared_projection(
                         ).contains(page);
                     let stored = choose|stored: MemoryRegion| #[trigger]
                         pre.budget.zones[zone_id].iommu_mem_set.regions.contains(stored)
-                            && region_in_shared_budget(stored) && region_pages(
-                            stored,
-                        ).contains(page);
+                            && region_in_shared_budget(stored) && region_pages(stored).contains(
+                            page,
+                        );
                     if zone_id == zid {
                         assert(stored != concrete);
                     }
@@ -1489,11 +1379,7 @@ proof fn lemma_iommu_remove_shared_projection(
     assert(post.view().iommu_s2_map == pre.view().iommu_s2_map.remove_keys(
         abstract_region.entries().dom(),
     ));
-    assert(SoftwareView::iommu_remove_shared_region_step(
-        pre.view(),
-        post.view(),
-        abstract_region,
-    ));
+    assert(SoftwareView::iommu_remove_shared_region_step(pre.view(), post.view(), abstract_region));
 }
 
 // ---------------------------------------------------------------------------
@@ -1604,11 +1490,7 @@ proof fn lemma_cpu_insert_private_enabled(spec: SoftwareSpec, zid: nat, concrete
         spec.budget.zones.contains_key(zid),
         concrete.spec_valid(),
         region_in_private_budget(zid, concrete),
-        pmem_nonoverlap_with_private_regions(
-            zid,
-            spec.budget.zones[zid].cpu_mem_set,
-            concrete,
-        ),
+        pmem_nonoverlap_with_private_regions(zid, spec.budget.zones[zid].cpu_mem_set, concrete),
         !spec.budget.zones[zid].cpu_mem_set.overlaps_vmem(concrete),
     ensures
         SoftwareView::cpu_insert_private_region_enabled(
@@ -1651,11 +1533,7 @@ proof fn lemma_cpu_insert_private_enabled(spec: SoftwareSpec, zid: nat, concrete
         region.pages().contains(page) ==> !spec.view().iommu_shared_pages.contains(page));
 }
 
-proof fn lemma_cpu_insert_shared_enabled(
-    spec: SoftwareSpec,
-    zid: nat,
-    concrete: MemoryRegion,
-)
+proof fn lemma_cpu_insert_shared_enabled(spec: SoftwareSpec, zid: nat, concrete: MemoryRegion)
     requires
         spec.budget.invariant(),
         spec.budget.zones.contains_key(zid),
@@ -1685,21 +1563,13 @@ proof fn lemma_cpu_insert_shared_enabled(
             ==> !spec.view().s2_private_pages[vm].contains(page));
 }
 
-proof fn lemma_iommu_insert_private_enabled(
-    spec: SoftwareSpec,
-    zid: nat,
-    concrete: MemoryRegion,
-)
+proof fn lemma_iommu_insert_private_enabled(spec: SoftwareSpec, zid: nat, concrete: MemoryRegion)
     requires
         spec.budget.invariant(),
         spec.budget.zones.contains_key(zid),
         concrete.spec_valid(),
         region_in_private_budget(zid, concrete),
-        pmem_nonoverlap_with_private_regions(
-            zid,
-            spec.budget.zones[zid].iommu_mem_set,
-            concrete,
-        ),
+        pmem_nonoverlap_with_private_regions(zid, spec.budget.zones[zid].iommu_mem_set, concrete),
         !spec.budget.zones[zid].iommu_mem_set.overlaps_vmem(concrete),
     ensures
         SoftwareView::iommu_insert_private_region_enabled(
@@ -1736,11 +1606,7 @@ proof fn lemma_iommu_insert_private_enabled(
         region.pages().contains(page) ==> !spec.view().iommu_shared_pages.contains(page));
 }
 
-proof fn lemma_iommu_insert_shared_enabled(
-    spec: SoftwareSpec,
-    zid: nat,
-    concrete: MemoryRegion,
-)
+proof fn lemma_iommu_insert_shared_enabled(spec: SoftwareSpec, zid: nat, concrete: MemoryRegion)
     requires
         spec.budget.invariant(),
         spec.budget.zones.contains_key(zid),
@@ -1763,9 +1629,8 @@ proof fn lemma_iommu_insert_shared_enabled(
     assert(spec.view().all_vms.contains(region.vm));
     assert(forall|page: PhysPage, vm: VmId| #[trigger]
         region.pages().contains(page) && #[trigger] spec.view().all_vms.contains(vm)
-            ==> !spec.view().s2_private_pages[vm].contains(page) && !spec.view().iommu_private_pages[vm].contains(
-            page,
-        ));
+            ==> !spec.view().s2_private_pages[vm].contains(page)
+            && !spec.view().iommu_private_pages[vm].contains(page));
 }
 
 proof fn lemma_cpu_remove_private_enabled(spec: SoftwareSpec, zid: nat, concrete: MemoryRegion)
@@ -1842,11 +1707,7 @@ proof fn lemma_cpu_remove_private_enabled(spec: SoftwareSpec, zid: nat, concrete
         region.pages().contains(page) ==> !spec.view().s2_shared_pages.contains(page));
 }
 
-proof fn lemma_cpu_remove_shared_enabled(
-    spec: SoftwareSpec,
-    zid: nat,
-    concrete: MemoryRegion,
-)
+proof fn lemma_cpu_remove_shared_enabled(spec: SoftwareSpec, zid: nat, concrete: MemoryRegion)
     requires
         spec.budget.invariant(),
         spec.budget.zones.contains_key(zid),
@@ -1874,11 +1735,7 @@ proof fn lemma_cpu_remove_shared_enabled(
     assert(abstract_region_installed(spec.view().s2_map, region));
 }
 
-proof fn lemma_iommu_remove_private_enabled(
-    spec: SoftwareSpec,
-    zid: nat,
-    concrete: MemoryRegion,
-)
+proof fn lemma_iommu_remove_private_enabled(spec: SoftwareSpec, zid: nat, concrete: MemoryRegion)
     requires
         spec.budget.invariant(),
         spec.budget.zones.contains_key(zid),
@@ -1904,7 +1761,9 @@ proof fn lemma_iommu_remove_private_enabled(
     assert(region.wf());
     assert(spec.view().all_vms.contains(region.vm));
     assert(forall|page: PhysPage| #[trigger]
-        region.pages().contains(page) ==> spec.view().iommu_private_pages[region.vm].contains(page));
+        region.pages().contains(page) ==> spec.view().iommu_private_pages[region.vm].contains(
+            page,
+        ));
     assert(abstract_region_installed(spec.view().iommu_s2_map, region));
     assert forall|key: VmPageKey| #[trigger]
         spec.view().iommu_s2_map.contains_key(key) && !region.entries().contains_key(
@@ -1950,11 +1809,7 @@ proof fn lemma_iommu_remove_private_enabled(
     }
 }
 
-proof fn lemma_iommu_remove_shared_enabled(
-    spec: SoftwareSpec,
-    zid: nat,
-    concrete: MemoryRegion,
-)
+proof fn lemma_iommu_remove_shared_enabled(spec: SoftwareSpec, zid: nat, concrete: MemoryRegion)
     requires
         spec.budget.invariant(),
         spec.budget.zones.contains_key(zid),
@@ -2197,19 +2052,20 @@ proof fn lemma_add_zone_step_refines(pre: SoftwareSpec, post: SoftwareSpec, zid:
     assert(post.budget.zone_ids == pre.budget.zone_ids.insert(zid));
     assert(post.budget.zones == pre.budget.zones.insert(zid, empty_zone));
     assert(post.view().all_vms =~= pre.view().all_vms.insert(vm));
-    assert(post.view().s2_private_pages =~= pre.view().s2_private_pages.insert(vm, Set::empty())) by {
+    assert(post.view().s2_private_pages =~= pre.view().s2_private_pages.insert(vm, Set::empty()))
+        by {
         assert(forall|other: VmId| #[trigger]
-            post.view().s2_private_pages.contains_key(other) <==> pre.view().s2_private_pages.insert(
-                vm,
-                Set::empty(),
-            ).contains_key(other));
+            post.view().s2_private_pages.contains_key(other)
+                <==> pre.view().s2_private_pages.insert(vm, Set::empty()).contains_key(other));
         assert(forall|other: VmId| #[trigger]
             post.view().s2_private_pages.contains_key(other) ==> post.view().s2_private_pages[other]
                 == pre.view().s2_private_pages.insert(vm, Set::empty())[other]);
     }
     assert(post.view().s2_shared_pages =~= pre.view().s2_shared_pages) by {
         assert forall|page: PhysPage|
-            post.view().s2_shared_pages.contains(page) <==> pre.view().s2_shared_pages.contains(page) by {
+            post.view().s2_shared_pages.contains(page) <==> pre.view().s2_shared_pages.contains(
+                page,
+            ) by {
             if post.view().s2_shared_pages.contains(page) {
                 let other = choose|other: nat| #[trigger]
                     post.budget.zone_ids.contains(other) && zone_s2_shared_pages(
@@ -2229,19 +2085,24 @@ proof fn lemma_add_zone_step_refines(pre: SoftwareSpec, post: SoftwareSpec, zid:
         }
     }
     assert(post.view().s2_map =~= pre.view().s2_map);
-    assert(post.view().iommu_private_pages =~= pre.view().iommu_private_pages.insert(vm, Set::empty())) by {
+    assert(post.view().iommu_private_pages =~= pre.view().iommu_private_pages.insert(
+        vm,
+        Set::empty(),
+    )) by {
         assert(forall|other: VmId| #[trigger]
-            post.view().iommu_private_pages.contains_key(other) <==> pre.view().iommu_private_pages.insert(
+            post.view().iommu_private_pages.contains_key(other)
+                <==> pre.view().iommu_private_pages.insert(vm, Set::empty()).contains_key(other));
+        assert(forall|other: VmId| #[trigger]
+            post.view().iommu_private_pages.contains_key(other)
+                ==> post.view().iommu_private_pages[other] == pre.view().iommu_private_pages.insert(
                 vm,
                 Set::empty(),
-            ).contains_key(other));
-        assert(forall|other: VmId| #[trigger]
-            post.view().iommu_private_pages.contains_key(other) ==> post.view().iommu_private_pages[other]
-                == pre.view().iommu_private_pages.insert(vm, Set::empty())[other]);
+            )[other]);
     }
     assert(post.view().iommu_shared_pages =~= pre.view().iommu_shared_pages) by {
         assert forall|page: PhysPage|
-            post.view().iommu_shared_pages.contains(page) <==> pre.view().iommu_shared_pages.contains(page) by {
+            post.view().iommu_shared_pages.contains(page)
+                <==> pre.view().iommu_shared_pages.contains(page) by {
             if post.view().iommu_shared_pages.contains(page) {
                 let other = choose|other: nat| #[trigger]
                     post.budget.zone_ids.contains(other) && zone_iommu_shared_pages(
@@ -2463,9 +2324,8 @@ proof fn lemma_remove_zone_step_refines(pre: SoftwareSpec, post: SoftwareSpec, z
     assert(removed.view().s2_private_pages =~= cleared.view().s2_private_pages.remove(vm));
     assert(removed.view().s2_shared_pages =~= cleared.view().s2_shared_pages) by {
         assert forall|page: PhysPage|
-            removed.view().s2_shared_pages.contains(page) <==> cleared.view().s2_shared_pages.contains(
-                page,
-            ) by {
+            removed.view().s2_shared_pages.contains(page)
+                <==> cleared.view().s2_shared_pages.contains(page) by {
             if cleared.view().s2_shared_pages.contains(page) {
                 let other = choose|other: nat| #[trigger]
                     cleared.budget.zone_ids.contains(other) && zone_s2_shared_pages(
@@ -2479,9 +2339,8 @@ proof fn lemma_remove_zone_step_refines(pre: SoftwareSpec, post: SoftwareSpec, z
     assert(removed.view().iommu_private_pages =~= cleared.view().iommu_private_pages.remove(vm));
     assert(removed.view().iommu_shared_pages =~= cleared.view().iommu_shared_pages) by {
         assert forall|page: PhysPage|
-            removed.view().iommu_shared_pages.contains(page) <==> cleared.view().iommu_shared_pages.contains(
-                page,
-            ) by {
+            removed.view().iommu_shared_pages.contains(page)
+                <==> cleared.view().iommu_shared_pages.contains(page) by {
             if cleared.view().iommu_shared_pages.contains(page) {
                 let other = choose|other: nat| #[trigger]
                     cleared.budget.zone_ids.contains(other) && zone_iommu_shared_pages(

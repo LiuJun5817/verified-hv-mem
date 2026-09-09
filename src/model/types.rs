@@ -79,6 +79,10 @@ pub enum HypervisorOp {
     MapS2Shared(VmId, GuestPage, S2Entry),
     /// Remove one CPU mapping and update the dynamic S2-Shared projection.
     UnmapS2Shared(VmId, GuestPage),
+    /// Reclassify one mapped page from S2-Private to S2-Shared without changing mappings.
+    MakeS2Shared(VmId, PhysPage),
+    /// Reclassify one mapped page from S2-Shared to S2-Private without changing mappings.
+    MakeS2Private(VmId, PhysPage),
     /// Install one IOMMU mapping and classify its target as IOMMU-Private.
     MapIommuPrivate(VmId, GuestPage, S2Entry),
     /// Remove one IOMMU mapping and its IOMMU-Private classification.

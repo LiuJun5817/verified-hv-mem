@@ -313,11 +313,11 @@ pub proof fn lemma_map_s2_shared_step_preserves_wf(
     let key = VmPageKey::new(vm, gpa);
     let page = entry.page;
     assert(s2.s2_private_pages.dom() =~= s2.all_vms);
-    assert forall|a: VmId, b: VmId| #[trigger]
-        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies (forall|
+    assert(forall|a: VmId, b: VmId| #[trigger]
+        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b ==> (forall|
         p: PhysPage,
     | #[trigger]
-        s2.s2_private_pages[a].contains(p) ==> !s2.s2_private_pages[b].contains(p)) by {}
+        s2.s2_private_pages[a].contains(p) ==> !s2.s2_private_pages[b].contains(p)));
     assert forall|v: VmId| #[trigger] s2.all_vms.contains(v) implies (forall|p: PhysPage|
      #[trigger]
         s2.s2_private_pages[v].contains(p) ==> !s2.s2_shared_pages.contains(p)) by {
@@ -380,6 +380,197 @@ pub proof fn lemma_unmap_s2_shared_step_preserves_wf(
     assert(s2.iommu_translation_wf());
 }
 
+/// Moving one mapped page from a VM's S2-Private set to S2-Shared preserves
+/// every translation while weakening only that page's isolation classification.
+pub proof fn lemma_make_s2_shared_step_preserves_wf(
+    s1: SoftwareView,
+    s2: SoftwareView,
+    vm: VmId,
+    page: PhysPage,
+)
+    requires
+        s1.wf(),
+        SoftwareView::make_s2_shared_step(s1, s2, vm, page),
+    ensures
+        s2.wf(),
+{
+    assert(s2.s2_private_pages.dom() =~= s2.all_vms);
+    assert forall|a: VmId, b: VmId| #[trigger]
+        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies
+        forall|p: PhysPage| #[trigger]
+            s2.s2_private_pages[a].contains(p) ==> !s2.s2_private_pages[b].contains(p) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.s2_private_pages[a].contains(p) implies
+                !s2.s2_private_pages[b].contains(p) by {
+            assert(s1.s2_private_pages[a].contains(p));
+            if s2.s2_private_pages[b].contains(p) {
+                assert(s1.s2_private_pages[b].contains(p));
+            }
+        }
+    }
+    assert forall|v: VmId| #[trigger] s2.all_vms.contains(v) implies
+        forall|p: PhysPage| #[trigger]
+            s2.s2_private_pages[v].contains(p) ==> !s2.s2_shared_pages.contains(p) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.s2_private_pages[v].contains(p) implies !s2.s2_shared_pages.contains(p) by {
+            assert(s1.s2_private_pages[v].contains(p));
+            if p == page {
+                assert(v != vm);
+                assert(!s1.s2_private_pages[v].contains(page));
+            }
+        }
+    }
+    assert(s2.s2_classification_wf());
+    assert forall|key: VmPageKey| #[trigger] s2.s2_map.contains_key(key) implies {
+        &&& s2.all_vms.contains(key.vm)
+        &&& s2.s2_private_or_shared(key.vm, s2.s2_map[key].page)
+    } by {
+        assert(s1.s2_map.contains_key(key));
+        if s2.s2_map[key].page == page {
+            assert(s2.s2_shared_pages.contains(page));
+        }
+    }
+    assert(s2.translation_wf());
+    assert(s2.iommu_classification_wf());
+    assert(s2.iommu_translation_wf());
+}
+
+/// Moving one mapped page from S2-Shared to one VM's S2-Private set preserves
+/// `wf` when all surviving CPU aliases belong to that VM and the independent
+/// IOMMU classification permits the new Private classification.
+pub proof fn lemma_make_s2_private_step_preserves_wf(
+    s1: SoftwareView,
+    s2: SoftwareView,
+    vm: VmId,
+    page: PhysPage,
+)
+    requires
+        s1.wf(),
+        SoftwareView::make_s2_private_step(s1, s2, vm, page),
+    ensures
+        s2.wf(),
+{
+    assert(s2.s2_private_pages.dom() =~= s2.all_vms);
+    assert forall|a: VmId, b: VmId| #[trigger]
+        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies
+        forall|p: PhysPage| #[trigger]
+            s2.s2_private_pages[a].contains(p) ==> !s2.s2_private_pages[b].contains(p) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.s2_private_pages[a].contains(p) implies
+                !s2.s2_private_pages[b].contains(p) by {
+            if a == vm && p == page {
+                assert(!s1.s2_private_pages[b].contains(page));
+            } else {
+                assert(s1.s2_private_pages[a].contains(p));
+                if s2.s2_private_pages[b].contains(p) && b != vm {
+                    assert(s1.s2_private_pages[b].contains(p));
+                }
+            }
+        }
+    }
+    assert forall|v: VmId| #[trigger] s2.all_vms.contains(v) implies
+        forall|p: PhysPage| #[trigger]
+            s2.s2_private_pages[v].contains(p) ==> !s2.s2_shared_pages.contains(p) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.s2_private_pages[v].contains(p) implies !s2.s2_shared_pages.contains(p) by {
+            if v == vm && p == page {
+            } else {
+                assert(s1.s2_private_pages[v].contains(p));
+            }
+        }
+    }
+    assert(s2.s2_classification_wf());
+    assert forall|key: VmPageKey| #[trigger] s2.s2_map.contains_key(key) implies {
+        &&& s2.all_vms.contains(key.vm)
+        &&& s2.s2_private_or_shared(key.vm, s2.s2_map[key].page)
+    } by {
+        assert(s1.s2_map.contains_key(key));
+        if s2.s2_map[key].page == page {
+            assert(key.vm == vm);
+            assert(s2.s2_private_pages[vm].contains(page));
+        }
+    }
+    assert(s2.translation_wf());
+    assert forall|a: VmId, b: VmId| #[trigger]
+        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies
+        forall|p: PhysPage| #[trigger]
+            s2.iommu_private_pages[a].contains(p) ==> !s2.s2_private_pages[b].contains(p) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.iommu_private_pages[a].contains(p) implies
+                !s2.s2_private_pages[b].contains(p) by {
+            if b == vm && p == page {
+                assert(!s1.iommu_private_pages[a].contains(page));
+            } else {
+                assert(s1.iommu_private_pages[a].contains(p));
+                if s2.s2_private_pages[b].contains(p) && b != vm {
+                    assert(s1.s2_private_pages[b].contains(p));
+                }
+            }
+        }
+    }
+    assert forall|v: VmId| #[trigger] s2.all_vms.contains(v) implies
+        forall|p: PhysPage| #[trigger]
+            s2.s2_private_pages[v].contains(p) ==> !s2.iommu_shared_pages.contains(p) by {
+        assert forall|p: PhysPage| #[trigger]
+            s2.s2_private_pages[v].contains(p) implies !s2.iommu_shared_pages.contains(p) by {
+            if v == vm && p == page {
+            } else {
+                assert(s1.s2_private_pages[v].contains(p));
+            }
+        }
+    }
+    assert(s2.iommu_classification_wf());
+    assert(s2.iommu_translation_wf());
+}
+
+/// Removing an installed Shared region preserves `wf`: a removed page remains
+/// Shared whenever any CPU mapping to it survives, which is exactly the guard
+/// needed by every remaining translation.
+pub proof fn lemma_cpu_remove_shared_region_step_preserves_wf(
+    s1: SoftwareView,
+    s2: SoftwareView,
+    region: super::Region,
+)
+    requires
+        s1.wf(),
+        SoftwareView::cpu_remove_shared_region_enabled(s1, region),
+        SoftwareView::cpu_remove_shared_region_step(s1, s2, region),
+    ensures
+        s2.wf(),
+{
+    let post_map = s1.s2_map.remove_keys(region.entries().dom());
+    assert(s2.s2_private_pages.dom() =~= s2.all_vms);
+    assert(s2.s2_classification_wf()) by {
+        assert forall|vm: VmId| #[trigger] s2.all_vms.contains(vm) implies
+            forall|page: PhysPage| #[trigger]
+                s2.s2_private_pages[vm].contains(page)
+                    ==> !s2.s2_shared_pages.contains(page) by {
+            assert forall|page: PhysPage| #[trigger]
+                s2.s2_private_pages[vm].contains(page)
+                    implies !s2.s2_shared_pages.contains(page) by {
+                assert(s1.s2_private_pages[vm].contains(page));
+            }
+        }
+    }
+    assert forall|key: VmPageKey| #[trigger] s2.s2_map.contains_key(key) implies {
+        &&& s2.all_vms.contains(key.vm)
+        &&& s2.s2_private_or_shared(key.vm, s2.s2_map[key].page)
+    } by {
+        assert(s1.s2_map.contains_key(key));
+        let page = s2.s2_map[key].page;
+        if s1.s2_shared_pages.contains(page) && region.pages().contains(page) {
+            assert(exists|alias: VmPageKey| #[trigger]
+                post_map.contains_key(alias) && post_map[alias].page == page) by {
+                let alias = key;
+            }
+            assert(s2.s2_shared_pages.contains(page));
+        }
+    }
+    assert(s2.translation_wf());
+    assert(s2.iommu_classification_wf());
+    assert(s2.iommu_translation_wf());
+}
+
 /// Adding an IOMMU shared mapping preserves `wf`: the target is absent
 /// from every private projection and becomes IOMMU-Shared atomically.
 pub proof fn lemma_map_iommu_shared_step_preserves_wf(
@@ -400,13 +591,13 @@ pub proof fn lemma_map_iommu_shared_step_preserves_wf(
     assert(s2.s2_classification_wf());
     assert(s2.translation_wf());
     assert(s2.iommu_private_pages.dom() =~= s2.all_vms);
-    assert forall|a: VmId, b: VmId| #[trigger]
-        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b implies ((forall|
+    assert(forall|a: VmId, b: VmId| #[trigger]
+        s2.all_vms.contains(a) && #[trigger] s2.all_vms.contains(b) && a != b ==> ((forall|
         p: PhysPage,
     | #[trigger]
         s2.iommu_private_pages[a].contains(p) ==> !s2.iommu_private_pages[b].contains(p)) && (forall|p: PhysPage|
      #[trigger]
-        s2.iommu_private_pages[a].contains(p) ==> !s2.s2_private_pages[b].contains(p))) by {}
+        s2.iommu_private_pages[a].contains(p) ==> !s2.s2_private_pages[b].contains(p))));
     assert forall|v: VmId| #[trigger] s2.all_vms.contains(v) implies (forall|p: PhysPage|
      #[trigger]
         s2.iommu_private_pages[v].contains(p) ==> !s2.iommu_shared_pages.contains(p)) by {

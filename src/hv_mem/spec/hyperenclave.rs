@@ -19,8 +19,9 @@
 //! enclave-normal-page authorization itself is an integration premise.
 //!
 //! Executable operations for this state machine live in
-//! `hv_mem::imp::hyperenclave`.  Refinement to the policy-neutral
-//! software/machine models remains separate follow-up work.
+//! `hv_mem::imp::hyperenclave`. Its policy-neutral software projection and
+//! complete transition-refinement proof live in
+//! `refinement::software::hyperenclave`.
 use super::GhostZone;
 use crate::{
     address::{addr::SpecPAddr, region::MemoryRegion},
@@ -284,7 +285,7 @@ pub proof fn lemma_enclave_region_not_normal_memory(zid: nat, region: MemoryRegi
 
 /// Updating one zone and recording its exact live Shared set preserves the
 /// global exact-view relation.
-proof fn lemma_shared_regions_update_preserves_exact(
+pub proof fn lemma_shared_regions_update_preserves_exact(
     zone_ids: Set<nat>,
     zones: Map<nat, GhostZone>,
     shared_regions: Map<nat, Set<MemoryRegion>>,
