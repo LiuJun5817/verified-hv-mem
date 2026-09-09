@@ -50,8 +50,8 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> 
  {
     /// Insert `region` into this zone's CPU set using only a shared borrow of the global state.
     ///
-    /// Returns `Err(())` if `region` is invalid or virtually/physically overlaps
-    /// an existing region in this CPU memory set.
+    /// Returns `Err(())` if `region` is invalid or virtually overlaps an
+    /// existing region in this CPU memory set.
     pub fn insert_region(
         &self,
         allocator: &GlobalAllocator<A>,
@@ -77,8 +77,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> 
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, BudgetProtocol, D, IOM> = token.get();
 
-        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
-            || mem_set.overlaps_pmem(&region) {
+        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
@@ -243,7 +242,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> 
 
     /// Insert `region` into this zone's IOMMU-visible set, forcing the SMMU stage-2
     /// maintenance instructions per page via the IOMMU `MmuHardware` instance.
-    /// Same-set virtual or physical overlaps are rejected before insertion.
+    /// Same-set virtual overlaps are rejected before insertion.
     pub fn insert_iommu_region(
         &self,
         allocator: &GlobalAllocator<A>,
@@ -269,8 +268,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, BudgetProtocol, I, D, IOPT, IOM> 
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, BudgetProtocol, D, IOM> = token.get();
 
-        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
-            || mem_set.overlaps_pmem(&region) {
+        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
@@ -705,7 +703,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, BudgetProtocol, I, D, IOPT, IOM>
     }
 
     /// Insert `region` into zone `zid`'s IOMMU-visible set using only the HvMem read lock.
-    /// Returns `Err(())` for a virtual or physical overlap within that IOMMU set.
+    /// Returns `Err(())` for a virtual overlap within that IOMMU set.
     pub fn insert_iommu_region(&self, zid: usize, region: MemoryRegion) -> (res: Result<(), ()>)
         requires
             self.invariants(),

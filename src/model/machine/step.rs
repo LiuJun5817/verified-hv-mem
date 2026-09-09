@@ -1,6 +1,7 @@
 use vstd::prelude::*;
 
 use super::state::MachineState;
+use crate::model::software::private_pages_after_unmap;
 use crate::model::types::{
     CpuId, DataWord, GuestPage, GuestWordAddr, HypervisorOp, MachineAction, PhysPage, S2Entry,
     TlbEntry, TlbKey, VmId, VmMemOp, VmPageKey,
@@ -123,8 +124,9 @@ impl MachineState {
     // Hypervisor operations
     // ------------------------------------------------------------------
     /// Atomically classify one physical page as S2-Private for `vm` and install
-    /// its CPU stage-2 mapping. The same VM may already classify the page as
-    /// IOMMU-Private, but no other S2-Private or Shared projection may contain it.
+    /// its CPU stage-2 mapping. Existing S2-Private aliases and an
+    /// IOMMU-Private classification owned by `vm` are permitted; other VMs and
+    /// the Shared projections may not classify the page.
     pub open spec fn hv_map_s2_private_step(
         s1: Self,
         s2: Self,
@@ -137,7 +139,8 @@ impl MachineState {
         &&& s1.all_vms().contains(vm)
         &&& !s1.s2_map.contains_key(key)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms().contains(v) ==> !s1.s2_private_pages[v].contains(entry.page))
+            s1.all_vms().contains(v) && v != vm
+                ==> !s1.s2_private_pages[v].contains(entry.page))
         &&& !s1.s2_shared_pages.contains(entry.page)
         &&& (forall|v: VmId| #[trigger]
             s1.all_vms().contains(v) && v != vm ==> !s1.iommu_private_pages[v].contains(entry.page))
@@ -162,8 +165,9 @@ impl MachineState {
 
     /// # TLB invalidation is modelled as atomic and global
     ///
-    /// The same step removes the S2-Private classification and `s2_map` entry,
-    /// then flushes *every* CPU's stale entry for `(vm, gpa)` via
+    /// The same step removes the `s2_map` entry, retains the S2-Private
+    /// classification if another same-owner alias survives, and flushes
+    /// *every* CPU's stale entry for `(vm, gpa)` via
     /// `invalidation_targets`. Thus a CPU sees the classification, page-table, and TLB
     /// updates simultaneously; there is no "being-invalidated" window in the model.
     ///
@@ -187,12 +191,15 @@ impl MachineState {
         &&& s1.s2_map[key].page == page
         &&& s1.s2_private_pages[vm].contains(page)
         &&& !s1.s2_shared_pages.contains(page)
-        &&& (forall|k: VmPageKey| #[trigger]
-            post_map.contains_key(k) ==> post_map[k].page != page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_memory_as(&s1)
-        &&& s2.s2_private_pages == s1.s2_private_pages.insert(vm, s1.s2_private_pages[vm].remove(page))
+        &&& s2.s2_private_pages == private_pages_after_unmap(
+            s1.s2_private_pages,
+            post_map,
+            vm,
+            Set::empty().insert(page),
+        )
         &&& s2.s2_shared_pages == s1.s2_shared_pages
         &&& s2.iommu_private_pages == s1.iommu_private_pages
         &&& s2.iommu_shared_pages == s1.iommu_shared_pages
@@ -323,8 +330,8 @@ impl MachineState {
     }
 
     /// Atomically classify one physical page as IOMMU-Private for `vm` and
-    /// install its IOMMU mapping. The page may already be S2-Private for the same VM or
-    /// S2-Shared; CPU and IOMMU classifications describe different access paths.
+    /// install its IOMMU mapping. Existing IOMMU-Private aliases owned by `vm`,
+    /// S2-Private mappings owned by `vm`, and S2-Shared access are permitted.
     pub open spec fn hv_map_iommu_private_step(
         s1: Self,
         s2: Self,
@@ -337,7 +344,8 @@ impl MachineState {
         &&& s1.all_vms().contains(vm)
         &&& !s1.iommu_s2_map.contains_key(key)
         &&& (forall|v: VmId| #[trigger]
-            s1.all_vms().contains(v) ==> !s1.iommu_private_pages[v].contains(entry.page))
+            s1.all_vms().contains(v) && v != vm
+                ==> !s1.iommu_private_pages[v].contains(entry.page))
         &&& (forall|v: VmId| #[trigger]
             s1.all_vms().contains(v) && v != vm ==> !s1.s2_private_pages[v].contains(entry.page))
         &&& !s1.iommu_shared_pages.contains(entry.page)
@@ -357,8 +365,8 @@ impl MachineState {
         &&& s2.iommu_tlb == s1.iommu_tlb.remove_keys(s1.iommu_invalidation_targets(vm, gpa))
     }
 
-    /// Atomically remove one IOMMU-Private mapping and release its Private
-    /// classification. No other IOMMU mapping may target the released page.
+    /// Atomically remove one IOMMU-Private mapping. Its Private classification
+    /// remains while another IOMMU mapping owned by `vm` targets the page.
     pub open spec fn hv_unmap_iommu_private_step(
         s1: Self,
         s2: Self,
@@ -374,15 +382,17 @@ impl MachineState {
         &&& s1.iommu_s2_map[key].page == page
         &&& s1.iommu_private_pages[vm].contains(page)
         &&& !s1.iommu_shared_pages.contains(page)
-        &&& (forall|k: VmPageKey| #[trigger]
-            post_map.contains_key(k) ==> post_map[k].page != page)
         &&& s2.wf()
         &&& s2.same_identity_as(&s1)
         &&& s2.same_memory_as(&s1)
         &&& s2.s2_private_pages == s1.s2_private_pages
         &&& s2.s2_shared_pages == s1.s2_shared_pages
-        &&& s2.iommu_private_pages
-            == s1.iommu_private_pages.insert(vm, s1.iommu_private_pages[vm].remove(page))
+        &&& s2.iommu_private_pages == private_pages_after_unmap(
+            s1.iommu_private_pages,
+            post_map,
+            vm,
+            Set::empty().insert(page),
+        )
         &&& s2.iommu_shared_pages == s1.iommu_shared_pages
         &&& s2.s2_map == s1.s2_map
         &&& s2.hw_s2map == s1.hw_s2map

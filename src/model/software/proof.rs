@@ -9,10 +9,91 @@
 //! 2. **lifecycle `wf`-preservation** — `add_vm` / `remove_vm`.
 use vstd::prelude::*;
 
-use super::SoftwareView;
+use super::{private_pages_after_unmap, SoftwareView};
 use crate::model::types::{GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 
 verus! {
+
+/// Removing no pages leaves a present VM's Private projection unchanged.
+pub proof fn lemma_private_pages_after_unmap_empty(
+    private_pages: Map<VmId, Set<PhysPage>>,
+    map: Map<VmPageKey, S2Entry>,
+    vm: VmId,
+)
+    requires
+        private_pages.contains_key(vm),
+    ensures
+        private_pages_after_unmap(private_pages, map, vm, Set::empty()) =~= private_pages,
+{
+    assert(private_pages_after_unmap(private_pages, map, vm, Set::empty())[vm]
+        =~= private_pages[vm]);
+    assert(private_pages.insert(vm, private_pages[vm]) =~= private_pages);
+}
+
+/// Removing one more mapping composes with the accumulated alias-aware
+/// Private-page update for an earlier removal prefix.
+pub proof fn lemma_private_pages_after_unmap_step(
+    private_pages: Map<VmId, Set<PhysPage>>,
+    current_map: Map<VmPageKey, S2Entry>,
+    next_map: Map<VmPageKey, S2Entry>,
+    vm: VmId,
+    removed_pages: Set<PhysPage>,
+    key: VmPageKey,
+    page: PhysPage,
+)
+    requires
+        current_map.contains_key(key),
+        current_map[key].page == page,
+        key.vm == vm,
+        next_map =~= current_map.remove(key),
+        !removed_pages.contains(page),
+    ensures
+        private_pages_after_unmap(
+            private_pages_after_unmap(private_pages, current_map, vm, removed_pages),
+            next_map,
+            vm,
+            Set::empty().insert(page),
+        ) =~= private_pages_after_unmap(
+            private_pages,
+            next_map,
+            vm,
+            removed_pages.insert(page),
+        ),
+{
+    let first = private_pages_after_unmap(private_pages, current_map, vm, removed_pages);
+    let lhs = private_pages_after_unmap(
+        first,
+        next_map,
+        vm,
+        Set::empty().insert(page),
+    );
+    let rhs = private_pages_after_unmap(
+        private_pages,
+        next_map,
+        vm,
+        removed_pages.insert(page),
+    );
+    assert(lhs.dom() =~= rhs.dom());
+    assert forall|owner: VmId| #[trigger] lhs.contains_key(owner) implies lhs[owner] =~= rhs[owner]
+        by {
+        if owner == vm {
+            assert forall|p: PhysPage| #[trigger]
+                lhs[owner].contains(p) <==> rhs[owner].contains(p) by {
+                if removed_pages.contains(p) && exists|alias: VmPageKey| #[trigger]
+                    current_map.contains_key(alias) && alias.vm == vm
+                        && current_map[alias].page == p {
+                    let alias = choose|alias: VmPageKey| #[trigger]
+                        current_map.contains_key(alias) && alias.vm == vm
+                            && current_map[alias].page == p;
+                    assert(alias != key);
+                    assert(exists|survivor: VmPageKey| #[trigger]
+                        next_map.contains_key(survivor) && survivor.vm == vm
+                            && next_map[survivor].page == p);
+                }
+            }
+        }
+    }
+}
 
 // ─────────────────────────── per-page wf-preservation ───────────────────────
 /// A combined CPU S2-Private map preserves classification separation and makes the
@@ -106,8 +187,8 @@ pub proof fn lemma_map_s2_private_step_preserves_wf(
     assert(s2.iommu_translation_wf());
 }
 
-/// A combined CPU S2-Private unmap preserves `wf`: its Private projection only shrinks,
-/// and the no-surviving-alias guard keeps every remaining translation valid.
+/// A combined CPU S2-Private unmap preserves `wf`: the removed page remains
+/// Private exactly while a same-owner alias survives.
 pub proof fn lemma_unmap_s2_private_step_preserves_wf(
     s1: SoftwareView,
     s2: SoftwareView,
@@ -145,7 +226,18 @@ pub proof fn lemma_unmap_s2_private_step_preserves_wf(
         k.vm,
     ) && s2.s2_private_or_shared(k.vm, s2.s2_map[k].page)) by {
         assert(s1.s2_map.contains_key(k));
-        assert(s2.s2_map[k].page != page);
+        if s2.s2_map[k].page == page {
+            assert(s1.s2_private_or_shared(k.vm, page));
+            assert(s1.s2_private_pages[k.vm].contains(page));
+            assert(k.vm == vm) by {
+                if k.vm != vm {
+                    assert(!s1.s2_private_pages[k.vm].contains(page));
+                }
+            }
+            assert(exists|alias: VmPageKey| #[trigger]
+                s2.s2_map.contains_key(alias) && alias.vm == vm && s2.s2_map[alias].page == page);
+            assert(s2.s2_private_pages[vm].contains(page));
+        }
     }
     assert(s2.translation_wf());
     assert forall|v1: VmId, v2: VmId| #[trigger]
@@ -241,8 +333,8 @@ pub proof fn lemma_map_iommu_private_step_preserves_wf(
     assert(s2.iommu_translation_wf());
 }
 
-/// A combined IOMMU-Private unmap preserves `wf`: its Private projection shrinks and
-/// no surviving IOMMU translation targets the released page.
+/// A combined IOMMU-Private unmap preserves `wf`: the removed page remains
+/// Private exactly while a same-owner IOMMU alias survives.
 pub proof fn lemma_unmap_iommu_private_step_preserves_wf(
     s1: SoftwareView,
     s2: SoftwareView,
@@ -290,7 +382,18 @@ pub proof fn lemma_unmap_iommu_private_step_preserves_wf(
         s2.iommu_s2_map[k].page,
     ))) by {
         assert(s1.iommu_s2_map.contains_key(k));
-        assert(s2.iommu_s2_map[k].page != page);
+        if s2.iommu_s2_map[k].page == page {
+            assert(s1.iommu_private_pages[k.vm].contains(page));
+            assert(k.vm == vm) by {
+                if k.vm != vm {
+                    assert(!s1.iommu_private_pages[k.vm].contains(page));
+                }
+            }
+            assert(exists|alias: VmPageKey| #[trigger]
+                s2.iommu_s2_map.contains_key(alias) && alias.vm == vm
+                    && s2.iommu_s2_map[alias].page == page);
+            assert(s2.iommu_private_pages[vm].contains(page));
+        }
     }
     assert(s2.iommu_translation_wf());
 }

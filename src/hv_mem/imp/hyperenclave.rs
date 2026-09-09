@@ -125,7 +125,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, HyperEnclaveProtocol, I, D, IOPT,
     }
 
     /// Insert an enclave-private region into this enclave's CPU page table
-    /// after the caller has established the global non-overlap guard.
+    /// after the caller has established the cross-enclave non-overlap guard.
     fn insert_private_region(
         &self,
         allocator: &GlobalAllocator<A>,
@@ -163,8 +163,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, HyperEnclaveProtocol, I, D, IOPT,
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
 
-        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
-            || mem_set.overlaps_pmem(&region) {
+        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
@@ -441,8 +440,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, HyperEnclaveProtocol, I, D, IOPT,
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
 
-        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
-            || mem_set.overlaps_pmem(&region) {
+        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart) {
             self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
@@ -885,8 +883,8 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
     ///
     /// The complete scan is performed while holding the `HvMem` write lock, so
     /// no competing HyperEnclave mapping operation can pass its check using a
-    /// stale snapshot.  The target zone is included in the scan, preventing
-    /// physical aliases inside one enclave as well as across enclaves.
+    /// stale snapshot. The target zone is skipped because physical aliases
+    /// within one enclave have the same Private owner.
     fn insert_enclave_private_region(&self, enclave_id: usize, region: MemoryRegion) -> (res: Result<
         (),
         (),
@@ -905,7 +903,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
         let tracked mut content: HvMemRwContent<PT, M, A, HyperEnclaveProtocol, I, D, IOPT, IOM> = token.get();
         let zones = self.zone_list.borrow(Tracked(&content.zone_list_perm));
 
-        // Dynamic isolation check: scan every live non-root CPU memory set.
+        // Dynamic isolation check: scan every other live enclave CPU memory set.
         let mut i = 0usize;
         while i < zones.len()
             invariant
@@ -926,7 +924,8 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
                     0 <= j < zones@.len() && 0 <= k < zones@.len() && j != k ==> zones@[j].zone_id
                         != zones@[k].zone_id,
                 forall|j: int|
-                    0 <= j < i && zones@[j].zone_id != 0 ==> {
+                    0 <= j < i && zones@[j].zone_id != 0
+                        && zones@[j].zone_id != enclave_id ==> {
                         &&& content.global_state.enclave_private_regions_view().contains_key(
                             zones@[j].zone_id as nat,
                         )
@@ -937,7 +936,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
                     },
             decreases zones.len() - i,
         {
-            if zones[i].zone_id != 0 {
+            if zones[i].zone_id != 0 && zones[i].zone_id != enclave_id {
                 let zone = &zones[i];
                 let (mem_set, zone_guard) = zone.lock_write();
                 let overlaps = mem_set.overlaps_pmem(&region);
@@ -1007,7 +1006,8 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
                             == scanned_private_regions);
                         assert(scanned_mem_set.regions.contains(old_region));
                     }
-                    assert forall|j: int| 0 <= j < i + 1 && zones@[j].zone_id != 0 implies {
+                    assert forall|j: int| 0 <= j < i + 1 && zones@[j].zone_id != 0
+                        && zones@[j].zone_id != enclave_id implies {
                         &&& content.global_state.enclave_private_regions_view().contains_key(
                             zones@[j].zone_id as nat,
                         )
@@ -1047,6 +1047,7 @@ impl<PT, M, A, I, D, IOPT, IOM> HvMem<PT, M, A, HyperEnclaveProtocol, I, D, IOPT
                     content.global_state.enclave_private_regions_view().contains_key(other_zid)
                         && other_zid
                         != root_zone_id()
+                        && other_zid != enclave_id as nat
                         && #[trigger] content.global_state.enclave_private_regions_view()[other_zid].contains(
                     old_region) implies !old_region.spec_overlaps_pmem(region) by {
                     assert(content.global_state.zone_ids().contains(other_zid));

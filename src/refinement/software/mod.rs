@@ -394,6 +394,35 @@ pub open spec fn abstract_region_installed(map: Map<VmPageKey, S2Entry>, region:
             == region.entries()[key]
 }
 
+// ---------------------------------------------------------------------------
+// Memory-set projections
+// ---------------------------------------------------------------------------
+/// Renders a concrete memory set as abstract stage-2 entries for one zone.
+pub open spec fn memory_set_s2_entries(zid: nat, mem_set: SpecMemorySet) -> Map<
+    VmPageKey,
+    S2Entry,
+> {
+    Map::new(
+        |key: VmPageKey|
+            key.vm == VmId(zid) && mem_set.mappings.contains_key(vaddr_of_gpa(key.gpa)),
+        |key: VmPageKey| frame_to_s2(mem_set.mappings[vaddr_of_gpa(key.gpa)]),
+    )
+}
+
+/// Physical pages targeted by a concrete memory set.
+pub open spec fn memory_set_mapped_pages(mem_set: SpecMemorySet) -> Set<PhysPage> {
+    Set::new(
+        |page: PhysPage|
+            exists|vaddr: SpecVAddr| #[trigger]
+                mem_set.mappings.contains_key(vaddr) && frame_phys_page(mem_set.mappings[vaddr])
+                    == page,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Memory-set entry facts
+// ---------------------------------------------------------------------------
+
 /// Shows that an installed concrete region contributes all of its abstract entries.
 pub proof fn lemma_region_in_memory_set_maps_entries(
     zid: nat,
@@ -466,18 +495,47 @@ pub proof fn lemma_memory_set_s2_remove(zid: nat, mem_set: SpecMemorySet, region
         new.contains_key(key) ==> new[key] == old.remove_keys(removed.dom())[key]);
 }
 
-// ---------------------------------------------------------------------------
-// Common memory-set projections
-// ---------------------------------------------------------------------------
-/// Physical pages targeted by a concrete memory set.
-pub open spec fn memory_set_mapped_pages(mem_set: SpecMemorySet) -> Set<PhysPage> {
-    Set::new(
-        |page: PhysPage|
-            exists|vaddr: SpecVAddr| #[trigger]
-                mem_set.mappings.contains_key(vaddr) && frame_phys_page(mem_set.mappings[vaddr])
-                    == page,
-    )
+/// Virtual disjointness makes every entry of a new region fresh in a concrete
+/// memory set's abstract map.
+pub proof fn lemma_memory_set_s2_entries_fresh(
+    zid: nat,
+    mem_set: SpecMemorySet,
+    region: MemoryRegion,
+)
+    requires
+        mem_set.wf(),
+        region.spec_valid(),
+        !mem_set.overlaps_vmem(region),
+    ensures
+        forall|key: VmPageKey| #[trigger]
+            region_s2_entries(zid, region).contains_key(key)
+                ==> !memory_set_s2_entries(zid, mem_set).contains_key(key),
+{
+    assert forall|key: VmPageKey| #[trigger]
+        region_s2_entries(zid, region).contains_key(
+            key,
+        ) implies !memory_set_s2_entries(zid, mem_set).contains_key(key) by {
+        if memory_set_s2_entries(zid, mem_set).contains_key(key) {
+            let vaddr = vaddr_of_gpa(key.gpa);
+            let frame = mem_set.mappings[vaddr];
+            assert(mem_set.mappings.contains_pair(vaddr, frame));
+            let (old, i) = choose|old: MemoryRegion, i: nat|
+                mem_set.regions.contains(old) && 0 <= i < old.pages
+                    && vaddr == old.spec_page_vaddr(i) && frame == old.spec_frame(i);
+            lemma_gpa_vaddr_roundtrip(old, i);
+            assert(region_owns_gpa(old, key.gpa)) by {
+                let witness = i;
+                lemma_vaddr_of_gpa_injective(region_guest_page(old, i), key.gpa);
+            }
+            assert(region_owns_gpa(region, key.gpa));
+            lemma_shared_gpa_implies_vmem_overlap(old, region, key.gpa);
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Memory-set physical-page facts
+// ---------------------------------------------------------------------------
 
 /// Finds an installed region whose footprint contains a mapped physical page.
 pub proof fn lemma_memory_set_mapped_page_has_region(mem_set: SpecMemorySet, page: PhysPage)
@@ -636,6 +694,9 @@ pub proof fn lemma_memory_set_mapped_pages_remove_disjoint(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Zone and flattened-map projections
+// ---------------------------------------------------------------------------
 /// Physical pages targeted by the zone's current CPU mappings.
 pub open spec fn zone_cpu_mapped_pages(zone: GhostZone) -> Set<PhysPage> {
     memory_set_mapped_pages(zone.cpu_mem_set)
@@ -646,18 +707,6 @@ pub open spec fn zone_iommu_mapped_pages(zone: GhostZone) -> Set<PhysPage> {
     memory_set_mapped_pages(zone.iommu_mem_set)
 }
 
-/// Renders a concrete memory set as abstract stage-2 entries for one zone.
-pub open spec fn memory_set_s2_entries(zid: nat, mem_set: SpecMemorySet) -> Map<
-    VmPageKey,
-    S2Entry,
-> {
-    Map::new(
-        |key: VmPageKey|
-            key.vm == VmId(zid) && mem_set.mappings.contains_key(vaddr_of_gpa(key.gpa)),
-        |key: VmPageKey| frame_to_s2(mem_set.mappings[vaddr_of_gpa(key.gpa)]),
-    )
-}
-
 /// Abstract CPU stage-2 entries installed for one zone.
 pub open spec fn zone_s2_entries(zid: nat, zone: GhostZone) -> Map<VmPageKey, S2Entry> {
     memory_set_s2_entries(zid, zone.cpu_mem_set)
@@ -666,6 +715,220 @@ pub open spec fn zone_s2_entries(zid: nat, zone: GhostZone) -> Map<VmPageKey, S2
 /// Abstract IOMMU stage-2 entries installed for one zone.
 pub open spec fn zone_iommu_s2_entries(zid: nat, zone: GhostZone) -> Map<VmPageKey, S2Entry> {
     memory_set_s2_entries(zid, zone.iommu_mem_set)
+}
+
+/// Combines every live zone's CPU entries into one policy-neutral S2 map.
+pub open spec fn zones_s2_map(
+    zone_ids: Set<nat>,
+    zones: Map<nat, GhostZone>,
+) -> Map<VmPageKey, S2Entry> {
+    Map::new(
+        |key: VmPageKey|
+            zone_ids.contains(key.vm.0)
+                && zone_s2_entries(key.vm.0, zones[key.vm.0]).contains_key(key),
+        |key: VmPageKey| zone_s2_entries(key.vm.0, zones[key.vm.0])[key],
+    )
+}
+
+/// Combines every live zone's IOMMU entries into one policy-neutral S2 map.
+pub open spec fn zones_iommu_s2_map(
+    zone_ids: Set<nat>,
+    zones: Map<nat, GhostZone>,
+) -> Map<VmPageKey, S2Entry> {
+    Map::new(
+        |key: VmPageKey|
+            zone_ids.contains(key.vm.0)
+                && zone_iommu_s2_entries(key.vm.0, zones[key.vm.0]).contains_key(key),
+        |key: VmPageKey| zone_iommu_s2_entries(key.vm.0, zones[key.vm.0])[key],
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Flattened-map update facts
+// ---------------------------------------------------------------------------
+
+/// Lifts one zone-local CPU insertion into the flattened S2 map.
+pub proof fn lemma_zones_s2_insert(
+    zone_ids: Set<nat>,
+    zones: Map<nat, GhostZone>,
+    zid: nat,
+    region: MemoryRegion,
+)
+    requires
+        zone_ids.contains(zid),
+        zones.contains_key(zid),
+        zones[zid].wf(),
+        region.spec_valid(),
+        !zones[zid].cpu_mem_set.overlaps_vmem(region),
+    ensures
+        zones_s2_map(zone_ids, zones.insert(zid, zones[zid].cpu_insert_region(region)))
+            =~= zones_s2_map(zone_ids, zones).union_prefer_right(
+                region_s2_entries(zid, region),
+            ),
+{
+    lemma_memory_set_s2_insert(zid, zones[zid].cpu_mem_set, region);
+    let lhs = zones_s2_map(zone_ids, zones.insert(zid, zones[zid].cpu_insert_region(region)));
+    let rhs = zones_s2_map(zone_ids, zones).union_prefer_right(region_s2_entries(zid, region));
+    assert(forall|key: VmPageKey| #[trigger] lhs.contains_key(key) <==> rhs.contains_key(key));
+    assert(forall|key: VmPageKey|
+        #![trigger lhs[key]]
+        #![trigger rhs[key]]
+        lhs.contains_key(key) ==> lhs[key] == rhs[key]);
+}
+
+/// Lifts one zone-local CPU removal into the flattened S2 map.
+pub proof fn lemma_zones_s2_remove(
+    zone_ids: Set<nat>,
+    zones: Map<nat, GhostZone>,
+    zid: nat,
+    region: MemoryRegion,
+)
+    requires
+        zone_ids.contains(zid),
+        zones.contains_key(zid),
+        zones[zid].wf(),
+        zones[zid].cpu_mem_set.regions.contains(region),
+    ensures
+        zones_s2_map(zone_ids, zones.insert(zid, zones[zid].cpu_remove_region(region)))
+            =~= zones_s2_map(zone_ids, zones).remove_keys(region_s2_entries(zid, region).dom()),
+{
+    lemma_memory_set_s2_remove(zid, zones[zid].cpu_mem_set, region);
+    let lhs = zones_s2_map(zone_ids, zones.insert(zid, zones[zid].cpu_remove_region(region)));
+    let rhs = zones_s2_map(zone_ids, zones).remove_keys(region_s2_entries(zid, region).dom());
+    assert(forall|key: VmPageKey| #[trigger] lhs.contains_key(key) <==> rhs.contains_key(key));
+    assert(forall|key: VmPageKey|
+        #![trigger lhs[key]]
+        #![trigger rhs[key]]
+        lhs.contains_key(key) ==> lhs[key] == rhs[key]);
+}
+
+/// Lifts one zone-local IOMMU insertion into the flattened IOMMU map.
+pub proof fn lemma_zones_iommu_s2_insert(
+    zone_ids: Set<nat>,
+    zones: Map<nat, GhostZone>,
+    zid: nat,
+    region: MemoryRegion,
+)
+    requires
+        zone_ids.contains(zid),
+        zones.contains_key(zid),
+        zones[zid].wf(),
+        region.spec_valid(),
+        !zones[zid].iommu_mem_set.overlaps_vmem(region),
+    ensures
+        zones_iommu_s2_map(zone_ids, zones.insert(zid, zones[zid].iommu_insert_region(region)))
+            =~= zones_iommu_s2_map(zone_ids, zones).union_prefer_right(
+                region_s2_entries(zid, region),
+            ),
+{
+    lemma_memory_set_s2_insert(zid, zones[zid].iommu_mem_set, region);
+    let lhs = zones_iommu_s2_map(
+        zone_ids,
+        zones.insert(zid, zones[zid].iommu_insert_region(region)),
+    );
+    let rhs =
+        zones_iommu_s2_map(zone_ids, zones).union_prefer_right(region_s2_entries(zid, region));
+    assert(forall|key: VmPageKey| #[trigger] lhs.contains_key(key) <==> rhs.contains_key(key));
+    assert(forall|key: VmPageKey|
+        #![trigger lhs[key]]
+        #![trigger rhs[key]]
+        lhs.contains_key(key) ==> lhs[key] == rhs[key]);
+}
+
+/// Lifts one zone-local IOMMU removal into the flattened IOMMU map.
+pub proof fn lemma_zones_iommu_s2_remove(
+    zone_ids: Set<nat>,
+    zones: Map<nat, GhostZone>,
+    zid: nat,
+    region: MemoryRegion,
+)
+    requires
+        zone_ids.contains(zid),
+        zones.contains_key(zid),
+        zones[zid].wf(),
+        zones[zid].iommu_mem_set.regions.contains(region),
+    ensures
+        zones_iommu_s2_map(zone_ids, zones.insert(zid, zones[zid].iommu_remove_region(region)))
+            =~= zones_iommu_s2_map(zone_ids, zones).remove_keys(
+                region_s2_entries(zid, region).dom(),
+            ),
+{
+    lemma_memory_set_s2_remove(zid, zones[zid].iommu_mem_set, region);
+    let lhs = zones_iommu_s2_map(
+        zone_ids,
+        zones.insert(zid, zones[zid].iommu_remove_region(region)),
+    );
+    let rhs =
+        zones_iommu_s2_map(zone_ids, zones).remove_keys(region_s2_entries(zid, region).dom());
+    assert(forall|key: VmPageKey| #[trigger] lhs.contains_key(key) <==> rhs.contains_key(key));
+    assert(forall|key: VmPageKey|
+        #![trigger lhs[key]]
+        #![trigger rhs[key]]
+        lhs.contains_key(key) ==> lhs[key] == rhs[key]);
+}
+
+// ---------------------------------------------------------------------------
+// Flattened-map freshness facts
+// ---------------------------------------------------------------------------
+
+/// A CPU region that is fresh in its zone is fresh in the flattened S2 map.
+pub proof fn lemma_zones_s2_entries_fresh(
+    zone_ids: Set<nat>,
+    zones: Map<nat, GhostZone>,
+    zid: nat,
+    region: MemoryRegion,
+)
+    requires
+        zone_ids.contains(zid),
+        zones.contains_key(zid),
+        zones[zid].wf(),
+        region.spec_valid(),
+        !zones[zid].cpu_mem_set.overlaps_vmem(region),
+    ensures
+        forall|key: VmPageKey| #[trigger]
+            region_s2_entries(zid, region).contains_key(key)
+                ==> !zones_s2_map(zone_ids, zones).contains_key(key),
+{
+    lemma_memory_set_s2_entries_fresh(zid, zones[zid].cpu_mem_set, region);
+    assert forall|key: VmPageKey| #[trigger]
+        region_s2_entries(zid, region).contains_key(
+            key,
+        ) implies !zones_s2_map(zone_ids, zones).contains_key(key) by {
+        if zones_s2_map(zone_ids, zones).contains_key(key) {
+            assert(key.vm == VmId(zid));
+            assert(memory_set_s2_entries(zid, zones[zid].cpu_mem_set).contains_key(key));
+        }
+    }
+}
+
+/// An IOMMU region that is fresh in its zone is fresh in the flattened map.
+pub proof fn lemma_zones_iommu_s2_entries_fresh(
+    zone_ids: Set<nat>,
+    zones: Map<nat, GhostZone>,
+    zid: nat,
+    region: MemoryRegion,
+)
+    requires
+        zone_ids.contains(zid),
+        zones.contains_key(zid),
+        zones[zid].wf(),
+        region.spec_valid(),
+        !zones[zid].iommu_mem_set.overlaps_vmem(region),
+    ensures
+        forall|key: VmPageKey| #[trigger]
+            region_s2_entries(zid, region).contains_key(key)
+                ==> !zones_iommu_s2_map(zone_ids, zones).contains_key(key),
+{
+    lemma_memory_set_s2_entries_fresh(zid, zones[zid].iommu_mem_set, region);
+    assert forall|key: VmPageKey| #[trigger]
+        region_s2_entries(zid, region).contains_key(
+            key,
+        ) implies !zones_iommu_s2_map(zone_ids, zones).contains_key(key) by {
+        if zones_iommu_s2_map(zone_ids, zones).contains_key(key) {
+            assert(key.vm == VmId(zid));
+            assert(memory_set_s2_entries(zid, zones[zid].iommu_mem_set).contains_key(key));
+        }
+    }
 }
 
 } // verus!

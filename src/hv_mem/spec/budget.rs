@@ -5,10 +5,9 @@
 //! physical footprint lies in either budget. Budget membership is static
 //! authorization; the dynamic Private/Shared classification is derived from
 //! installed mappings. Shared regions may deliberately overlap in physical
-//! memory while using different guest addresses or attributes. Within each
-//! CPU/IOMMU memory set, Private regions remain pairwise non-overlapping in
-//! physical memory so removing one region cannot silently release another
-//! Private mapping's pages.
+//! memory while using different guest addresses or attributes. Private regions
+//! owned by the same zone may likewise alias physical pages; the projected
+//! Private classification remains present until the final alias is removed.
 //!
 //! The budgets are static pure functions rather than tokenized fields. Region
 //! transitions therefore consume only the zone-local `zones[zid]` shard and
@@ -73,26 +72,6 @@ pub open spec fn region_in_budget(zid: nat, region: MemoryRegion) -> bool {
     region_in_private_budget(zid, region) || region_in_shared_budget(region)
 }
 
-/// Whether `region` is physically non-overlapping with every Private
-/// region already in `mem_set`.
-pub open spec fn pmem_nonoverlap_with_private_regions(
-    zid: nat,
-    mem_set: SpecMemorySet,
-    region: MemoryRegion,
-) -> bool {
-    forall|old_region: MemoryRegion| #[trigger]
-        mem_set.regions.contains(old_region) && region_in_private_budget(zid, old_region)
-            ==> !old_region.spec_overlaps_pmem(region)
-}
-
-/// Private regions in one memory set are pairwise non-overlapping in physical memory.
-pub open spec fn private_regions_pmem_nonoverlap(zid: nat, mem_set: SpecMemorySet) -> bool {
-    forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
-        mem_set.regions.contains(r1) && #[trigger] mem_set.regions.contains(r2) && r1 != r2
-            && region_in_private_budget(zid, r1) && region_in_private_budget(zid, r2)
-            ==> !r1.spec_overlaps_pmem(r2)
-}
-
 /// Every region in `mem_set` is authorized by `zid`'s Private budget or the
 /// Shared budget.
 pub open spec fn all_regions_in_budget(zid: nat, mem_set: SpecMemorySet) -> bool {
@@ -142,52 +121,23 @@ pub proof fn lemma_private_region_not_shared(zid: nat, region: MemoryRegion)
     }
 }
 
-/// Insertion preserves page-budget authorization and Private-region pmem non-overlap.
+/// Insertion preserves page-budget authorization.
 pub proof fn lemma_insert_region_preserves_budget_policy(
     zid: nat,
     mem_set: SpecMemorySet,
     region: MemoryRegion,
 )
     requires
-        mem_set.wf(),
         all_regions_in_budget(zid, mem_set),
-        private_regions_pmem_nonoverlap(zid, mem_set),
-        region.spec_valid(),
         region_in_budget(zid, region),
-        region_in_private_budget(zid, region) ==> pmem_nonoverlap_with_private_regions(
-            zid,
-            mem_set,
-            region,
-        ),
-        !mem_set.regions.contains(region),
-        !mem_set.overlaps_vmem(region),
     ensures
         all_regions_in_budget(zid, mem_set.insert_region(region)),
-        private_regions_pmem_nonoverlap(zid, mem_set.insert_region(region)),
 {
     let new_mem_set = mem_set.insert_region(region);
     assert forall|r: MemoryRegion| #[trigger]
         new_mem_set.regions.contains(r) implies region_in_budget(zid, r) by {
         if r != region {
             assert(mem_set.regions.contains(r));
-        }
-    };
-    assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
-        new_mem_set.regions.contains(r1) && #[trigger] new_mem_set.regions.contains(r2) && r1 != r2
-            && region_in_private_budget(zid, r1) && region_in_private_budget(
-            zid,
-            r2,
-        ) implies !r1.spec_overlaps_pmem(r2) by {
-        if r1 == region {
-            assert(mem_set.regions.contains(r2));
-            assert(!r2.spec_overlaps_pmem(region));
-            assert(r2.spec_valid());
-            region.lemma_overlaps_pmem_symmetric(r2);
-        } else if r2 == region {
-            assert(mem_set.regions.contains(r1));
-        } else {
-            assert(mem_set.regions.contains(r1));
-            assert(mem_set.regions.contains(r2));
         }
     };
 }
@@ -200,35 +150,20 @@ pub proof fn lemma_remove_region_preserves_budget_policy(
 )
     requires
         all_regions_in_budget(zid, mem_set),
-        private_regions_pmem_nonoverlap(zid, mem_set),
     ensures
         all_regions_in_budget(zid, mem_set.remove_region_exact(region)),
-        private_regions_pmem_nonoverlap(zid, mem_set.remove_region_exact(region)),
 {
     let new_mem_set = mem_set.remove_region_exact(region);
     assert forall|r: MemoryRegion| #[trigger]
         new_mem_set.regions.contains(r) implies region_in_budget(zid, r) by {
         assert(mem_set.regions.contains(r));
     };
-    assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
-        new_mem_set.regions.contains(r1) && #[trigger] new_mem_set.regions.contains(r2) && r1 != r2
-            && region_in_private_budget(zid, r1) && region_in_private_budget(
-            zid,
-            r2,
-        ) implies !r1.spec_overlaps_pmem(r2) by {
-        assert(mem_set.regions.contains(r1));
-        assert(mem_set.regions.contains(r2));
-    };
 }
 
-/// An empty memory set satisfies both budget-policy clauses.
+/// An empty memory set satisfies the budget policy.
 pub proof fn lemma_empty_memory_set_budget_policy(zid: nat)
     ensures
         all_regions_in_budget(zid, SpecMemorySet { regions: Set::empty(), mappings: Map::empty() }),
-        private_regions_pmem_nonoverlap(
-            zid,
-            SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
-        ),
 {
 }
 
@@ -268,26 +203,6 @@ tokenized_state_machine! {
                 zid,
                 self.zones[zid].iommu_mem_set,
             )
-        }
-
-        /// Private CPU regions are pairwise non-overlapping in physical memory.
-        #[invariant]
-        pub fn inv_cpu_private_regions_pmem_nonoverlap(&self) -> bool {
-            forall|zid: nat|
-                self.zones.contains_key(zid) ==> private_regions_pmem_nonoverlap(
-                    zid,
-                    self.zones[zid].cpu_mem_set,
-                )
-        }
-
-        /// Private IOMMU regions are pairwise non-overlapping in physical memory.
-        #[invariant]
-        pub fn inv_iommu_private_regions_pmem_nonoverlap(&self) -> bool {
-            forall|zid: nat|
-                self.zones.contains_key(zid) ==> private_regions_pmem_nonoverlap(
-                    zid,
-                    self.zones[zid].iommu_mem_set,
-                )
         }
 
         /// Reachable memory sets contain finitely many region-sized operation
@@ -330,12 +245,6 @@ tokenized_state_machine! {
                 remove zones -= [zid => let zone];
                 require(region.spec_valid());
                 require(region_in_budget(zid, region));
-                require(region_in_private_budget(zid, region)
-                    ==> pmem_nonoverlap_with_private_regions(
-                        zid,
-                        zone.cpu_mem_set,
-                        region,
-                    ));
                 require(!zone.cpu_mem_set.regions.contains(region));
                 require(!zone.cpu_mem_set.overlaps_vmem(region));
                 add zones += [zid => zone.cpu_insert_region(region)];
@@ -362,12 +271,6 @@ tokenized_state_machine! {
                 remove zones -= [zid => let zone];
                 require(region.spec_valid());
                 require(region_in_budget(zid, region));
-                require(region_in_private_budget(zid, region)
-                    ==> pmem_nonoverlap_with_private_regions(
-                        zid,
-                        zone.iommu_mem_set,
-                        region,
-                    ));
                 require(!zone.iommu_mem_set.regions.contains(region));
                 require(!zone.iommu_mem_set.overlaps_vmem(region));
                 add zones += [zid => zone.iommu_insert_region(region)];

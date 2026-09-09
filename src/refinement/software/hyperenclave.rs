@@ -25,27 +25,13 @@ use crate::model::types::{GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 // ---------------------------------------------------------------------------
 /// Combines every live zone's CPU entries into the policy-neutral S2 map.
 pub open spec fn state_s2_map(state: HyperEnclaveSpec::State) -> Map<VmPageKey, S2Entry> {
-    Map::new(
-        |key: VmPageKey|
-            state.zone_ids.contains(key.vm.0) && zone_s2_entries(
-                key.vm.0,
-                state.zones[key.vm.0],
-            ).contains_key(key),
-        |key: VmPageKey| zone_s2_entries(key.vm.0, state.zones[key.vm.0])[key],
-    )
+    zones_s2_map(state.zone_ids, state.zones)
 }
 
 /// Combines every live zone's IOMMU entries into the policy-neutral IOMMU map.
 /// HyperEnclave's class invariant makes every non-root contribution empty.
 pub open spec fn state_iommu_s2_map(state: HyperEnclaveSpec::State) -> Map<VmPageKey, S2Entry> {
-    Map::new(
-        |key: VmPageKey|
-            state.zone_ids.contains(key.vm.0) && zone_iommu_s2_entries(
-                key.vm.0,
-                state.zones[key.vm.0],
-            ).contains_key(key),
-        |key: VmPageKey| zone_iommu_s2_entries(key.vm.0, state.zones[key.vm.0])[key],
-    )
+    zones_iommu_s2_map(state.zone_ids, state.zones)
 }
 
 /// Physical pages in the exact per-enclave Shared-region projection.
@@ -289,7 +275,7 @@ pub proof fn lemma_hyperenclave_projection_wf(spec: HyperEnclaveSoftwareSpec)
     assert(spec.state.inv_zone_ids());
     assert(spec.state.inv_shared_regions_exact());
     assert(spec.state.inv_class_policy());
-    assert(spec.state.inv_enclave_regions_pairwise_disjoint());
+    assert(spec.state.inv_enclave_regions_cross_zone_disjoint());
 
     assert(sw.s2_private_pages.dom() =~= sw.all_vms);
     assert forall|vm1: VmId, vm2: VmId| #[trigger]
@@ -461,224 +447,6 @@ pub proof fn lemma_hyperenclave_projection_wf(spec: HyperEnclaveSoftwareSpec)
     assert(sw.iommu_translation_wf());
     assert(sw.iommu_wf());
     assert(sw.wf());
-}
-
-proof fn lemma_state_s2_insert(
-    pre: HyperEnclaveSpec::State,
-    post: HyperEnclaveSpec::State,
-    zid: nat,
-    region: MemoryRegion,
-)
-    requires
-        pre.invariant(),
-        pre.zones.contains_key(zid),
-        region.spec_valid(),
-        !pre.zones[zid].cpu_mem_set.overlaps_vmem(region),
-        post.zone_ids == pre.zone_ids,
-        post.zones == pre.zones.insert(zid, pre.zones[zid].cpu_insert_region(region)),
-    ensures
-        state_s2_map(post) =~= state_s2_map(pre).union_prefer_right(region_s2_entries(zid, region)),
-{
-    assert(pre.inv_class_policy());
-    lemma_memory_set_s2_insert(zid, pre.zones[zid].cpu_mem_set, region);
-    let lhs = state_s2_map(post);
-    let rhs = state_s2_map(pre).union_prefer_right(region_s2_entries(zid, region));
-    assert forall|key: VmPageKey| #[trigger] lhs.contains_key(key) <==> rhs.contains_key(key) by {
-        if key.vm.0 != zid {
-        }
-    }
-    assert forall|key: VmPageKey|
-        #![trigger lhs[key]]
-        #![trigger rhs[key]]
-        lhs.contains_key(key) implies lhs[key] == rhs[key] by {
-        if key.vm.0 != zid {
-        }
-    }
-}
-
-proof fn lemma_state_s2_remove(
-    pre: HyperEnclaveSpec::State,
-    post: HyperEnclaveSpec::State,
-    zid: nat,
-    region: MemoryRegion,
-)
-    requires
-        pre.invariant(),
-        pre.zones.contains_key(zid),
-        pre.zones[zid].cpu_mem_set.regions.contains(region),
-        post.zone_ids == pre.zone_ids,
-        post.zones == pre.zones.insert(zid, pre.zones[zid].cpu_remove_region(region)),
-    ensures
-        state_s2_map(post) =~= state_s2_map(pre).remove_keys(region_s2_entries(zid, region).dom()),
-{
-    assert(pre.inv_class_policy());
-    lemma_memory_set_s2_remove(zid, pre.zones[zid].cpu_mem_set, region);
-    let lhs = state_s2_map(post);
-    let rhs = state_s2_map(pre).remove_keys(region_s2_entries(zid, region).dom());
-    assert forall|key: VmPageKey| #[trigger] lhs.contains_key(key) <==> rhs.contains_key(key) by {
-        if key.vm.0 != zid {
-        }
-    }
-    assert forall|key: VmPageKey|
-        #![trigger lhs[key]]
-        #![trigger rhs[key]]
-        lhs.contains_key(key) implies lhs[key] == rhs[key] by {
-        if key.vm.0 != zid {
-        }
-    }
-}
-
-proof fn lemma_state_iommu_s2_insert(
-    pre: HyperEnclaveSpec::State,
-    post: HyperEnclaveSpec::State,
-    region: MemoryRegion,
-)
-    requires
-        pre.invariant(),
-        pre.zones.contains_key(root_zone_id()),
-        region.spec_valid(),
-        !pre.zones[root_zone_id()].iommu_mem_set.overlaps_vmem(region),
-        post.zone_ids == pre.zone_ids,
-        post.zones == pre.zones.insert(
-            root_zone_id(),
-            pre.zones[root_zone_id()].iommu_insert_region(region),
-        ),
-    ensures
-        state_iommu_s2_map(post) =~= state_iommu_s2_map(pre).union_prefer_right(
-            region_s2_entries(root_zone_id(), region),
-        ),
-{
-    assert(pre.inv_class_policy());
-    lemma_memory_set_s2_insert(root_zone_id(), pre.zones[root_zone_id()].iommu_mem_set, region);
-    let lhs = state_iommu_s2_map(post);
-    let rhs = state_iommu_s2_map(pre).union_prefer_right(region_s2_entries(root_zone_id(), region));
-    assert forall|key: VmPageKey| #[trigger] lhs.contains_key(key) <==> rhs.contains_key(key) by {
-        if key.vm.0 != root_zone_id() {
-        }
-    }
-    assert forall|key: VmPageKey|
-        #![trigger lhs[key]]
-        #![trigger rhs[key]]
-        lhs.contains_key(key) implies lhs[key] == rhs[key] by {
-        if key.vm.0 != root_zone_id() {
-        }
-    }
-}
-
-proof fn lemma_state_iommu_s2_remove(
-    pre: HyperEnclaveSpec::State,
-    post: HyperEnclaveSpec::State,
-    region: MemoryRegion,
-)
-    requires
-        pre.invariant(),
-        pre.zones.contains_key(root_zone_id()),
-        pre.zones[root_zone_id()].iommu_mem_set.regions.contains(region),
-        post.zone_ids == pre.zone_ids,
-        post.zones == pre.zones.insert(
-            root_zone_id(),
-            pre.zones[root_zone_id()].iommu_remove_region(region),
-        ),
-    ensures
-        state_iommu_s2_map(post) =~= state_iommu_s2_map(pre).remove_keys(
-            region_s2_entries(root_zone_id(), region).dom(),
-        ),
-{
-    assert(pre.inv_class_policy());
-    lemma_memory_set_s2_remove(root_zone_id(), pre.zones[root_zone_id()].iommu_mem_set, region);
-    let lhs = state_iommu_s2_map(post);
-    let rhs = state_iommu_s2_map(pre).remove_keys(region_s2_entries(root_zone_id(), region).dom());
-    assert forall|key: VmPageKey| #[trigger] lhs.contains_key(key) <==> rhs.contains_key(key) by {
-        if key.vm.0 != root_zone_id() {
-        }
-    }
-    assert forall|key: VmPageKey|
-        #![trigger lhs[key]]
-        #![trigger rhs[key]]
-        lhs.contains_key(key) implies lhs[key] == rhs[key] by {
-        if key.vm.0 != root_zone_id() {
-        }
-    }
-}
-
-proof fn lemma_cpu_insert_entries_fresh(
-    spec: HyperEnclaveSoftwareSpec,
-    zid: nat,
-    concrete: MemoryRegion,
-)
-    requires
-        spec.state.invariant(),
-        spec.state.zones.contains_key(zid),
-        concrete.spec_valid(),
-        !spec.state.zones[zid].cpu_mem_set.overlaps_vmem(concrete),
-    ensures
-        forall|key: VmPageKey| #[trigger]
-            region_to_abstract(zid, concrete).entries().contains_key(key)
-                ==> !spec.view().s2_map.contains_key(key),
-{
-    lemma_region_to_abstract_entries(zid, concrete);
-    assert(spec.state.inv_class_policy());
-    let mem_set = spec.state.zones[zid].cpu_mem_set;
-    assert forall|key: VmPageKey| #[trigger]
-        region_to_abstract(zid, concrete).entries().contains_key(
-            key,
-        ) implies !spec.view().s2_map.contains_key(key) by {
-        if spec.view().s2_map.contains_key(key) {
-            assert(key.vm == VmId(zid));
-            let vaddr = vaddr_of_gpa(key.gpa);
-            let frame = mem_set.mappings[vaddr];
-            assert(mem_set.mappings.contains_pair(vaddr, frame));
-            let (old, i) = choose|old: MemoryRegion, i: nat|
-                mem_set.regions.contains(old) && 0 <= i < old.pages && vaddr == old.spec_page_vaddr(
-                    i,
-                ) && frame == old.spec_frame(i);
-            lemma_gpa_vaddr_roundtrip(old, i);
-            assert(region_owns_gpa(old, key.gpa)) by {
-                let witness = i;
-                lemma_vaddr_of_gpa_injective(region_guest_page(old, i), key.gpa);
-            }
-            assert(region_owns_gpa(concrete, key.gpa));
-            lemma_shared_gpa_implies_vmem_overlap(old, concrete, key.gpa);
-        }
-    }
-}
-
-proof fn lemma_iommu_insert_entries_fresh(spec: HyperEnclaveSoftwareSpec, concrete: MemoryRegion)
-    requires
-        spec.state.invariant(),
-        spec.state.zones.contains_key(root_zone_id()),
-        concrete.spec_valid(),
-        !spec.state.zones[root_zone_id()].iommu_mem_set.overlaps_vmem(concrete),
-    ensures
-        forall|key: VmPageKey| #[trigger]
-            region_to_abstract(root_zone_id(), concrete).entries().contains_key(key)
-                ==> !spec.view().iommu_s2_map.contains_key(key),
-{
-    lemma_region_to_abstract_entries(root_zone_id(), concrete);
-    assert(spec.state.inv_class_policy());
-    let mem_set = spec.state.zones[root_zone_id()].iommu_mem_set;
-    assert forall|key: VmPageKey| #[trigger]
-        region_to_abstract(root_zone_id(), concrete).entries().contains_key(
-            key,
-        ) implies !spec.view().iommu_s2_map.contains_key(key) by {
-        if spec.view().iommu_s2_map.contains_key(key) {
-            assert(key.vm == VmId(root_zone_id()));
-            let vaddr = vaddr_of_gpa(key.gpa);
-            let frame = mem_set.mappings[vaddr];
-            assert(mem_set.mappings.contains_pair(vaddr, frame));
-            let (old, i) = choose|old: MemoryRegion, i: nat|
-                mem_set.regions.contains(old) && 0 <= i < old.pages && vaddr == old.spec_page_vaddr(
-                    i,
-                ) && frame == old.spec_frame(i);
-            lemma_gpa_vaddr_roundtrip(old, i);
-            assert(region_owns_gpa(old, key.gpa)) by {
-                let witness = i;
-                lemma_vaddr_of_gpa_injective(region_guest_page(old, i), key.gpa);
-            }
-            assert(region_owns_gpa(concrete, key.gpa));
-            lemma_shared_gpa_implies_vmem_overlap(old, concrete, key.gpa);
-        }
-    }
 }
 
 proof fn lemma_cpu_mapped_page_has_entry(spec: HyperEnclaveSoftwareSpec, zid: nat, page: PhysPage)
@@ -1162,14 +930,11 @@ pub open spec fn private_after_cpu_remove(pre: SoftwareView, region: Region) -> 
     Set<PhysPage>,
 > {
     let post_map = pre.s2_map.remove_keys(region.entries().dom());
-    pre.s2_private_pages.insert(
+    private_pages_after_unmap(
+        pre.s2_private_pages,
+        post_map,
         region.vm,
-        Set::new(
-            |page: PhysPage|
-                pre.s2_private_pages[region.vm].contains(page) && (!region.pages().contains(page)
-                    || exists|key: VmPageKey| #[trigger]
-                    post_map.contains_key(key) && post_map[key].page == page),
-        ),
+        region.pages(),
     )
 }
 
@@ -1232,14 +997,10 @@ proof fn lemma_root_remove_one(pre: SoftwareView, region: Region) -> (result: (
                 pre.s2_private_pages[region.vm].contains(other) ==> !region.pages().contains(
                     other,
                 ));
-            assert(pre.s2_private_pages[region.vm] =~= Set::new(
-                |other: PhysPage|
-                    pre.s2_private_pages[region.vm].contains(other) && (!region.pages().contains(
-                        other,
-                    ) || exists|some: VmPageKey| #[trigger]
-                        pre.s2_map.remove_keys(region.entries().dom()).contains_key(some)
-                            && pre.s2_map.remove_keys(region.entries().dom())[some].page == other),
-            ));
+            assert(private_after_cpu_remove(pre, region)[region.vm]
+                =~= pre.s2_private_pages[region.vm]);
+            assert(pre.s2_private_pages.insert(region.vm, pre.s2_private_pages[region.vm])
+                =~= pre.s2_private_pages);
         }
         let op = SoftwareOp::CpuRemoveSharedRegion(region);
         assert(SoftwareView::step(pre, post, op));
@@ -1247,136 +1008,25 @@ proof fn lemma_root_remove_one(pre: SoftwareView, region: Region) -> (result: (
         (post, seq![op])
     } else {
         assert(pre.s2_private_pages[region.vm].contains(page));
-        if exists|other: VmPageKey| #[trigger]
-            post_map.contains_key(other) && post_map[other].page == page {
-            let shared = SoftwareView {
-                s2_private_pages: pre.s2_private_pages.insert(
-                    region.vm,
-                    pre.s2_private_pages[region.vm].remove(page),
-                ),
-                s2_shared_pages: pre.s2_shared_pages.insert(page),
-                ..pre
-            };
-            assert(exists|some: VmPageKey| #[trigger]
-                pre.s2_map.contains_key(some) && some.vm == region.vm && pre.s2_map[some].page
-                    == page) by {
-                let some = key;
-            }
-            assert(SoftwareView::make_s2_shared_step(pre, shared, region.vm, page));
-            lemma_make_s2_shared_step_preserves_wf(pre, shared, region.vm, page);
-
-            assert(SoftwareView::cpu_remove_shared_region_enabled(shared, region));
-            let unmapped = SoftwareView { s2_map: post_map, ..shared };
-            assert(SoftwareView::cpu_remove_shared_region_step(shared, unmapped, region));
-            assert(SoftwareView::unmap_s2_shared_step(shared, unmapped, region.vm, gpa));
-            lemma_unmap_s2_shared_step_preserves_wf(shared, unmapped, region.vm, gpa);
-
-            let post = SoftwareView {
-                s2_private_pages: unmapped.s2_private_pages.insert(
-                    region.vm,
-                    unmapped.s2_private_pages[region.vm].insert(page),
-                ),
-                s2_shared_pages: unmapped.s2_shared_pages.remove(page),
-                ..unmapped
-            };
-            assert forall|other: VmPageKey| #[trigger]
-                unmapped.s2_map.contains_key(other) && unmapped.s2_map[other].page
-                    == page implies other.vm == region.vm by {
-                assert(pre.s2_map.contains_key(other));
-                assert(other != key);
-                assert(pre.all_vms.contains(other.vm));
-                assert(pre.s2_private_or_shared(other.vm, page));
-                assert(pre.s2_private_pages[other.vm].contains(page));
-                if other.vm != region.vm {
-                    assert(!pre.s2_private_pages[other.vm].contains(page));
-                }
-            }
-            assert forall|other: VmId| #[trigger]
-                unmapped.all_vms.contains(other) && other
-                    != region.vm implies !unmapped.iommu_private_pages[other].contains(page) by {
-                if unmapped.iommu_private_pages[other].contains(page) {
-                    assert(!pre.s2_private_pages[region.vm].contains(page));
-                }
-            }
-            assert(!unmapped.iommu_shared_pages.contains(page));
-            assert(SoftwareView::make_s2_private_step(unmapped, post, region.vm, page));
-            lemma_make_s2_private_step_preserves_wf(unmapped, post, region.vm, page);
-            assert(post.s2_private_pages =~= private_after_cpu_remove(pre, region)) by {
-                assert(post.s2_private_pages =~= pre.s2_private_pages);
-                assert(pre.s2_private_pages[region.vm] =~= Set::new(
-                    |other_page: PhysPage|
-                        pre.s2_private_pages[region.vm].contains(other_page) && (
-                        !region.pages().contains(other_page) || exists|some: VmPageKey| #[trigger]
-                            pre.s2_map.remove_keys(region.entries().dom()).contains_key(some)
-                                && pre.s2_map.remove_keys(region.entries().dom())[some].page
-                                == other_page),
-                )) by {
-                    assert forall|other_page: PhysPage| #[trigger]
-                        pre.s2_private_pages[region.vm].contains(other_page)
-                            && region.pages().contains(other_page) implies exists|some: VmPageKey|
-                     #[trigger]
-                        pre.s2_map.remove_keys(region.entries().dom()).contains_key(some)
-                            && pre.s2_map.remove_keys(region.entries().dom())[some].page
-                            == other_page by {
-                        assert(other_page == page);
-                    }
-                }
-            }
-            let first = SoftwareOp::MakeS2Shared(region.vm, page);
-            let second = SoftwareOp::CpuRemoveSharedRegion(region);
-            let third = SoftwareOp::MakeS2Private(region.vm, page);
-            assert(SoftwareView::step(pre, shared, first));
-            assert(SoftwareView::step(shared, unmapped, second));
-            assert(SoftwareView::step(unmapped, post, third));
-            lemma_run_software_ops_single(pre, shared, first);
-            lemma_run_software_ops_single(shared, unmapped, second);
-            lemma_run_software_ops_single(unmapped, post, third);
-            lemma_run_software_ops_concat(pre, shared, unmapped, seq![first], seq![second]);
-            assert(seq![first] + seq![second] == seq![first, second]);
-            lemma_run_software_ops_concat(pre, unmapped, post, seq![first, second], seq![third]);
-            assert(seq![first, second] + seq![third] == seq![first, second, third]);
-            (post, seq![first, second, third])
-        } else {
-            assert(SoftwareView::cpu_remove_private_region_enabled(pre, region));
-            let post = SoftwareView {
-                s2_private_pages: pre.s2_private_pages.insert(
-                    region.vm,
-                    pre.s2_private_pages[region.vm].difference(region.pages()),
-                ),
-                s2_map: pre.s2_map.remove_keys(region.entries().dom()),
-                ..pre
-            };
-            assert(SoftwareView::cpu_remove_private_region_step(pre, post, region));
-            assert(post.s2_map =~= pre.s2_map.remove(key));
-            assert(pre.s2_private_pages[region.vm].difference(region.pages())
-                =~= pre.s2_private_pages[region.vm].remove(page));
-            assert(post.s2_private_pages =~= pre.s2_private_pages.insert(
+        assert(SoftwareView::cpu_remove_private_region_enabled(pre, region));
+        let post = SoftwareView {
+            s2_private_pages: private_pages_after_unmap(
+                pre.s2_private_pages,
+                post_map,
                 region.vm,
-                pre.s2_private_pages[region.vm].remove(page),
-            ));
-            assert(SoftwareView::unmap_s2_private_step(pre, post, region.vm, gpa, page));
-            lemma_unmap_s2_private_step_preserves_wf(pre, post, region.vm, gpa, page);
-            assert(post.s2_private_pages =~= private_after_cpu_remove(pre, region)) by {
-                assert(pre.s2_private_pages[region.vm].difference(region.pages())
-                    =~= pre.s2_private_pages[region.vm].remove(page));
-                assert(pre.s2_private_pages[region.vm].remove(page) =~= Set::new(
-                    |other_page: PhysPage|
-                        pre.s2_private_pages[region.vm].contains(other_page) && (
-                        !region.pages().contains(other_page) || exists|some: VmPageKey| #[trigger]
-                            pre.s2_map.remove_keys(region.entries().dom()).contains_key(some)
-                                && pre.s2_map.remove_keys(region.entries().dom())[some].page
-                                == other_page),
-                )) by {
-                    assert(forall|other_page: PhysPage| #[trigger]
-                        pre.s2_private_pages[region.vm].contains(other_page)
-                            && region.pages().contains(other_page) ==> other_page == page);
-                }
-            }
-            let op = SoftwareOp::CpuRemovePrivateRegion(region);
-            assert(SoftwareView::step(pre, post, op));
-            lemma_run_software_ops_single(pre, post, op);
-            (post, seq![op])
-        }
+                region.pages(),
+            ),
+            s2_map: post_map,
+            ..pre
+        };
+        assert(SoftwareView::cpu_remove_private_region_step(pre, post, region));
+        assert(region.pages() =~= Set::<PhysPage>::empty().insert(page));
+        assert(SoftwareView::unmap_s2_private_step(pre, post, region.vm, gpa, page));
+        lemma_unmap_s2_private_step_preserves_wf(pre, post, region.vm, gpa, page);
+        let op = SoftwareOp::CpuRemovePrivateRegion(region);
+        assert(SoftwareView::step(pre, post, op));
+        lemma_run_software_ops_single(pre, post, op);
+        (post, seq![op])
     }
 }
 
@@ -2043,7 +1693,6 @@ proof fn lemma_remove_zone_step_refines(
         run_software_ops(pre.view(), post.view(), ops),
 {
     reveal(HyperEnclaveSpec::State::next_by);
-    let next = HyperEnclaveSpec::take_step::remove_zone(pre.state, zid);
     let vm = VmId(zid);
     assert(pre.state.zones.contains_key(zid));
     assert(pre.state.zones[zid].cpu_mem_set.empty());
@@ -2157,7 +1806,6 @@ proof fn lemma_cpu_insert_normal_region_step_refines(
         run_software_ops(pre.view(), post.view(), ops),
 {
     reveal(HyperEnclaveSpec::State::next_by);
-    let next = HyperEnclaveSpec::take_step::cpu_insert_normal_region(pre.state, concrete);
     let zid = root_zone_id();
     let vm = VmId(zid);
     let old_zone = pre.state.zones[zid];
@@ -2170,9 +1818,9 @@ proof fn lemma_cpu_insert_normal_region_step_refines(
     lemma_hyperenclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
-    lemma_cpu_insert_entries_fresh(pre, zid, concrete);
+    lemma_zones_s2_entries_fresh(pre.state.zone_ids, pre.state.zones, zid, concrete);
     lemma_memory_set_mapped_pages_insert(old_zone.cpu_mem_set, concrete);
-    lemma_state_s2_insert(pre.state, post.state, zid, concrete);
+    lemma_zones_s2_insert(pre.state.zone_ids, pre.state.zones, zid, concrete);
     assert(post.view().s2_shared_pages =~= pre.view().s2_shared_pages) by {
         assert(post.state.shared_regions == pre.state.shared_regions);
     }
@@ -2283,7 +1931,7 @@ proof fn lemma_cpu_remove_root_normal_region_refines(
     lemma_hyperenclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
-    lemma_state_s2_remove(pre.state, post.state, zid, concrete);
+    lemma_zones_s2_remove(pre.state.zone_ids, pre.state.zones, zid, concrete);
     lemma_region_in_memory_set_maps_entries(zid, old_zone.cpu_mem_set, concrete);
     assert(region.wf());
     assert(pre.view().all_vms.contains(vm));
@@ -2424,15 +2072,15 @@ proof fn lemma_cpu_insert_enclave_private_region_step_refines(
     lemma_hyperenclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
-    lemma_cpu_insert_entries_fresh(pre, zid, concrete);
+    lemma_zones_s2_entries_fresh(pre.state.zone_ids, pre.state.zones, zid, concrete);
     lemma_memory_set_mapped_pages_insert(old_zone.cpu_mem_set, concrete);
-    lemma_state_s2_insert(pre.state, post.state, zid, concrete);
+    lemma_zones_s2_insert(pre.state.zone_ids, pre.state.zones, zid, concrete);
     assert(region.wf());
     assert(pre.view().all_vms.contains(vm));
     assert forall|page: PhysPage, other: VmId| #[trigger]
         region.pages().contains(page) && #[trigger] pre.view().all_vms.contains(
             other,
-        ) implies !pre.view().s2_private_pages[other].contains(page) by {
+        ) && other != vm implies !pre.view().s2_private_pages[other].contains(page) by {
         if pre.view().s2_private_pages[other].contains(page) {
             if other.0 == root_zone_id() {
                 let root_set = pre.state.zones[root_zone_id()].cpu_mem_set;
@@ -2572,23 +2220,7 @@ proof fn lemma_cpu_remove_enclave_private_region_refines(
     lemma_hyperenclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
-    lemma_state_s2_remove(pre.state, post.state, zid, concrete);
-    assert forall|stored: MemoryRegion| #[trigger]
-        old_zone.cpu_mem_set.regions.contains(stored) && stored
-            != concrete implies !stored.spec_overlaps_pmem(concrete) by {
-        if region_in_enclave_memory(zid, stored) {
-            assert(pre.state.inv_enclave_regions_pairwise_disjoint());
-        } else {
-            assert(region_in_normal_memory(stored));
-            if stored.spec_overlaps_pmem(concrete) {
-                lemma_pmem_overlap_implies_shared_page(stored, concrete);
-                let page = choose|page: PhysPage|
-                    region_pages(stored).contains(page) && region_pages(concrete).contains(page);
-                lemma_normal_and_enclave_page_disjoint(stored, concrete, zid, page);
-            }
-        }
-    }
-    lemma_memory_set_mapped_pages_remove_disjoint(old_zone.cpu_mem_set, concrete);
+    lemma_zones_s2_remove(pre.state.zone_ids, pre.state.zones, zid, concrete);
     lemma_region_in_memory_set_maps_entries(zid, old_zone.cpu_mem_set, concrete);
     assert(region.wf());
     assert(pre.view().all_vms.contains(vm));
@@ -2604,54 +2236,6 @@ proof fn lemma_cpu_remove_enclave_private_region_refines(
         lemma_memory_set_region_page_is_mapped(old_zone.cpu_mem_set, concrete, page);
     }
     assert(abstract_region_installed(pre.view().s2_map, region));
-    assert forall|key: VmPageKey| #[trigger]
-        pre.view().s2_map.contains_key(key) && !region.entries().contains_key(
-            key,
-        ) implies !region.pages().contains(pre.view().s2_map[key].page) by {
-        if region.pages().contains(pre.view().s2_map[key].page) {
-            let page = pre.view().s2_map[key].page;
-            let other_zid = key.vm.0;
-            let mem_set = pre.state.zones[other_zid].cpu_mem_set;
-            lemma_memory_set_mapped_page_has_region(mem_set, page);
-            let stored = choose|stored: MemoryRegion| #[trigger]
-                mem_set.regions.contains(stored) && region_pages(stored).contains(page);
-            if other_zid == root_zone_id() {
-                assert(region_in_normal_memory(stored));
-                lemma_normal_and_enclave_page_disjoint(stored, concrete, zid, page);
-            } else if region_in_normal_memory(stored) {
-                lemma_normal_and_enclave_page_disjoint(stored, concrete, zid, page);
-            } else {
-                assert(region_in_enclave_memory(other_zid, stored));
-                if other_zid != zid || stored != concrete {
-                    lemma_shared_page_implies_pmem_overlap(stored, concrete, page);
-                    assert(!stored.spec_overlaps_pmem(concrete));
-                } else {
-                    let i = choose|i: nat|
-                        0 <= i < stored.pages && region_phys_page(stored, i) == page;
-                    let stored_key = VmPageKey::new(vm, region_guest_page(stored, i));
-                    lemma_region_to_abstract_entries(zid, concrete);
-                    lemma_region_phys_page_linear(stored, i);
-                    assert(region.entries().contains_key(stored_key));
-                    assert(pre.view().s2_map[stored_key].page == page);
-                    assert(key == stored_key) by {
-                        let vaddr = vaddr_of_gpa(key.gpa);
-                        let frame = mem_set.mappings[vaddr];
-                        assert(mem_set.mappings.contains_pair(vaddr, frame));
-                        let (mapped_region, j) = choose|mapped_region: MemoryRegion, j: nat|
-                            mem_set.regions.contains(mapped_region) && 0 <= j < mapped_region.pages
-                                && vaddr == mapped_region.spec_page_vaddr(j) && frame
-                                == mapped_region.spec_frame(j);
-                        assert(mapped_region == concrete);
-                        lemma_gpa_vaddr_roundtrip(concrete, j);
-                        lemma_region_phys_page_linear(concrete, j);
-                        lemma_region_phys_page_linear(concrete, i);
-                        assert(j == i);
-                        lemma_vaddr_of_gpa_injective(key.gpa, region_guest_page(concrete, i));
-                    }
-                }
-            }
-        }
-    }
     assert(SoftwareView::cpu_remove_private_region_enabled(pre.view(), region));
     assert(post.view().all_vms =~= pre.view().all_vms);
     assert(post.view().s2_shared_pages =~= pre.view().s2_shared_pages) by {
@@ -2664,21 +2248,53 @@ proof fn lemma_cpu_remove_enclave_private_region_refines(
     assert(post.view().iommu_private_pages =~= pre.view().iommu_private_pages);
     assert(post.view().iommu_shared_pages =~= pre.view().iommu_shared_pages);
     assert(post.view().iommu_s2_map =~= pre.view().iommu_s2_map);
-    assert(post.view().s2_private_pages =~= pre.view().s2_private_pages.insert(
+    let target_private = private_pages_after_unmap(
+        pre.view().s2_private_pages,
+        post.view().s2_map,
         vm,
-        pre.view().s2_private_pages[vm].difference(region.pages()),
-    )) by {
+        region.pages(),
+    );
+    assert(post.view().s2_private_pages =~= target_private) by {
         assert forall|other: VmId| #[trigger]
             post.view().s2_private_pages.contains_key(
                 other,
-            ) implies post.view().s2_private_pages[other] =~= pre.view().s2_private_pages.insert(
-            vm,
-            pre.view().s2_private_pages[vm].difference(region.pages()),
-        )[other] by {
+            ) implies post.view().s2_private_pages[other] =~= target_private[other] by {
             if other == vm {
-                assert(zone_cpu_mapped_pages(post.state.zones[zid]) =~= zone_cpu_mapped_pages(
-                    pre.state.zones[zid],
-                ).difference(region.pages()));
+                assert forall|page: PhysPage| #[trigger]
+                    post.view().s2_private_pages[other].contains(page)
+                        <==> target_private[other].contains(page) by {
+                    if post.view().s2_private_pages[other].contains(page) {
+                        lemma_cpu_mapped_page_has_entry(post, zid, page);
+                        let key = choose|key: VmPageKey| #[trigger]
+                            post.view().s2_map.contains_key(key) && key.vm == other
+                                && post.view().s2_map[key].page == page;
+                        assert(pre.view().s2_map.contains_key(key));
+                        lemma_cpu_entry_maps_page(pre, key);
+                        assert(pre.view().s2_private_pages[other].contains(page));
+                    }
+                    if target_private[other].contains(page) {
+                        if !region.pages().contains(page) {
+                            lemma_memory_set_mapped_pages_iff_region_page(
+                                old_zone.cpu_mem_set,
+                                page,
+                            );
+                            let stored = choose|stored: MemoryRegion| #[trigger]
+                                old_zone.cpu_mem_set.regions.contains(stored)
+                                    && region_pages(stored).contains(page);
+                            assert(stored != concrete);
+                            lemma_memory_set_region_page_is_mapped(
+                                post.state.zones[zid].cpu_mem_set,
+                                stored,
+                                page,
+                            );
+                        } else {
+                            let key = choose|key: VmPageKey| #[trigger]
+                                post.view().s2_map.contains_key(key) && key.vm == other
+                                    && post.view().s2_map[key].page == page;
+                            lemma_cpu_entry_maps_page(post, key);
+                        }
+                    }
+                }
             }
         }
     }
@@ -2710,11 +2326,6 @@ proof fn lemma_cpu_insert_enclave_shared_region_step_refines(
         run_software_ops(pre.view(), post.view(), ops),
 {
     reveal(HyperEnclaveSpec::State::next_by);
-    let next = HyperEnclaveSpec::take_step::cpu_insert_enclave_shared_region(
-        pre.state,
-        zid,
-        concrete,
-    );
     let root = VmId(root_zone_id());
     let vm = VmId(zid);
     let old_zone = pre.state.zones[zid];
@@ -2727,9 +2338,9 @@ proof fn lemma_cpu_insert_enclave_shared_region_step_refines(
     lemma_hyperenclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
-    lemma_cpu_insert_entries_fresh(pre, zid, concrete);
+    lemma_zones_s2_entries_fresh(pre.state.zone_ids, pre.state.zones, zid, concrete);
     lemma_memory_set_mapped_pages_insert(old_zone.cpu_mem_set, concrete);
-    lemma_state_s2_insert(pre.state, post.state, zid, concrete);
+    lemma_zones_s2_insert(pre.state.zone_ids, pre.state.zones, zid, concrete);
     assert(region.wf());
     assert(pre.view().all_vms.contains(vm));
     assert forall|page: PhysPage, owner: VmId| #[trigger]
@@ -2919,7 +2530,7 @@ proof fn lemma_cpu_remove_enclave_shared_region_refines(
     lemma_hyperenclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
-    lemma_state_s2_remove(pre.state, post.state, zid, concrete);
+    lemma_zones_s2_remove(pre.state.zone_ids, pre.state.zones, zid, concrete);
     lemma_region_in_memory_set_maps_entries(zid, old_zone.cpu_mem_set, concrete);
     assert(pre.state.shared_regions[zid].contains(concrete)) by {
         assert(pre.state.shared_regions[zid] == live_shared_regions(zid, old_zone));
@@ -3246,7 +2857,6 @@ proof fn lemma_cpu_remove_region_step_refines(
         run_software_ops(pre.view(), post.view(), ops),
 {
     reveal(HyperEnclaveSpec::State::next_by);
-    let next = HyperEnclaveSpec::take_step::cpu_remove_region(pre.state, zid, concrete);
     let trace = lemma_cpu_remove_region_refines(pre, zid, concrete);
     trace.1
 }
@@ -3334,7 +2944,6 @@ proof fn lemma_cpu_clear_enclave_regions_step_refines(
         run_software_ops(pre.view(), post.view(), ops),
 {
     reveal(HyperEnclaveSpec::State::next_by);
-    let next = HyperEnclaveSpec::take_step::cpu_clear_enclave_regions(pre.state, zid);
     let trace = lemma_cpu_clear_enclave_refines(pre, zid);
     assert(trace.0.state == post.state);
     trace.1
@@ -3360,7 +2969,6 @@ proof fn lemma_iommu_insert_region_step_refines(
         run_software_ops(pre.view(), post.view(), ops),
 {
     reveal(HyperEnclaveSpec::State::next_by);
-    let next = HyperEnclaveSpec::take_step::iommu_insert_region(pre.state, concrete);
     let zid = root_zone_id();
     let vm = VmId(zid);
     let old_zone = pre.state.zones[zid];
@@ -3375,8 +2983,8 @@ proof fn lemma_iommu_insert_region_step_refines(
     lemma_hyperenclave_projection_wf(pre);
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
-    lemma_iommu_insert_entries_fresh(pre, concrete);
-    lemma_state_iommu_s2_insert(pre.state, post.state, concrete);
+    lemma_zones_iommu_s2_entries_fresh(pre.state.zone_ids, pre.state.zones, zid, concrete);
+    lemma_zones_iommu_s2_insert(pre.state.zone_ids, pre.state.zones, zid, concrete);
     lemma_memory_set_mapped_pages_insert(old_set, concrete);
     lemma_region_pages_match_hyper(concrete);
     dma_memory_is_normal_memory();
@@ -3386,17 +2994,8 @@ proof fn lemma_iommu_insert_region_step_refines(
     assert forall|page: PhysPage, owner: VmId| #[trigger]
         region.pages().contains(page) && #[trigger] pre.view().all_vms.contains(
             owner,
-        ) implies !pre.view().iommu_private_pages[owner].contains(page) by {
-        if owner == vm {
-            if pre.view().iommu_private_pages[owner].contains(page) {
-                lemma_memory_set_mapped_page_has_region(old_set, page);
-                let stored = choose|stored: MemoryRegion| #[trigger]
-                    old_set.regions.contains(stored) && region_pages(stored).contains(page);
-                lemma_shared_page_implies_pmem_overlap(stored, concrete, page);
-            }
-        } else {
-            assert(pre.state.zones[owner.0].iommu_mem_set.empty());
-        }
+        ) && owner != vm implies !pre.view().iommu_private_pages[owner].contains(page) by {
+        assert(pre.state.zones[owner.0].iommu_mem_set.empty());
     }
     assert forall|page: PhysPage, owner: VmId| #[trigger]
         region.pages().contains(page) && #[trigger] pre.view().all_vms.contains(owner) && owner
@@ -3483,14 +3082,7 @@ proof fn lemma_iommu_remove_region_refines(
     lemma_region_to_abstract_pages(zid, concrete);
     lemma_region_to_abstract_entries(zid, concrete);
     lemma_region_in_memory_set_maps_entries(zid, old_set, concrete);
-    lemma_state_iommu_s2_remove(pre.state, post.state, concrete);
-    assert forall|stored: MemoryRegion| #[trigger]
-        old_set.regions.contains(stored) && stored != concrete implies !stored.spec_overlaps_pmem(
-        concrete,
-    ) by {
-        assert(pre.state.inv_root_iommu_regions_pmem_disjoint());
-    }
-    lemma_memory_set_mapped_pages_remove_disjoint(old_set, concrete);
+    lemma_zones_iommu_s2_remove(pre.state.zone_ids, pre.state.zones, zid, concrete);
     assert(region.wf());
     assert(pre.view().all_vms.contains(vm));
     assert forall|page: PhysPage| #[trigger]
@@ -3498,58 +3090,69 @@ proof fn lemma_iommu_remove_region_refines(
         lemma_memory_set_region_page_is_mapped(old_set, concrete, page);
     }
     assert(abstract_region_installed(pre.view().iommu_s2_map, region));
-    assert forall|key: VmPageKey| #[trigger]
-        pre.view().iommu_s2_map.contains_key(key) && !region.entries().contains_key(
-            key,
-        ) implies !region.pages().contains(pre.view().iommu_s2_map[key].page) by {
-        if region.pages().contains(pre.view().iommu_s2_map[key].page) {
-            let page = pre.view().iommu_s2_map[key].page;
-            assert(key.vm == vm);
-            let vaddr = vaddr_of_gpa(key.gpa);
-            assert(old_set.mappings.contains_key(vaddr));
-            let frame = old_set.mappings[vaddr];
-            assert(old_set.mappings.contains_pair(vaddr, frame));
-            let (stored, i) = choose|stored: MemoryRegion, i: nat|
-                old_set.regions.contains(stored) && 0 <= i < stored.pages && vaddr
-                    == stored.spec_page_vaddr(i) && frame == stored.spec_frame(i);
-            lemma_region_phys_page_linear(stored, i);
-            assert(region_pages(stored).contains(page));
-            if stored == concrete {
-                lemma_gpa_vaddr_roundtrip(concrete, i);
-                assert(region_guest_page(concrete, i) == key.gpa) by {
-                    lemma_vaddr_of_gpa_injective(region_guest_page(concrete, i), key.gpa);
-                }
-                assert(region_owns_gpa(concrete, key.gpa)) by {
-                    let witness = i;
-                }
-                assert(region.entries().contains_key(key));
-            } else {
-                lemma_shared_page_implies_pmem_overlap(stored, concrete, page);
-            }
-        }
-    }
     assert(SoftwareView::iommu_remove_private_region_enabled(pre.view(), region));
     assert(post.view().all_vms == pre.view().all_vms);
     assert(post.view().s2_private_pages == pre.view().s2_private_pages);
     assert(post.view().s2_shared_pages == pre.view().s2_shared_pages);
     assert(post.view().s2_map == pre.view().s2_map);
     assert(post.view().iommu_shared_pages == pre.view().iommu_shared_pages);
-    assert(post.view().iommu_private_pages =~= pre.view().iommu_private_pages.insert(
+    let target_private = private_pages_after_unmap(
+        pre.view().iommu_private_pages,
+        post.view().iommu_s2_map,
         vm,
-        pre.view().iommu_private_pages[vm].difference(region.pages()),
-    )) by {
+        region.pages(),
+    );
+    let post_set = post.state.zones[zid].iommu_mem_set;
+    assert(post.state.inv_class_policy());
+    assert(post.view().iommu_private_pages =~= target_private) by {
         assert forall|owner: VmId| #[trigger]
             post.view().iommu_private_pages.contains_key(
                 owner,
-            ) implies post.view().iommu_private_pages[owner]
-            =~= pre.view().iommu_private_pages.insert(
-            vm,
-            pre.view().iommu_private_pages[vm].difference(region.pages()),
-        )[owner] by {
+            ) implies post.view().iommu_private_pages[owner] =~= target_private[owner] by {
             if owner == vm {
-                assert(zone_iommu_mapped_pages(post.state.zones[zid]) =~= zone_iommu_mapped_pages(
-                    pre.state.zones[zid],
-                ).difference(region.pages()));
+                assert forall|page: PhysPage| #[trigger]
+                    post.view().iommu_private_pages[owner].contains(page)
+                        <==> target_private[owner].contains(page) by {
+                    if post.view().iommu_private_pages[owner].contains(page) {
+                        lemma_memory_set_mapped_pages_iff_region_page(post_set, page);
+                        let stored = choose|stored: MemoryRegion| #[trigger]
+                            post_set.regions.contains(stored) && region_pages(stored).contains(page);
+                        assert(stored != concrete);
+                        assert(old_set.regions.contains(stored));
+                        lemma_memory_set_region_page_is_mapped(old_set, stored, page);
+                        if region.pages().contains(page) {
+                            let i = choose|i: nat|
+                                0 <= i < stored.pages && region_phys_page(stored, i) == page;
+                            let key = VmPageKey::new(owner, region_guest_page(stored, i));
+                            lemma_region_to_abstract_entries(zid, stored);
+                            lemma_region_in_memory_set_maps_entries(zid, post_set, stored);
+                            lemma_region_phys_page_linear(stored, i);
+                            assert(post.view().iommu_s2_map.contains_key(key));
+                            assert(post.view().iommu_s2_map[key].page == page);
+                        }
+                    }
+                    if target_private[owner].contains(page) {
+                        if !region.pages().contains(page) {
+                            lemma_memory_set_mapped_pages_iff_region_page(old_set, page);
+                            let stored = choose|stored: MemoryRegion| #[trigger]
+                                old_set.regions.contains(stored) && region_pages(stored).contains(page);
+                            assert(stored != concrete);
+                            lemma_memory_set_region_page_is_mapped(
+                                post.state.zones[zid].iommu_mem_set,
+                                stored,
+                                page,
+                            );
+                        } else {
+                            let key = choose|key: VmPageKey| #[trigger]
+                                post.view().iommu_s2_map.contains_key(key) && key.vm == owner
+                                    && post.view().iommu_s2_map[key].page == page;
+                            let vaddr = vaddr_of_gpa(key.gpa);
+                            assert(post_set.mappings.contains_key(vaddr));
+                            assert(frame_phys_page(post_set.mappings[vaddr]) == page);
+                            assert(memory_set_mapped_pages(post_set).contains(page));
+                        }
+                    }
+                }
             }
         }
     }
@@ -3580,7 +3183,6 @@ proof fn lemma_iommu_remove_region_step_refines(
         run_software_ops(pre.view(), post.view(), ops),
 {
     reveal(HyperEnclaveSpec::State::next_by);
-    let next = HyperEnclaveSpec::take_step::iommu_remove_region(pre.state, concrete);
     let trace = lemma_iommu_remove_region_refines(pre, concrete);
     trace.1
 }
@@ -3661,7 +3263,6 @@ proof fn lemma_iommu_clear_regions_step_refines(
         run_software_ops(pre.view(), post.view(), ops),
 {
     reveal(HyperEnclaveSpec::State::next_by);
-    let next = HyperEnclaveSpec::take_step::iommu_clear_regions(pre.state);
     let trace = lemma_iommu_clear_refines(pre);
     assert(trace.0.state == post.state);
     trace.1

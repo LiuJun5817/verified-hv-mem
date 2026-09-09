@@ -128,12 +128,6 @@ impl BudgetProtocol {
             zt.wf(gs.mem_inst_id()),
             region.spec_valid(),
             region_in_budget(zt.zone_id(), region),
-            region_in_private_budget(zt.zone_id(), region)
-                ==> pmem_nonoverlap_with_private_regions(
-                zt.zone_id(),
-                zt.ghost_zone().cpu_mem_set,
-                region,
-            ),
             !zt.ghost_zone().cpu_mem_set.overlaps_vmem(region),
             !zt.ghost_zone().cpu_mem_set.regions.contains(region),
         ensures
@@ -195,12 +189,6 @@ impl BudgetProtocol {
             zt.wf(gs.mem_inst_id()),
             region.spec_valid(),
             region_in_budget(zt.zone_id(), region),
-            region_in_private_budget(zt.zone_id(), region)
-                ==> pmem_nonoverlap_with_private_regions(
-                zt.zone_id(),
-                zt.ghost_zone().iommu_mem_set,
-                region,
-            ),
             !zt.ghost_zone().iommu_mem_set.overlaps_vmem(region),
             !zt.ghost_zone().iommu_mem_set.regions.contains(region),
         ensures

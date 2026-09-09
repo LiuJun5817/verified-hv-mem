@@ -929,7 +929,8 @@ proof fn lemma_cpu_private_insert_edge(sw1: SoftwareView, hw: HardwareView, regi
     assert(region.pages().contains(page));
     assert(!phys_prefix(region, k).contains(page));
     assert forall|v: VmId| #[trigger]
-        from_sw.all_vms.contains(v) implies !from_sw.s2_private_pages[v].contains(page) by {
+        from_sw.all_vms.contains(v) && v != vm
+            implies !from_sw.s2_private_pages[v].contains(page) by {
         assert(!sw1.s2_private_pages[v].contains(page));
     }
     assert(!from_sw.s2_shared_pages.contains(page));
@@ -1054,12 +1055,15 @@ pub open spec fn cpu_private_remove_partial(
     region: Region,
     k: nat,
 ) -> SoftwareView {
+    let post_map = s1.s2_map.remove_keys(entry_prefix(region, k).dom());
     SoftwareView {
-        s2_private_pages: s1.s2_private_pages.insert(
+        s2_private_pages: private_pages_after_unmap(
+            s1.s2_private_pages,
+            post_map,
             region.vm,
-            s1.s2_private_pages[region.vm].difference(phys_prefix(region, k)),
+            phys_prefix(region, k),
         ),
-        s2_map: s1.s2_map.remove_keys(entry_prefix(region, k).dom()),
+        s2_map: post_map,
         ..s1
     }
 }
@@ -1114,39 +1118,15 @@ proof fn lemma_cpu_private_remove_edge(sw1: SoftwareView, hw: HardwareView, regi
     assert(!from_sw.s2_shared_pages.contains(page));
     assert(d_next =~= d.insert(key));
     assert(to_sw.s2_map =~= from_sw.s2_map.remove(key));
-    assert forall|q: VmPageKey| #[trigger] to_sw.s2_map.contains_key(q) implies to_sw.s2_map[q].page
-        != page by {
-        assert(sw1.s2_map.contains_key(q));
-        assert(!d_next.contains(q));
-        assert(to_sw.s2_map[q] == sw1.s2_map[q]);
-        if region.entries().contains_key(q) {
-            assert(sw1.s2_map[q] == region.entries()[q]);
-            if sw1.s2_map[q].page == page {
-                assert(q.vm == vm);
-                assert(region.gpa_base <= q.gpa.0 < region.gpa_base + region.count);
-                assert(region.entries()[q].page == page);
-                assert(region.entries()[q].page.0 == (region.phys_base + q.gpa.0
-                    - region.gpa_base) as nat);
-                assert(page.0 == region.phys_base + k);
-                assert((region.phys_base + q.gpa.0 - region.gpa_base) as nat == region.phys_base
-                    + k);
-                assert(q.gpa.0 == region.gpa_base + k) by (nonlinear_arith)
-                    requires
-                        region.gpa_base <= q.gpa.0,
-                        region.phys_base + q.gpa.0 - region.gpa_base == region.phys_base + k,
-                ;
-                assert(q == key);
-                assert(d_next.contains(q));
-                assert(false);
-            }
-        } else {
-            assert(!region.pages().contains(sw1.s2_map[q].page));
-        }
-    }
-    assert(sw1.s2_private_pages[vm].difference(phys_prefix(region, k)).remove(page)
-        =~= sw1.s2_private_pages[vm].difference(phys_prefix(region, (k + 1) as nat)));
-    assert(from_sw.s2_private_pages.insert(vm, from_sw.s2_private_pages[vm].remove(page))
-        =~= to_sw.s2_private_pages);
+    lemma_private_pages_after_unmap_step(
+        sw1.s2_private_pages,
+        from_sw.s2_map,
+        to_sw.s2_map,
+        vm,
+        phys_prefix(region, k),
+        key,
+        page,
+    );
     assert(SoftwareView::unmap_s2_private_step(from_sw, to_sw, vm, gpa, page));
 
     assert(to_hw.s2map =~= from_hw.s2map.remove(key));
@@ -1185,13 +1165,9 @@ proof fn lemma_cpu_private_remove_partial_wf(
         assert(entry_prefix(region, 0).dom() =~= Set::<VmPageKey>::empty());
         assert(tlb_prefix_keys(region, 0) =~= Set::<TlbKey>::empty());
         assert(cpu_private_remove_partial(sw1, region, 0) == sw1) by {
-            assert(sw1.s2_private_pages[region.vm].difference(phys_prefix(region, 0))
-                =~= sw1.s2_private_pages[region.vm]);
-            assert(sw1.s2_private_pages.insert(
-                region.vm,
-                sw1.s2_private_pages[region.vm].difference(phys_prefix(region, 0)),
-            ) =~= sw1.s2_private_pages);
-            assert(sw1.s2_map.remove_keys(entry_prefix(region, 0).dom()) =~= sw1.s2_map);
+            let post_map = sw1.s2_map.remove_keys(entry_prefix(region, 0).dom());
+            assert(post_map =~= sw1.s2_map);
+            lemma_private_pages_after_unmap_empty(sw1.s2_private_pages, post_map, region.vm);
         }
         assert(hw_unmapped(hw, region, 0) == hw) by {
             assert(hw.tlb.remove_keys(tlb_prefix_keys(region, 0)) =~= hw.tlb);
@@ -1237,13 +1213,9 @@ pub proof fn lemma_cpu_remove_private_region_machine_trace(
     lemma_cpu_private_remove_partial_wf(sw1, hw, region, 0);
     lemma_sw_machine_wf_equiv(sw1, hw);
     assert(cpu_private_remove_partial(sw1, region, 0) == sw1) by {
-        assert(sw1.s2_private_pages[region.vm].difference(phys_prefix(region, 0))
-            =~= sw1.s2_private_pages[region.vm]);
-        assert(sw1.s2_private_pages.insert(
-            region.vm,
-            sw1.s2_private_pages[region.vm].difference(phys_prefix(region, 0)),
-        ) =~= sw1.s2_private_pages);
-        assert(sw1.s2_map.remove_keys(entry_prefix(region, 0).dom()) =~= sw1.s2_map);
+        let post_map = sw1.s2_map.remove_keys(entry_prefix(region, 0).dom());
+        assert(post_map =~= sw1.s2_map);
+        lemma_private_pages_after_unmap_empty(sw1.s2_private_pages, post_map, region.vm);
     }
     assert(hw_unmapped(hw, region, 0) == hw) by {
         assert(hw.tlb.remove_keys(tlb_prefix_keys(region, 0)) =~= hw.tlb);
@@ -1760,7 +1732,8 @@ proof fn lemma_iommu_private_insert_edge(
     assert(region.pages().contains(page));
     assert(!phys_prefix(region, k).contains(page));
     assert forall|v: VmId| #[trigger]
-        from_sw.all_vms.contains(v) implies !from_sw.iommu_private_pages[v].contains(page) by {
+        from_sw.all_vms.contains(v) && v != vm
+            implies !from_sw.iommu_private_pages[v].contains(page) by {
         assert(!sw1.iommu_private_pages[v].contains(page));
     }
     assert(forall|v: VmId| #[trigger]
@@ -1883,12 +1856,15 @@ pub open spec fn iommu_private_remove_partial(
     region: Region,
     k: nat,
 ) -> SoftwareView {
+    let post_map = s1.iommu_s2_map.remove_keys(entry_prefix(region, k).dom());
     SoftwareView {
-        iommu_private_pages: s1.iommu_private_pages.insert(
+        iommu_private_pages: private_pages_after_unmap(
+            s1.iommu_private_pages,
+            post_map,
             region.vm,
-            s1.iommu_private_pages[region.vm].difference(phys_prefix(region, k)),
+            phys_prefix(region, k),
         ),
-        iommu_s2_map: s1.iommu_s2_map.remove_keys(entry_prefix(region, k).dom()),
+        iommu_s2_map: post_map,
         ..s1
     }
 }
@@ -1948,39 +1924,15 @@ proof fn lemma_iommu_private_remove_edge(
     assert(!from_sw.iommu_shared_pages.contains(page));
     assert(d_next =~= d.insert(key));
     assert(to_sw.iommu_s2_map =~= from_sw.iommu_s2_map.remove(key));
-    assert forall|q: VmPageKey| #[trigger]
-        to_sw.iommu_s2_map.contains_key(q) implies to_sw.iommu_s2_map[q].page != page by {
-        assert(sw1.iommu_s2_map.contains_key(q));
-        assert(!d_next.contains(q));
-        assert(to_sw.iommu_s2_map[q] == sw1.iommu_s2_map[q]);
-        if region.entries().contains_key(q) {
-            assert(sw1.iommu_s2_map[q] == region.entries()[q]);
-            if sw1.iommu_s2_map[q].page == page {
-                assert(q.vm == vm);
-                assert(region.gpa_base <= q.gpa.0 < region.gpa_base + region.count);
-                assert(region.entries()[q].page == page);
-                assert(region.entries()[q].page.0 == (region.phys_base + q.gpa.0
-                    - region.gpa_base) as nat);
-                assert(page.0 == region.phys_base + k);
-                assert((region.phys_base + q.gpa.0 - region.gpa_base) as nat == region.phys_base
-                    + k);
-                assert(q.gpa.0 == region.gpa_base + k) by (nonlinear_arith)
-                    requires
-                        region.gpa_base <= q.gpa.0,
-                        region.phys_base + q.gpa.0 - region.gpa_base == region.phys_base + k,
-                ;
-                assert(q == key);
-                assert(d_next.contains(q));
-                assert(false);
-            }
-        } else {
-            assert(!region.pages().contains(sw1.iommu_s2_map[q].page));
-        }
-    }
-    assert(sw1.iommu_private_pages[vm].difference(phys_prefix(region, k)).remove(page)
-        =~= sw1.iommu_private_pages[vm].difference(phys_prefix(region, (k + 1) as nat)));
-    assert(from_sw.iommu_private_pages.insert(vm, from_sw.iommu_private_pages[vm].remove(page))
-        =~= to_sw.iommu_private_pages);
+    lemma_private_pages_after_unmap_step(
+        sw1.iommu_private_pages,
+        from_sw.iommu_s2_map,
+        to_sw.iommu_s2_map,
+        vm,
+        phys_prefix(region, k),
+        key,
+        page,
+    );
     assert(SoftwareView::unmap_iommu_private_step(from_sw, to_sw, vm, gpa, page));
 
     assert(to_hw.iommu_s2map =~= from_hw.iommu_s2map.remove(key));
@@ -2019,14 +1971,9 @@ proof fn lemma_iommu_private_remove_partial_wf(
         assert(entry_prefix(region, 0).dom() =~= Set::<VmPageKey>::empty());
         assert(tlb_prefix_keys(region, 0) =~= Set::<TlbKey>::empty());
         assert(iommu_private_remove_partial(sw1, region, 0) == sw1) by {
-            assert(sw1.iommu_private_pages[region.vm].difference(phys_prefix(region, 0))
-                =~= sw1.iommu_private_pages[region.vm]);
-            assert(sw1.iommu_private_pages.insert(
-                region.vm,
-                sw1.iommu_private_pages[region.vm].difference(phys_prefix(region, 0)),
-            ) =~= sw1.iommu_private_pages);
-            assert(sw1.iommu_s2_map.remove_keys(entry_prefix(region, 0).dom())
-                =~= sw1.iommu_s2_map);
+            let post_map = sw1.iommu_s2_map.remove_keys(entry_prefix(region, 0).dom());
+            assert(post_map =~= sw1.iommu_s2_map);
+            lemma_private_pages_after_unmap_empty(sw1.iommu_private_pages, post_map, region.vm);
         }
         assert(iommu_hw_unmapped(hw, region, 0) == hw) by {
             assert(hw.iommu_tlb.remove_keys(tlb_prefix_keys(region, 0)) =~= hw.iommu_tlb);
@@ -2072,13 +2019,9 @@ pub proof fn lemma_iommu_remove_private_region_machine_trace(
     lemma_iommu_private_remove_partial_wf(sw1, hw, region, 0);
     lemma_sw_machine_wf_equiv(sw1, hw);
     assert(iommu_private_remove_partial(sw1, region, 0) == sw1) by {
-        assert(sw1.iommu_private_pages[region.vm].difference(phys_prefix(region, 0))
-            =~= sw1.iommu_private_pages[region.vm]);
-        assert(sw1.iommu_private_pages.insert(
-            region.vm,
-            sw1.iommu_private_pages[region.vm].difference(phys_prefix(region, 0)),
-        ) =~= sw1.iommu_private_pages);
-        assert(sw1.iommu_s2_map.remove_keys(entry_prefix(region, 0).dom()) =~= sw1.iommu_s2_map);
+        let post_map = sw1.iommu_s2_map.remove_keys(entry_prefix(region, 0).dom());
+        assert(post_map =~= sw1.iommu_s2_map);
+        lemma_private_pages_after_unmap_empty(sw1.iommu_private_pages, post_map, region.vm);
     }
     assert(iommu_hw_unmapped(hw, region, 0) == hw) by {
         assert(hw.iommu_tlb.remove_keys(tlb_prefix_keys(region, 0)) =~= hw.iommu_tlb);

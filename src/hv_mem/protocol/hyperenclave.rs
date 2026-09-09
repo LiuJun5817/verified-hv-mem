@@ -503,7 +503,6 @@ impl HyperEnclaveGlobalState {
             region_in_dma_memory(region),
             !state.ghost_zone().iommu_mem_set.regions.contains(region),
             !state.ghost_zone().iommu_mem_set.overlaps_vmem(region),
-            !state.ghost_zone().iommu_mem_set.overlaps_pmem(region),
         ensures
             self.wf(),
             new_state.wf(self.mem_inst_id()),

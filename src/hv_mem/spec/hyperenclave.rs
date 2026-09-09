@@ -185,9 +185,10 @@ pub open spec fn live_shared_regions(
 }
 
 /// Runtime overlap guard used while constructing an enclave. The candidate is
-/// compared with the conservative private-region entry for every live
-/// enclave. Root mappings need no such scan because normal memory is statically
-/// disjoint from both EPC memory and the allocator pool.
+/// compared with the conservative private-region entry for every other live
+/// enclave. Same-enclave physical aliases are permitted. Root mappings need no
+/// such scan because normal memory is statically disjoint from both EPC memory
+/// and the allocator pool.
 pub open spec fn enclave_insert_allowed(
     enclave_private_regions_view: Map<nat, Set<MemoryRegion>>,
     zid: nat,
@@ -197,63 +198,9 @@ pub open spec fn enclave_insert_allowed(
     &&& region_in_enclave_memory(zid, region)
     &&& forall|other_zid: nat, old_region: MemoryRegion|
         enclave_private_regions_view.contains_key(other_zid) && other_zid != root_zone_id()
+            && other_zid != zid
             && #[trigger] enclave_private_regions_view[other_zid].contains(old_region)
             ==> !old_region.spec_overlaps_pmem(region)
-}
-
-/// Specification of the dynamic overlap check used while constructing an
-/// enclave.
-pub open spec fn regions_pmem_nonoverlap(
-    existing: Seq<MemoryRegion>,
-    candidate: MemoryRegion,
-) -> bool {
-    forall|i: int| 0 <= i < existing.len() ==> !existing[i].spec_overlaps_pmem(candidate)
-}
-
-/// Whether all distinct regions in one memory set are physically disjoint.
-pub open spec fn memory_set_regions_pmem_disjoint(mem_set: SpecMemorySet) -> bool {
-    forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
-        mem_set.regions.contains(r1) && #[trigger] mem_set.regions.contains(r2) && r1 != r2
-            ==> !r1.spec_overlaps_pmem(r2)
-}
-
-/// Inserting a physically fresh region preserves pairwise physical disjointness.
-pub proof fn lemma_insert_region_preserves_pmem_disjoint(
-    mem_set: SpecMemorySet,
-    region: MemoryRegion,
-)
-    requires
-        mem_set.wf(),
-        memory_set_regions_pmem_disjoint(mem_set),
-        region.spec_valid(),
-        !mem_set.overlaps_pmem(region),
-    ensures
-        memory_set_regions_pmem_disjoint(mem_set.insert_region(region)),
-{
-    let new_mem_set = mem_set.insert_region(region);
-    assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
-        new_mem_set.regions.contains(r1) && #[trigger] new_mem_set.regions.contains(r2) && r1
-            != r2 implies !r1.spec_overlaps_pmem(r2) by {
-        if r1 == region {
-            r2.lemma_overlaps_pmem_symmetric(region);
-        }
-    }
-}
-
-/// Removing a region preserves pairwise physical disjointness.
-pub proof fn lemma_remove_region_preserves_pmem_disjoint(
-    mem_set: SpecMemorySet,
-    region: MemoryRegion,
-)
-    requires
-        memory_set_regions_pmem_disjoint(mem_set),
-    ensures
-        memory_set_regions_pmem_disjoint(mem_set.remove_region_exact(region)),
-{
-    let new_mem_set = mem_set.remove_region_exact(region);
-    assert(forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
-        new_mem_set.regions.contains(r1) && #[trigger] new_mem_set.regions.contains(r2) && r1
-            != r2 ==> !r1.spec_overlaps_pmem(r2));
 }
 
 /// A valid normal-memory region cannot also be enclave-private memory.
@@ -389,29 +336,20 @@ tokenized_state_machine! {
             }
         }
 
-        /// Dynamic exclusivity invariant for enclave-private physical
-        /// mappings. Normal-memory Shared regions are intentionally excluded.
+        /// Dynamic exclusivity invariant across enclave owners. Physical
+        /// aliases within one enclave are permitted; normal-memory Shared
+        /// regions are intentionally excluded.
         #[invariant]
-        pub fn inv_enclave_regions_pairwise_disjoint(&self) -> bool {
+        pub fn inv_enclave_regions_cross_zone_disjoint(&self) -> bool {
             forall|zid1: nat, zid2: nat, r1: MemoryRegion, r2: MemoryRegion|
                 self.zones.contains_key(zid1) && self.zones.contains_key(zid2)
                     && zid1 != root_zone_id() && zid2 != root_zone_id()
+                    && zid1 != zid2
                     && #[trigger] self.zones[zid1].cpu_mem_set.regions.contains(r1)
                     && #[trigger] self.zones[zid2].cpu_mem_set.regions.contains(r2)
                     && region_in_enclave_memory(zid1, r1)
                     && region_in_enclave_memory(zid2, r2)
-                    && (zid1 != zid2 || r1 != r2)
                     ==> !r1.spec_overlaps_pmem(r2)
-        }
-
-        /// The executable root-IOMMU insertion rejects physical aliases. Keep
-        /// that fact in the TSM so a removed DMA region releases pages exactly
-        /// when its mappings disappear.
-        #[invariant]
-        pub fn inv_root_iommu_regions_pmem_disjoint(&self) -> bool {
-            self.zones.contains_key(root_zone_id()) ==> memory_set_regions_pmem_disjoint(
-                self.zones[root_zone_id()].iommu_mem_set,
-            )
         }
 
         /// Reachable memory sets contain finitely many operation units. This is
@@ -564,7 +502,6 @@ tokenized_state_machine! {
                 require(region_in_dma_memory(region));
                 require(!zone.iommu_mem_set.regions.contains(region));
                 require(!zone.iommu_mem_set.overlaps_vmem(region));
-                require(!zone.iommu_mem_set.overlaps_pmem(region));
                 add zones += [root_zone_id() => zone.iommu_insert_region(region)];
             }
         }
@@ -662,11 +599,11 @@ tokenized_state_machine! {
             assert forall|zid1: nat, zid2: nat, r1: MemoryRegion, r2: MemoryRegion|
                 post.zones.contains_key(zid1) && post.zones.contains_key(zid2)
                     && zid1 != root_zone_id() && zid2 != root_zone_id()
+                    && zid1 != zid2
                     && #[trigger] post.zones[zid1].cpu_mem_set.regions.contains(r1)
                     && #[trigger] post.zones[zid2].cpu_mem_set.regions.contains(r2)
                     && region_in_enclave_memory(zid1, r1)
                     && region_in_enclave_memory(zid2, r2)
-                    && (zid1 != zid2 || r1 != r2)
                     implies !r1.spec_overlaps_pmem(r2) by {
                 let r1_is_new = !pre.zones[zid1].cpu_mem_set.regions.contains(r1);
                 let r2_is_new = !pre.zones[zid2].cpu_mem_set.regions.contains(r2);
@@ -739,7 +676,6 @@ tokenized_state_machine! {
             let old_zone = pre.zones[root_zone_id()];
             assert(old_zone.wf());
             old_zone.iommu_mem_set.lemma_insert_region_wf(region);
-            lemma_insert_region_preserves_pmem_disjoint(old_zone.iommu_mem_set, region);
         }
 
         #[inductive(iommu_remove_region)]
@@ -751,7 +687,6 @@ tokenized_state_machine! {
             let old_zone = pre.zones[root_zone_id()];
             assert(old_zone.wf());
             old_zone.iommu_mem_set.lemma_remove_region_exact_wf(region);
-            lemma_remove_region_preserves_pmem_disjoint(old_zone.iommu_mem_set, region);
         }
 
         #[inductive(iommu_clear_regions)]
