@@ -970,13 +970,8 @@ impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
             assert(self@[loc2] == false);
         };
 
-        // Allocate from the selected child.
-        let mut child = self.sub[i];
-        let res_is_some = child.alloc();
-
-        // assert(forall|loc2:int| (0 <= loc2 < i*T::spec_cap() || (i+1)*T::spec_cap()<= loc2< Self::spec_cap()) ==> self@[loc2] == old(self)@[loc2]);
-
-        self.sub[i] = child;
+        // Allocate in place without copying the selected child allocator.
+        let res_is_some = self.sub[i].alloc();
 
         assert(res_is_some.unwrap() + i * T::spec_cap() < Self::spec_cap()) by (nonlinear_arith)
             requires
@@ -1144,14 +1139,13 @@ impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
 
         let bit_index: usize = key % T::cap();
 
-        let mut child = self.sub[i];
-        child.dealloc(bit_index);
-        assert(child@[bit_index as int]);
-        assert(child.spec_any()) by {
-            child.lemma_bits_nonzero_implies_exists_true();
+        // Free the selected bit without copying its child allocator.
+        self.sub[i].dealloc(bit_index);
+        assert(self.sub[i as int]@[bit_index as int]);
+        assert(self.sub[i as int].spec_any()) by {
+            self.sub[i as int].lemma_bits_nonzero_implies_exists_true();
         };
 
-        self.sub[i] = child;
         self.bitset.set_bit(i as u16, true);
         // Restore well-formedness after the update.
         assert(self.bitset@[i as int] == self.sub[i as int].spec_any());
@@ -1322,8 +1316,7 @@ impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
                 T::cap()
             };
 
-            let mut child = self.sub[i];
-            let ghost old_child = child;
+            let ghost old_child = self.sub[i as int];
             let ghost cap = T::spec_cap() as int;
 
             // Prove that this child range is valid by case analysis.
@@ -1370,13 +1363,6 @@ impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
                         assert(begin < stop);
                     }
                 }
-            }
-
-            // Update the affected child.
-            if val {
-                child.insert(begin..stop);
-            } else {
-                child.remove(begin..stop);
             }
 
             let ghost pre_self = self@;
@@ -1446,7 +1432,14 @@ impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
                 assert(pre_self[loc1] == old(self)@[loc1]);
             };
 
-            self.sub[i] = child;  // i*cap -- (i+1)*cap        begin - stop
+            let ghost before_update = *self;
+            // Update the selected child in place after recording the old parent view.
+            if val {
+                self.sub[i].insert(begin..stop);
+            } else {
+                self.sub[i].remove(begin..stop);
+            }
+            let ghost child = self.sub[i as int];
             self.bitset.set_bit(i as u16, self.sub[i].any());
 
             assert(forall|loc1: int| st <= loc1 < current_end ==> pre_self[loc1] == val);
@@ -1455,7 +1448,13 @@ impl<T: BitAlloc + Copy> BitAlloc for BitAllocCascade16<T> {
             assert(self.bitset@[i as int] == self.sub[i as int].spec_any());
             assert(forall|k: int| 0 <= k < 16 ==> self.sub[k].wf());
 
-            assert(forall|k: int| 0 <= k < 16 ==> self.bitset@[k] == self.sub[k].spec_any());
+            assert forall|k: int| 0 <= k < 16 implies self.bitset@[k] == self.sub[k].spec_any() by {
+                if k != i {
+                    assert(self.sub[k] == before_update.sub[k]);
+                    assert(self.bitset@[k] == before_update.bitset@[k]);
+                    assert(before_update.bitset@[k] == before_update.sub[k].spec_any());
+                }
+            }
 
             proof {
                 self.lemma_maintain_view_indexs_mapping();

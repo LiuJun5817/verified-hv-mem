@@ -6,7 +6,7 @@
 //! - All addresses in `SpecPageTableMem`, including table-map keys and `root`, are physical
 //!   addresses (PA). All table addresses accepted from or returned to `PageTable` are also PA.
 //! - The global allocator returns hypervisor virtual addresses (HVA). Frame permissions and
-//!   `PPtr` accesses are indexed by those HVA values.
+//!   table accesses are indexed by those HVA values.
 //! - `PageTableMem` alone translates between PA and HVA using `hva_to_pa_offset`; the abstract
 //!   model and `PageTable` therefore remain PA-only.
 //! The implementation should refine the specification defined in `spec::memory::PageTableMem`.
@@ -704,7 +704,7 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
             self.invariants(),
     {
         broadcast use BitmapAllocator::lemma_view_len_is_cap;
-        // Recover the HVA used by the allocator, frame permission, and `PPtr`.
+        // Recover the HVA used by the allocator, frame permission, and table access.
 
         let hva = self.pa_to_hva(base);
         let ghost fid = self.paddr_to_fid_spec(base@);
@@ -714,15 +714,12 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
         let tracked frame_perm: Frame4KPerm = client.frame_perms.tracked_remove(fid);
 
         // Convert the permission to table permission
-        let tracked table_perm: Table512Perm = frame4k_perm_to_table512_perm(frame_perm);
+        let tracked mut table_perm: Table512Perm = frame4k_perm_to_table512_perm(frame_perm);
         assert(table_perm.addr() == hva.0);
         assert(table_perm.is_init());
 
-        // `PPtr` dereferences the table through its HVA before allocator deallocation.
-        let pptr = PPtr::<Table512>::from_addr(hva.0);
-        let mut table = pptr.read(Tracked(&table_perm));
-        table.clear();
-        pptr.write(Tracked(&mut table_perm), table);
+        // Clear the table directly through its HVA before allocator deallocation.
+        clear_table512(hva.0, Tracked(&mut table_perm));
 
         let tracked frame_perm: Frame4KPerm = table512_perm_to_frame4k_perm(table_perm);
         proof {
@@ -807,14 +804,11 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
         let tracked mut client = this.client.tracked_take();
         let tracked frame_perm: Frame4KPerm = client.frame_perms.tracked_remove(fid);
 
-        let tracked table_perm: Table512Perm = frame4k_perm_to_table512_perm(frame_perm);
+        let tracked mut table_perm: Table512Perm = frame4k_perm_to_table512_perm(frame_perm);
         assert(table_perm.addr() == root_hva.0);
         assert(table_perm.is_init());
 
-        let pptr = PPtr::<Table512>::from_addr(root_hva.0);
-        let mut table = pptr.read(Tracked(&table_perm));
-        table.clear();
-        pptr.write(Tracked(&mut table_perm), table);
+        clear_table512(root_hva.0, Tracked(&mut table_perm));
 
         let tracked frame_perm: Frame4KPerm = table512_perm_to_frame4k_perm(table_perm);
         proof {
@@ -855,9 +849,9 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
         assert(table_perm.addr() == hva.0);
         assert(table_perm.is_init());
 
-        // Dereference through the HVA; the abstract read remains keyed by PA.
+        // Borrow through the HVA to read one entry without copying the table.
         let pptr = PPtr::<Table512>::from_addr(hva.0);
-        let table = pptr.read(Tracked(table_perm));
+        let table = pptr.borrow(Tracked(table_perm));
         table.index(index)
     }
 
@@ -871,7 +865,7 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
             self.inst_id() == old(self).inst_id(),
             self.invariants(),
     {
-        // Translate the caller's PA to the HVA carried by its permission and used by `PPtr`.
+        // Translate the caller's PA to the HVA carried by its permission and used for access.
         let hva = self.pa_to_hva(base);
         let ghost fid = self.paddr_to_fid_spec(base@);
         // Take the client to get the permission for the frame
@@ -880,15 +874,12 @@ impl<A> PageTableMem<A> where A: BitmapAllocator {
         let tracked frame_perm: Frame4KPerm = client.frame_perms.tracked_remove(fid);
 
         // Convert the permission to table permission
-        let tracked table_perm: Table512Perm = frame4k_perm_to_table512_perm(frame_perm);
+        let tracked mut table_perm: Table512Perm = frame4k_perm_to_table512_perm(frame_perm);
         assert(table_perm.addr() == hva.0);
         assert(table_perm.is_init());
 
-        // Dereference through the HVA; the abstract write remains keyed by PA.
-        let pptr = PPtr::<Table512>::from_addr(hva.0);
-        let mut table = pptr.read(Tracked(&table_perm));
-        table.set(index, value);
-        pptr.write(Tracked(&mut table_perm), table);
+        // Update only the selected entry through the HVA; the abstract write remains keyed by PA.
+        write_table512_entry(hva.0, index, value, Tracked(&mut table_perm));
 
         let tracked frame_perm: Frame4KPerm = table512_perm_to_frame4k_perm(table_perm);
         proof {

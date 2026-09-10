@@ -2254,6 +2254,36 @@ impl<E> SpecPageTable<E> where E: PageTableEntry {
         }
     }
 
+    /// Removing a mapping never changes tables above the traversal start.
+    pub proof fn lemma_remove_preserves_lower_tables(
+        self,
+        vbase: SpecVAddr,
+        base: SpecPAddr,
+        level: nat,
+        base2: SpecPAddr,
+    )
+        requires
+            self.wf(),
+            self.pt_mem.contains_table_with_level(base, level),
+            level < self.constants.arch.level_count(),
+            self.pt_mem.contains_table(base2),
+            self.pt_mem.level(base2) < level,
+        ensures
+            self.remove(vbase, base, level).0.pt_mem.contains_table(base2),
+            self.remove(vbase, base, level).0.pt_mem.level(base2) == self.pt_mem.level(base2),
+            self.remove(vbase, base, level).0.pt_mem.contents[base2] == self.pt_mem.contents[base2],
+        decreases self.constants.arch.level_count() - level,
+    {
+        let idx = self.constants.arch.pte_index(vbase, level);
+        assert(self.pt_mem.accessible(base, idx));
+        let pte = E::spec_from_u64(self.pt_mem.read(base, idx));
+        if self.pte_points_to_table(pte, level) {
+            self.lemma_remove_preserves_lower_tables(vbase, pte.spec_addr(), level + 1, base2);
+        } else {
+            assert(base2 != base);
+        }
+    }
+
     /// Lemma. `remove` only modifies tables that lie on the remove path for `vbase`.
     /// Tables outside the path are preserved unchanged.
     pub proof fn lemma_remove_preserves_tables_outside_chain(

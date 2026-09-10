@@ -46,8 +46,8 @@ impl<A, E> PageTable<A> for ExPageTable<A, E> where A: BitmapAllocator, E: PageT
         E::spec_supports_attr(attr)
     }
 
-    fn constants(&self) -> (res: PTConstants) {
-        let res = self.0.constants.clone();
+    fn constants(&self) -> (res: &PTConstants) {
+        let res = &self.0.constants;
         proof {
             let view = self.0.view();
             view.construct_node_facts(view.pt_mem.root, 0);

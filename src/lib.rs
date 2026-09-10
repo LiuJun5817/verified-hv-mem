@@ -1,4 +1,4 @@
-// #![verifier::deprecated_postcondition_mut_ref_style(true)]
+#![cfg_attr(verus_keep_ghost, verifier::deprecated_postcondition_mut_ref_style(true))]
 #![no_std]
 #![allow(unused)]
 use core::panic;

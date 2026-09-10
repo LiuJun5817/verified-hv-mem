@@ -163,8 +163,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, HyperEnclaveProtocol, I, D, IOPT,
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
 
-        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
-            || mem_set.overlaps_pmem(&region) {
+        if mem_set.overlaps_vmem_or_pmem(&region) {
             self.unlock_write(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }
@@ -441,8 +440,7 @@ impl<PT, M, A, I, D, IOPT, IOM> Zone<PT, M, A, HyperEnclaveProtocol, I, D, IOPT,
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: ZoneRwContent<M, HyperEnclaveProtocol, D, IOM> = token.get();
 
-        if mem_set.overlaps_vmem(&region) || mem_set.has_region_starting_at(region.vstart)
-            || mem_set.overlaps_pmem(&region) {
+        if mem_set.overlaps_vmem_or_pmem(&region) {
             self.unlock_write_iommu(mem_set, RwWriteGuard { handle, token: Tracked(content) });
             return Err(());
         }

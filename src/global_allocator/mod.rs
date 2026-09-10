@@ -965,7 +965,7 @@ impl<A: BitmapAllocator> InvariantPredicate<AllocKey, MutexContent<A>> for Alloc
 ///   PCell<A>   (exec bitmap)     ← accessed only while lock held
 ///
 /// When a thread holds the Mutex it also holds the `PointsTo<A>` token, which
-/// it uses to borrow the PCell's exec value via take()/put().
+/// it uses to access the PCell's exec value while holding the lock.
 ///
 /// Clients hold their own ClientState token completely outside the lock, so
 /// `Client::borrow_frame` is always lock-free (no CAS, no syscall).
@@ -974,9 +974,9 @@ impl<A: BitmapAllocator> InvariantPredicate<AllocKey, MutexContent<A>> for Alloc
 /// Thread 0              Thread 1              Client (any thread)
 ///   alloc()               alloc()               borrow_frame()
 ///     lock ──────────┐      lock (spins)          no lock needed ✓
-///     PCell::take()  │      ...
+///     borrow_mut()   │      ...
 ///     bitmap.alloc() │
-///     PCell::put()   │
+///     end borrow     │
 ///     ghost update   │
 ///     unlock ────────┘
 ///                           lock ──────────┐
@@ -1191,13 +1191,14 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         let MutexGuard { handle, token } = guard;
         let tracked mut content = token.get();
 
-        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
-        // The free pool is non-empty (design assumption: infinitely many slots).
-        // We assume bitmap.alloc() succeeds and unwrap the result.
-        assume(exists|i: int| 0 <= i < A::spec_cap() && bitmap@[i]);
-
-        let idx = bitmap.alloc().unwrap();
-        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
+        // Modify the bitmap in place instead of moving the entire allocator onto the stack.
+        let idx = {
+            let bitmap = self.bitmap.borrow_mut(Tracked(&mut content.bitmap_perm));
+            // The free pool is non-empty (design assumption: infinitely many slots).
+            // We assume bitmap.alloc() succeeds and unwrap the result.
+            assume(exists|i: int| 0 <= i < A::spec_cap() && bitmap@[i]);
+            bitmap.alloc().unwrap()
+        };
 
         let tracked new_client;
         proof {
@@ -1265,10 +1266,10 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         let MutexGuard { handle, token } = guard;
         let tracked mut content = token.get();
 
-        // Return the frame to the exec bitmap via PCell.
+        // Return the frame to the exec bitmap in place via PCell.
         // bitmap_perm belongs to self.bitmap — guaranteed by AllocKey::cell_id in the
         // mutex invariant and self.wf();
-        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
+        let bitmap = self.bitmap.borrow_mut(Tracked(&mut content.bitmap_perm));
         // The bit must be 0 (allocated) because client.owns(fid); justified by the
         // TSM disjointness invariant between free_set and client_sets.
         proof {
@@ -1289,7 +1290,6 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
             assert(!bitmap@[fid as int]);
         }
         bitmap.dealloc(fid);
-        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
 
         let tracked new_client;
         proof {

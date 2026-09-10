@@ -436,6 +436,27 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         false
     }
 
+    fn overlaps_vmem_or_pmem(&self, region: &MemoryRegion) -> (res: bool) {
+        proof {
+            self.lemma_invariants_implies_wf();
+            self@.lemma_same_start_implies_vmem_overlap(*region);
+        }
+        for i in 0..self.regions.len()
+            invariant
+                0 <= i <= self.regions.len(),
+                region.spec_valid(),
+                self.invariants(),
+                forall|j: int| #![auto] 0 <= j < i ==> !self.regions[j].spec_overlaps_vmem(*region),
+                forall|j: int| #![auto] 0 <= j < i ==> !self.regions[j].spec_overlaps_pmem(*region),
+        {
+            let r = &self.regions[i];
+            if r.overlaps_vmem(region) || r.overlaps_pmem(region) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn has_region_starting_at(&self, v: VAddr) -> (res: bool) {
         for i in 0..self.regions.len()
             invariant
