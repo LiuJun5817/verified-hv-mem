@@ -331,6 +331,120 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
         }
     }
 
+    /// Remove a mapping and reclaim empty descendants during the same walk.
+    /// On success, the flag reports whether the current non-root table is empty.
+    /// The persistent root is never scanned and always returns false.
+    pub fn remove_and_prune(
+        &mut self,
+        allocator: &GlobalAllocator<A>,
+        vbase: VAddr,
+        base: PAddr,
+        level: usize,
+    ) -> (res: PagingResult<(Frame, bool)>)
+        requires
+            allocator.invariants(),
+            old(self).inst_id() == allocator.inst_id(),
+            old(self).pt_mem.invariants(),
+            old(self)@.wf(),
+            level < old(self).arch().level_count(),
+            old(self).pt_mem@.contains_table_with_level(base@, level as nat),
+        ensures
+            ({
+                let (removed, spec_res) = old(self)@.remove(vbase@, base@, level as nat);
+                &&& self@ == if spec_res is Ok {
+                    removed.prune(vbase@, base@, level as nat)
+                } else {
+                    old(self)@
+                }
+                &&& spec_res == match res {
+                    Ok((frame, _)) => Ok(frame@),
+                    Err(()) => Err(()),
+                }
+            }),
+            self.inst_id() == old(self).inst_id(),
+            self.pt_mem.invariants(),
+            self@.wf(),
+            self.constants@ == old(self).constants@,
+            self.pt_mem@.contains_table_with_level(base@, level as nat),
+            res is Ok && level > 0 ==> res->Ok_0.1 == self@.is_table_empty(base@),
+            res is Err ==> old(self)@ == self@,
+        decreases old(self).arch().level_count() - level as nat,
+    {
+        broadcast use crate::page_table::pte::group_pte_lemmas;
+
+        let ghost before = self@;
+        proof {
+            before.lemma_remove_preserves_wf(vbase@, base@, level as nat);
+            before.lemma_remove_preserves_old_tables(vbase@, base@, level as nat, base@);
+            let removed = before.remove(vbase@, base@, level as nat).0;
+            removed.lemma_prune_preserves_wf(vbase@, base@, level as nat);
+            removed.lemma_prune_preserves_lower_tables(vbase@, base@, level as nat, base@);
+        }
+        let idx = self.constants.arch.pte_index(vbase, level);
+        assert(self.pt_mem@.accessible(base@, idx as nat));
+        let pte = E::from_u64(self.pt_mem.read(base, idx));
+        if !pte.valid() {
+            return Err(());
+        }
+        let frame = if level >= self.constants.arch.level_count() - 1 || pte.huge() {
+            let size = self.constants.arch.frame_size(level);
+            if !vbase.aligned(size.as_usize()) {
+                return Err(());
+            }
+            let frame = Frame { base: pte.addr(), size, attr: pte.attr() };
+            self.pt_mem.write(base, idx, E::empty().to_u64());
+            frame
+        } else {
+            proof {
+                before.lemma_remove_preserves_lower_tables(
+                    vbase@, pte.spec_addr(), level as nat + 1, base@,
+                );
+                before.lemma_remove_preserves_old_tables(
+                    vbase@, pte.spec_addr(), level as nat + 1, pte.spec_addr(),
+                );
+                let removed = before.remove(vbase@, pte.spec_addr(), level as nat + 1).0;
+                removed.lemma_prune_preserves_lower_tables(
+                    vbase@, pte.spec_addr(), level as nat + 1, base@,
+                );
+                removed.lemma_prune_preserves_lower_tables(
+                    vbase@, pte.spec_addr(), level as nat + 1, pte.spec_addr(),
+                );
+            }
+            match self.remove_and_prune(allocator, vbase, pte.addr(), level + 1) {
+                Err(()) => return Err(()),
+                Ok((frame, child_empty)) => {
+                    if child_empty {
+                        self.pt_mem.dealloc_table(allocator, pte.addr());
+                        self.pt_mem.write(base, idx, E::empty().to_u64());
+                        frame
+                    } else {
+                        // The retained child keeps this table nonempty, so no scan is needed.
+                        assert(self.pt_mem@.read(base@, idx as nat) == before.pt_mem.read(base@, idx as nat));
+                        assert(!self@.is_table_empty(base@));
+                        return Ok((frame, false));
+                    }
+                },
+            }
+        };
+        // The root is retained. For other tables, a live neighbor proves nonemptiness
+        // without scanning the prefix cleared by sequential removals.
+        if level == 0 {
+            return Ok((frame, false));
+        }
+        let entry_count = self.constants.arch.entry_count(level);
+        if idx + 1 < entry_count {
+            assert(self.pt_mem@.accessible(base@, (idx + 1) as nat));
+            let neighbor = E::from_u64(self.pt_mem.read(base, idx + 1));
+            if neighbor.valid() {
+                assert(!self@.is_table_empty(base@));
+                return Ok((frame, false));
+            }
+        }
+        // A missing or invalid neighbor gives no answer; check the entire table.
+        let empty = self.is_table_empty(base, level);
+        Ok((frame, empty))
+    }
+
     /// Recursively deallocate empty tables along `vaddr` from `base`.
     pub fn prune(&mut self, allocator: &GlobalAllocator<A>, vaddr: VAddr, base: PAddr, level: usize)
         requires
@@ -520,22 +634,21 @@ impl<A, E> PageTable<A, E> where A: BitmapAllocator, E: PageTableEntry {
             self@.lemma_remove_consistent_with_model(vbase@, root, 0);
             self@.lemma_remove_preserves_root(vbase@, root, 0);
         }
-        let res = self.remove(vbase, self.pt_mem.root, 0);
         proof {
-            self@.construct_node_facts(root, 0);
-            // Ensures #1
-            self@.lemma_prune_preserves_wf(vbase@, root, 0);
-            // Ensures #2
-            self@.lemma_prune_consistent_with_model(vbase@, root, 0);
-            self@.lemma_prune_preserves_root(vbase@, root, 0);
+            let removed = self@.remove(vbase@, root, 0).0;
+            removed.construct_node_facts(root, 0);
+            removed.lemma_prune_preserves_wf(vbase@, root, 0);
+            removed.lemma_prune_consistent_with_model(vbase@, root, 0);
+            removed.lemma_prune_preserves_root(vbase@, root, 0);
         }
-        if res.is_ok() {
-            self.prune(allocator, vbase, self.pt_mem.root, 0);
-            proof {
-                self@.lemma_all_nonempty_above_root_implies();
-            }
+        let res = self.remove_and_prune(allocator, vbase, self.pt_mem.root, 0);
+        match res {
+            Ok((frame, _)) => {
+                proof { self@.lemma_all_nonempty_above_root_implies(); }
+                Ok(frame)
+            },
+            Err(()) => Err(()),
         }
-        res
     }
 }
 

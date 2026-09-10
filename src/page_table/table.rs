@@ -69,6 +69,60 @@ pub type Table512 = Table<512>;
 /// Permission for a 4K byte page table, which points to a `Table512`.
 pub type Table512Perm = PointsTo<Table512>;
 
+/// Update one entry in place through the table's hypervisor virtual address.
+///
+/// Trusted seam: the exclusive permission identifies a valid, initialized table.
+/// The raw store changes exactly one entry; the postcondition records that update
+/// while preserving every other entry and the permission's address.
+#[verifier::external_body]
+#[inline(always)]
+pub(super) fn write_table512_entry(
+    hva: usize,
+    index: usize,
+    value: u64,
+    Tracked(perm): Tracked<&mut Table512Perm>,
+)
+    requires
+        old(perm).addr() == hva,
+        old(perm).is_init(),
+        index < 512,
+    ensures
+        perm.addr() == old(perm).addr(),
+        perm.is_init(),
+        perm.mem_contents().value()@ == old(perm).mem_contents().value()@.update(index as int, value),
+{
+    let table_ptr = hva as *mut Table512;
+    // SAFETY: `perm` grants exclusive access to the initialized table, and the
+    // index is in bounds. Address the field directly without copying the table.
+    unsafe {
+        core::ptr::addr_of_mut!((*table_ptr).entries[index]).write(value);
+    }
+}
+
+/// Clear a table in place through its hypervisor virtual address.
+///
+/// Trusted seam: the exclusive permission identifies a valid, aligned table at
+/// `hva`. The raw write clears that allocation, and the postcondition reflects
+/// the new contents in the permission. All-zero bytes are valid for its `u64` entries.
+#[verifier::external_body]
+#[inline(always)]
+pub(super) fn clear_table512(hva: usize, Tracked(perm): Tracked<&mut Table512Perm>)
+    requires
+        old(perm).addr() == hva,
+        old(perm).is_init(),
+    ensures
+        perm.addr() == old(perm).addr(),
+        perm.is_init(),
+        perm.mem_contents().value().spec_is_empty(),
+{
+    let table_ptr = hva as *mut Table512;
+    // SAFETY: `perm` grants exclusive access to this initialized table. Zero one
+    // whole table (4096 bytes) directly, without copying it onto the stack.
+    unsafe {
+        core::ptr::write_bytes(table_ptr, 0, 1);
+    }
+}
+
 /// Convert a `Frame4KPerm` reference to a `Table512Perm` reference.
 ///
 /// Trusted seam: this permission conversion reinterprets the same 4K allocation

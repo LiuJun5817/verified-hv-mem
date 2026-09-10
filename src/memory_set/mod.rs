@@ -90,6 +90,22 @@ impl SpecMemorySet {
         exists|r: MemoryRegion| self.regions.contains(r) && #[trigger] r.spec_overlaps_pmem(region)
     }
 
+    /// Valid nonempty regions sharing a start necessarily overlap virtually.
+    pub proof fn lemma_same_start_implies_vmem_overlap(self, region: MemoryRegion)
+        requires
+            self.wf(),
+            region.spec_valid(),
+        ensures
+            self.has_region_starting_at(region.vstart@) ==> self.overlaps_vmem(region),
+    {
+        if self.has_region_starting_at(region.vstart@) {
+            let r = choose|r: MemoryRegion| self.regions.contains(r) && r.vstart@ == region.vstart@;
+            assert(r.spec_valid());
+            assert(r.spec_overlaps_vmem(region));
+            assert(self.overlaps_vmem(region));
+        }
+    }
+
     /// Translate a virtual address in the memory set to a physical address, if it is mapped.
     pub open spec fn translate(&self, v: SpecVAddr) -> SpecPAddr
         recommends
@@ -350,6 +366,22 @@ pub trait MemorySet<PT, A, I> where
         ensures
             res == self@.overlaps_pmem(*region),
     ;
+
+    /// Check either address space; a false result also rules out an identical virtual start.
+    fn overlaps_vmem_or_pmem(&self, region: &MemoryRegion) -> (res: bool)
+        requires
+            self.invariants(),
+            region.spec_valid(),
+        ensures
+            res == (self@.overlaps_vmem(*region) || self@.overlaps_pmem(*region)),
+            !res ==> !self@.has_region_starting_at(region.vstart@),
+    {
+        proof {
+            self.lemma_invariants_implies_wf();
+            self@.lemma_same_start_implies_vmem_overlap(*region);
+        }
+        self.overlaps_vmem(region) || self.overlaps_pmem(region)
+    }
 
     /// Check if a region starts at the given virtual address is mapped in the memory set.
     fn has_region_starting_at(&self, v: VAddr) -> (res: bool)

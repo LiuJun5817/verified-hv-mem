@@ -382,12 +382,13 @@ pub trait PageTable<A> where Self: Sized, A: BitmapAllocator {
     /// Whether the concrete entry encoding preserves these attributes.
     spec fn spec_supports_attr(attr: MemAttr) -> bool;
 
-    /// Return the concrete page-table constants used by this implementation.
+    /// Borrow the concrete page-table constants used by this implementation.
     ///
     /// Concrete users such as `VecMemorySet` need the runtime architecture to
     /// choose a mapping granularity, while the abstract contract continues to
-    /// expose only `SpecPTConstants` through `view()`.
-    fn constants(&self) -> (res: PTConstants)
+    /// expose only `SpecPTConstants` through `view()`. Borrowing avoids allocating
+    /// and copying the architecture's level vector for every mapping.
+    fn constants(&self) -> (res: &PTConstants)
         requires
             self.invariants(),
         ensures
