@@ -1,203 +1,102 @@
-//! Host software benchmarks: one Criterion iteration is 100 successful operations.
-//! Run with `cargo bench --bench memory_ops`; see benches/README.md for boundaries.
+//! Identical in hvisor and VeriHyMem; compare.py rejects divergent copies.
+//! Only support/mod.rs adapts the native APIs. One iteration is 100 operations.
+
+mod support;
 
 use std::{
-    alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout},
     hint::black_box,
-    ptr::NonNull,
+    mem::{size_of, MaybeUninit},
     time::{Duration, Instant},
 };
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use verified_hv_mem::{
-    address::{
-        addr::{PAddr, VAddr},
-        frame::{Frame, FrameSize, MemAttr},
-    },
-    bitmap_allocator::bitmap_impl::BitAlloc1M,
-    global_allocator::GlobalAllocator,
-    page_table::{
-        pt_arch::{PTArch, PTArchLevel},
-        Aarch64PTE, ExPageTable, PTConstants, PageTable,
-    },
+use support::{
+    Allocation, Fixture, MapResult, Mapping, QueryResult, Table, UnmapResult, PAGE_SIZE,
+    POOL_FRAMES,
 };
-use vstd::prelude::Tracked;
 
-const PAGE_SIZE: usize = 4096;
-const POOL_FRAMES: usize = 1024;
 const OPERATIONS: usize = 100;
-const TABLE_PA: usize = 0x1000_0000;
-const VIRTUAL_BASE: usize = 0x1000_0000;
-const DATA_PA: usize = 0x6000_0000;
+const GUEST_BASE: usize = 0x1000_0000;
+const QUERY_OFFSET: usize = 17;
 
-type Allocator = GlobalAllocator<BitAlloc1M>;
-type HostPageTable = ExPageTable<BitAlloc1M, Aarch64PTE>;
-
-/// Own the real memory dereferenced by the page-table implementation.
-struct Pool {
-    ptr: NonNull<u8>,
-    layout: Layout,
+fn guest_addr(index: usize) -> usize {
+    GUEST_BASE + index * PAGE_SIZE
 }
 
-impl Pool {
-    fn new() -> Self {
-        let layout = Layout::from_size_align(POOL_FRAMES * PAGE_SIZE, PAGE_SIZE).unwrap();
-        // SAFETY: a nonzero, page-aligned layout; allocation is uniquely owned below.
-        let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
-            .unwrap_or_else(|| handle_alloc_error(layout));
-        let pool = Self { ptr, layout };
-        for page in 0..POOL_FRAMES {
-            // SAFETY: each address lies in the owned allocation. Commit every page
-            // before timing; the allocator requires all initial frame bytes to be zero.
-            unsafe { pool.ptr.as_ptr().add(page * PAGE_SIZE).write_volatile(0) };
-        }
-        pool
-    }
+fn buffer<T>() -> [MaybeUninit<T>; OPERATIONS] {
+    std::array::from_fn(|_| MaybeUninit::uninit())
+}
 
-    fn base(&self) -> usize {
-        self.ptr.as_ptr() as usize
-    }
-
-    fn frame_index(&self, addr: PAddr) -> usize {
-        let offset = addr.0.checked_sub(self.base()).expect("frame below pool");
-        assert!(offset < self.layout.size(), "frame outside pool");
-        assert_eq!(offset % PAGE_SIZE, 0, "unaligned frame");
-        offset / PAGE_SIZE
-    }
-
-    fn assert_zero_frame(&self, addr: PAddr) {
-        let index = self.frame_index(addr);
-        // SAFETY: checked in-pool frame; callers read only while no operation
-        // mutates this frame. All allocation bytes were initialized by alloc_zeroed.
-        let bytes = unsafe {
-            std::slice::from_raw_parts(self.ptr.as_ptr().add(index * PAGE_SIZE), PAGE_SIZE)
-        };
-        assert!(bytes.iter().all(|&byte| byte == 0), "frame was not cleared");
+fn check_allocations(fixture: &Fixture, frames: &[MaybeUninit<Allocation>; OPERATIONS]) {
+    let mut seen = [false; POOL_FRAMES];
+    for slot in frames {
+        // SAFETY: called only after every allocation slot was initialized.
+        let frame = unsafe { slot.assume_init_ref() };
+        assert_eq!(support::allocation_size(frame), PAGE_SIZE);
+        let index = fixture.frame_index(frame);
+        assert!(!seen[index], "duplicate allocation");
+        seen[index] = true;
     }
 }
 
-impl Drop for Pool {
-    fn drop(&mut self) {
-        // SAFETY: matching allocation/layout; the allocator and page table have
-        // already been dropped before their backing pool on the normal path.
-        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
+fn prepare_mappings(fixture: &Fixture, table: &mut Table, mappings: &[Mapping; OPERATIONS]) {
+    for mapping in mappings {
+        support::check_map(&fixture.map(table, mapping));
     }
 }
 
-struct Fixture {
-    // Field drop order keeps the backing allocation alive until after the allocator.
-    allocator: Allocator,
-    pool: Pool,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        let pool = Pool::new();
-        let allocator = Allocator::default(PAddr(pool.base()));
-        // Runtime-only harness: pool supplies real, zeroed frames. Only the
-        // erased Verus permission map is assumed; library code is unchanged.
-        allocator.init(POOL_FRAMES, Tracked::assume_new());
-        Self { allocator, pool }
-    }
-
-    /// Check ownership recovery, uniqueness, bounds and zeroing outside timing.
-    /// Call only when no page table or allocated frame remains live.
-    fn assert_all_frames_returned(&self) {
-        let mut client = self.allocator.register_client();
-        let mut frames = Vec::with_capacity(POOL_FRAMES);
-        let mut seen = [false; POOL_FRAMES];
-        for _ in 0..POOL_FRAMES {
-            let (frame, next) = self.allocator.alloc(client);
-            client = next;
-            let index = self.pool.frame_index(frame);
-            assert!(!seen[index], "allocator returned a duplicate frame");
-            seen[index] = true;
-            self.pool.assert_zero_frame(frame);
-            frames.push(frame);
-        }
-        assert!(seen.iter().all(|&present| present));
-        for frame in frames {
-            client = self.allocator.dealloc(client, frame);
-        }
-    }
-
-    fn constants(&self) -> PTConstants {
-        PTConstants {
-            arch: PTArch(
-                [FrameSize::Size1G, FrameSize::Size2M, FrameSize::Size4K]
-                    .into_iter()
-                    .map(|frame_size| PTArchLevel {
-                        entry_count: 512,
-                        frame_size,
-                    })
-                    .collect(),
-            ),
-            huge_pages: false,
-            // Encode low simulated PAs, then translate back to real host pointers
-            // inside PageTableMem. This avoids encoding high host address bits.
-            hva_to_pa_offset: self.pool.base().checked_sub(TABLE_PA).unwrap(),
-        }
-    }
-}
-
-fn vaddr(index: usize) -> VAddr {
-    VAddr(VIRTUAL_BASE + index * PAGE_SIZE)
-}
-
-fn frame(index: usize) -> Frame {
-    Frame {
-        // Leaf data addresses are only encoded/query-checked, never dereferenced.
-        base: PAddr(DATA_PA + index * PAGE_SIZE),
-        size: FrameSize::Size4K,
-        attr: MemAttr::new(true, true, false, false),
-    }
-}
-
-fn check_frame(actual: &Frame, index: usize) {
-    let expected = frame(index);
-    assert_eq!(actual.base.0, expected.base.0);
-    assert!(actual.size == expected.size);
-    assert!(actual.attr == expected.attr);
-}
-
-fn prepare_mappings(pt: &mut HostPageTable, allocator: &Allocator) {
+fn check_mappings(fixture: &Fixture, table: &Table) {
     for index in 0..OPERATIONS {
-        pt.map(allocator, vaddr(index), frame(index))
-            .expect("map failed");
+        support::check_query(
+            &fixture.query(table, guest_addr(index) + QUERY_OFFSET),
+            index,
+            QUERY_OFFSET,
+        );
     }
 }
 
-fn clear_mappings(pt: &mut HostPageTable, allocator: &Allocator) {
+fn clear_mappings(fixture: &Fixture, table: &mut Table, mappings: &[Mapping; OPERATIONS]) {
+    for (index, mapping) in mappings.iter().enumerate() {
+        support::check_unmap(&fixture.unmap(table, mapping), index);
+    }
+}
+
+fn check_unmapped(fixture: &Fixture, table: &Table) {
     for index in 0..OPERATIONS {
-        let removed = pt.unmap(allocator, vaddr(index)).expect("unmap failed");
-        check_frame(&removed, index);
+        support::check_missing(&fixture.query(table, guest_addr(index) + QUERY_OFFSET));
     }
 }
 
 fn allocator_benches(c: &mut Criterion) {
+    // Native API layouts may differ; no extra Option/Result wraps these values.
+    eprintln!(
+        "native sizes: allocation={} map_result={} unmap_result={} query_result={}",
+        size_of::<Allocation>(),
+        size_of::<MapResult>(),
+        size_of::<UnmapResult>(),
+        size_of::<QueryResult>()
+    );
     let fixture = Fixture::new();
     fixture.assert_all_frames_returned();
-    let allocator = black_box(&fixture.allocator);
+    let fixture = black_box(&fixture);
     let mut group = c.benchmark_group("allocator");
     group.throughput(Throughput::Elements(OPERATIONS as u64));
 
     group.bench_function(BenchmarkId::new("alloc", OPERATIONS), |b| {
         b.iter_custom(|rounds| {
-            let mut client = allocator.register_client();
-            let mut frames = [PAddr(0); OPERATIONS];
+            let mut client = fixture.new_client();
+            let mut frames = buffer::<Allocation>();
             let mut elapsed = Duration::ZERO;
             for _ in 0..rounds {
                 let start = Instant::now();
                 for slot in &mut frames {
-                    let (allocated, next) = allocator.alloc(client);
-                    client = next;
-                    *slot = allocated;
+                    slot.write(fixture.alloc(&mut client));
                 }
                 elapsed += start.elapsed();
-                black_box(&frames);
-                // Reset outside timing; never benchmark allocator exhaustion.
-                for &allocated in &frames {
-                    client = allocator.dealloc(client, allocated);
+                check_allocations(fixture, black_box(&frames));
+                for slot in &mut frames {
+                    // SAFETY: initialized above; ownership is consumed once.
+                    fixture.dealloc(&mut client, unsafe { slot.assume_init_read() });
                 }
             }
             elapsed
@@ -206,22 +105,22 @@ fn allocator_benches(c: &mut Criterion) {
 
     group.bench_function(BenchmarkId::new("dealloc", OPERATIONS), |b| {
         b.iter_custom(|rounds| {
-            let mut client = allocator.register_client();
-            let mut frames = [PAddr(0); OPERATIONS];
+            let mut client = fixture.new_client();
+            let mut frames = buffer::<Allocation>();
             let mut elapsed = Duration::ZERO;
             for _ in 0..rounds {
                 for slot in &mut frames {
-                    let (allocated, next) = allocator.alloc(client);
-                    client = next;
-                    *slot = allocated;
+                    slot.write(fixture.alloc(&mut client));
                 }
-                let input = black_box(&frames);
+                check_allocations(fixture, &frames);
+                let input = black_box(&mut frames);
                 let start = Instant::now();
-                for &allocated in input {
-                    client = allocator.dealloc(client, allocated);
+                for slot in input {
+                    // SAFETY: initialized above; ownership is consumed once.
+                    fixture.dealloc(&mut client, unsafe { slot.assume_init_read() });
                 }
                 elapsed += start.elapsed();
-                black_box(allocator);
+                black_box(fixture);
             }
             elapsed
         });
@@ -232,94 +131,114 @@ fn allocator_benches(c: &mut Criterion) {
 
 fn page_table_benches(c: &mut Criterion) {
     let fixture = Fixture::new();
-    let allocator = black_box(&fixture.allocator);
-    let mut pt = HostPageTable::new(allocator, fixture.constants());
-    let root_hva = PAddr(pt.root().0 + fixture.constants().hva_to_pa_offset);
+    fixture.assert_all_frames_returned();
+    let fixture = black_box(&fixture);
+    let mappings: [Mapping; OPERATIONS] = std::array::from_fn(support::mapping);
+    let addresses: [usize; OPERATIONS] =
+        std::array::from_fn(|index| guest_addr(index) + QUERY_OFFSET);
 
-    // Check the real library path, translation, repeated reuse and empty root
-    // before collecting samples. These checks are not part of measured work.
+    let mut table = fixture.new_table();
+    check_unmapped(fixture, &table);
     for _ in 0..2 {
-        prepare_mappings(&mut pt, allocator);
+        prepare_mappings(fixture, &mut table, &mappings);
         for index in 0..OPERATIONS {
-            let (base, actual) = pt.query(VAddr(vaddr(index).0 + 17)).unwrap();
-            assert_eq!(base.0, vaddr(index).0);
-            check_frame(&actual, index);
+            for offset in [0, QUERY_OFFSET, PAGE_SIZE - 1] {
+                support::check_query(
+                    &fixture.query(&table, guest_addr(index) + offset),
+                    index,
+                    offset,
+                );
+            }
         }
-        clear_mappings(&mut pt, allocator);
-        for index in 0..OPERATIONS {
-            assert!(pt.query(vaddr(index)).is_err());
+        for addr in [GUEST_BASE - 1, guest_addr(OPERATIONS)] {
+            support::check_missing(&fixture.query(&table, addr));
         }
-        fixture.pool.assert_zero_frame(root_hva);
+        clear_mappings(fixture, &mut table, &mappings);
+        check_unmapped(fixture, &table);
     }
+    fixture.destroy_table(table);
+    fixture.assert_all_frames_returned();
 
     let mut group = c.benchmark_group("page_table");
     group.throughput(Throughput::Elements(OPERATIONS as u64));
     group.bench_function(BenchmarkId::new("map_page", OPERATIONS), |b| {
+        let input = black_box(&mappings);
         b.iter_custom(|rounds| {
-            let mut results = [Ok(()); OPERATIONS];
+            let mut results = buffer::<MapResult>();
             let mut elapsed = Duration::ZERO;
             for _ in 0..rounds {
+                // Both implementations start with a fresh root every batch.
+                let mut table = fixture.new_table();
                 let start = Instant::now();
-                for (index, result) in results.iter_mut().enumerate() {
-                    *result = pt.map(allocator, black_box(vaddr(index)), black_box(frame(index)));
+                for (mapping, slot) in input.iter().zip(&mut results) {
+                    slot.write(fixture.map(&mut table, black_box(mapping)));
                 }
                 elapsed += start.elapsed();
-                assert!(black_box(&results).iter().all(Result::is_ok), "map failed");
-                clear_mappings(&mut pt, allocator);
+                for slot in black_box(&mut results) {
+                    // SAFETY: every result was initialized and is consumed once.
+                    support::check_map(&unsafe { slot.assume_init_read() });
+                }
+                check_mappings(fixture, &table);
+                clear_mappings(fixture, &mut table, input);
+                check_unmapped(fixture, &table);
+                fixture.destroy_table(table);
             }
             elapsed
         });
     });
 
     group.bench_function(BenchmarkId::new("unmap_page", OPERATIONS), |b| {
+        let input = black_box(&mappings);
         b.iter_custom(|rounds| {
-            let mut results: [Result<Frame, ()>; OPERATIONS] = std::array::from_fn(|_| Err(()));
+            let mut results = buffer::<UnmapResult>();
             let mut elapsed = Duration::ZERO;
             for _ in 0..rounds {
-                prepare_mappings(&mut pt, allocator);
+                let mut table = fixture.new_table();
+                prepare_mappings(fixture, &mut table, input);
+                check_mappings(fixture, &table);
                 let start = Instant::now();
-                for (index, result) in results.iter_mut().enumerate() {
-                    *result = pt.unmap(allocator, black_box(vaddr(index)));
+                for (mapping, slot) in input.iter().zip(&mut results) {
+                    slot.write(fixture.unmap(&mut table, black_box(mapping)));
                 }
                 elapsed += start.elapsed();
-                for (index, result) in black_box(&results).iter().enumerate() {
-                    check_frame(result.as_ref().expect("unmap failed"), index);
+                for (index, slot) in black_box(&mut results).iter_mut().enumerate() {
+                    // SAFETY: every result was initialized and is consumed once.
+                    support::check_unmap(&unsafe { slot.assume_init_read() }, index);
                 }
+                check_unmapped(fixture, &table);
+                fixture.destroy_table(table);
             }
             elapsed
         });
     });
 
-    // Query hits in an already populated table; setup and teardown are excluded.
-    // Keep the same mappings across samples because query does not mutate them.
-    prepare_mappings(&mut pt, allocator);
+    let mut table = fixture.new_table();
+    prepare_mappings(fixture, &mut table, &mappings);
+    check_mappings(fixture, &table);
     group.bench_function(BenchmarkId::new("query", OPERATIONS), |b| {
-        let table = black_box(&pt);
+        let table = black_box(&table);
+        let input = black_box(&addresses);
         b.iter_custom(|rounds| {
-            let mut results: [Result<(VAddr, Frame), ()>; OPERATIONS] =
-                std::array::from_fn(|_| Err(()));
+            let mut results = buffer::<QueryResult>();
             let mut elapsed = Duration::ZERO;
             for _ in 0..rounds {
                 let start = Instant::now();
-                for (index, result) in results.iter_mut().enumerate() {
-                    // Use an in-page offset to exercise query's containing-page lookup.
-                    *result = table.query(black_box(VAddr(vaddr(index).0 + 17)));
+                for (addr, slot) in input.iter().zip(&mut results) {
+                    slot.write(fixture.query(table, black_box(*addr)));
                 }
                 elapsed += start.elapsed();
-                for (index, result) in black_box(&results).iter().enumerate() {
-                    let (base, actual) = result.as_ref().expect("query failed");
-                    assert_eq!(base.0, vaddr(index).0);
-                    check_frame(actual, index);
+                for (index, slot) in black_box(&mut results).iter_mut().enumerate() {
+                    // SAFETY: every result was initialized and is consumed once.
+                    support::check_query(&unsafe { slot.assume_init_read() }, index, QUERY_OFFSET);
                 }
             }
             elapsed
         });
     });
-    clear_mappings(&mut pt, allocator);
+    clear_mappings(fixture, &mut table, &mappings);
+    check_unmapped(fixture, &table);
+    fixture.destroy_table(table);
     group.finish();
-    fixture.pool.assert_zero_frame(root_hva);
-    // PageTable::drop is an explicit trait method, not Rust's automatic Drop.
-    <HostPageTable as PageTable<BitAlloc1M>>::drop(pt, allocator);
     fixture.assert_all_frames_returned();
 }
 
