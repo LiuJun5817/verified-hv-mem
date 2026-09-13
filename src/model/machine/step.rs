@@ -1,6 +1,7 @@
 use vstd::prelude::*;
 
 use super::state::MachineState;
+#[cfg(verus_keep_ghost)]
 use crate::model::software::private_pages_after_unmap;
 use crate::model::types::{
     CpuId, DataWord, GuestPage, GuestWordAddr, HypervisorOp, MachineAction, PhysPage, S2Entry,

@@ -9,7 +9,9 @@
 //! 2. **lifecycle `wf`-preservation** — `add_vm` / `remove_vm`.
 use vstd::prelude::*;
 
-use super::{private_pages_after_unmap, SoftwareView};
+#[cfg(verus_keep_ghost)]
+use super::private_pages_after_unmap;
+use super::SoftwareView;
 use crate::model::types::{GuestPage, PhysPage, S2Entry, VmId, VmPageKey};
 
 verus! {
