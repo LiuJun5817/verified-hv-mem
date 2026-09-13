@@ -48,7 +48,7 @@ pub struct ZoneKey {
     pub iommu_cell_id: CellId,
     /// `PCell::id()` of the zone's opaque integration payload.
     pub payload_cell_id: CellId,
-    /// Spec (ClosureSpec / BudgetSpec) instance id shared by the whole hypervisor.
+    /// Policy-specification instance ID shared by the whole hypervisor.
     pub mem_inst_id: InstanceId,
     /// Global allocator instance id — must match `M::inst_id()` of the stored memory set.
     pub alloc_inst_id: InstanceId,

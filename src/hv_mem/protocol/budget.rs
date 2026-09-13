@@ -19,9 +19,8 @@ use super::super::spec::budget::*;
 
 /// Per-zone tracked ghost state for `BudgetSpec`.
 ///
-/// Parallel to `ClosureZoneState`, but wraps a `BudgetZoneToken`
-/// (map-sharded `BudgetSpec::zones` entry) instead of a `ClosureZoneToken`.
-/// Stored in the zone-level lock without a separate configured-budget token;
+/// Wraps a map-sharded `BudgetSpec::zones` entry and is stored in the
+/// zone-level lock without a separate configured-budget token;
 /// configured eligibility budgets are accessed through the pure
 /// `private_pages(zid)` and `shared_pages()` functions.
 pub tracked struct BudgetZoneState {
@@ -48,10 +47,9 @@ impl ZoneStateOps for BudgetZoneState {
 // ─── BudgetGlobalState ───────────────────────────────────────────────────────
 /// Global tracked ghost state for `BudgetSpec`.
 ///
-/// Unlike `ClosureGlobalState`, there are no dynamic closure tokens here because
 /// `BudgetSpec` tracks authorization via static Private/Shared eligibility
-/// budgets rather than dynamic classification state. As a result,
-/// `insert_region` does **not** need to acquire the `HvMem` write lock.
+/// budgets rather than dynamic classification state, so `insert_region` does
+/// **not** need to acquire the `HvMem` write lock.
 pub tracked struct BudgetGlobalState {
     /// The `BudgetSpec` instance (constant-sharded; freely duplicable ghost value).
     pub inst: BudgetSpecInstance,

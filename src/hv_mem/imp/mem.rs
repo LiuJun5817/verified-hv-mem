@@ -79,7 +79,7 @@ pub tracked struct HvMemRwContent<PT, M, A, P, I, D = (), IOPT = PT, IOM = M> wh
  {
     /// Permission to read/write the zone-list PCell.
     pub zone_list_perm: PointsTo<Vec<Zone<PT, M, A, P, I, D, IOPT, IOM>>>,
-    /// Protocol-specific global ghost state (e.g. `ClosureGlobalState` for ClosureProtocol).
+    /// Protocol-specific global ghost state.
     pub global_state: P::GlobalState,
     /// CPU MMU live-VM registry token.
     pub cpu_vm_ids_tok: MmuVmIdsToken,

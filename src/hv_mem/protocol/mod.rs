@@ -1,12 +1,10 @@
 //! Ghost protocols used by the policy-generic `Zone` and `HvMem` layers.
 pub mod budget;
-pub mod closure;
 pub mod enclave;
 
 use super::spec::GhostZone;
 use crate::memory_set::SpecMemorySet;
 pub use budget::{BudgetGlobalState, BudgetProtocol, BudgetZoneState};
-pub use closure::{ClosureGlobalState, ClosureProtocol, ClosureZoneState};
 pub use enclave::{EnclaveGlobalState, EnclaveProtocol, EnclaveZoneState};
 
 use vstd::prelude::*;
