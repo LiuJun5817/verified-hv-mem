@@ -1,5 +1,9 @@
 # Matched host memory benchmarks
 
+For region insert/remove and zone-memory create/remove, see
+[region_zone.md](region_zone.md). Those cases have a separate benchmark target
+and runner; the matched allocator/page-table harness below is unchanged.
+
 `memory_ops.rs` is byte-identical to hvisor's
 `tools/memory-bench/benches/memory_ops.rs`. Only `support/mod.rs` adapts the native
 allocator/page-table APIs. Production library code is unchanged.
