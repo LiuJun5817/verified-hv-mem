@@ -2,7 +2,10 @@
 """Run the host region/zone Criterion benchmarks and export per-operation means.
 
 Usage: python3 tools/run_region_zone_bench.py [Criterion filter/options]
-Workload: REGIONS=1 REGION_PAGES=1 ZONE_REGIONS=1; affinity: BENCH_CPU.
+Workload: PREFILL_REGIONS=32 PREFILL_REGION_PAGES=1024 REGION_PAGES=1024
+          ZONE_REGIONS=0; affinity: BENCH_CPU.
+Region cases time one target insertion/removal after background setup.
+ZONE_REGIONS=0 measures empty-zone creation/removal directly.
 Each invocation writes a fresh target/region-zone-bench/runs/<id>/ directory.
 """
 
@@ -37,19 +40,32 @@ def capture(command):
 
 
 def workload_environment():
+    if "REGIONS" in os.environ:
+        raise ValueError(
+            "REGIONS is no longer supported; unset it. Region cases now time "
+            "one operation on a prefilled set: use PREFILL_REGIONS for the "
+            "background region count, PREFILL_REGION_PAGES for background "
+            "region size, and REGION_PAGES for target size."
+        )
     values = {}
-    for name, default, maximum in (
-        ("REGIONS", "1", 4096),
-        ("REGION_PAGES", "1", 32768),
-        ("ZONE_REGIONS", "1", 64),
+    for name, default, minimum, maximum in (
+        ("PREFILL_REGIONS", "32", 1, 4096),
+        ("PREFILL_REGION_PAGES", "1024", 1, 32768),
+        ("REGION_PAGES", "1024", 1, 32768),
+        ("ZONE_REGIONS", "0", 0, 64),
     ):
         value = os.environ.get(name, default)
-        if not re.fullmatch(r"[1-9][0-9]{0,4}", value) or int(value) > maximum:
-            raise ValueError(f"{name} must be an integer from 1 to {maximum}; got {value!r}")
+        if not re.fullmatch(r"0|[1-9][0-9]{0,4}", value) or not minimum <= int(value) <= maximum:
+            raise ValueError(f"{name} must be an integer from {minimum} to {maximum}; got {value!r}")
         values[name] = int(value)
-    for count in ("REGIONS", "ZONE_REGIONS"):
-        if values[count] * values["REGION_PAGES"] > 32768:
-            raise ValueError(f"{count} * REGION_PAGES must not exceed 32768 (128 MiB)")
+    stride = max(values["PREFILL_REGION_PAGES"], values["REGION_PAGES"])
+    if values["PREFILL_REGIONS"] * stride + values["REGION_PAGES"] > 65536:
+        raise ValueError(
+            "PREFILL_REGIONS * max(PREFILL_REGION_PAGES, REGION_PAGES) + "
+            "REGION_PAGES must not exceed 65536 pages (256 MiB address range)"
+        )
+    if values["ZONE_REGIONS"] * values["REGION_PAGES"] > 32768:
+        raise ValueError("ZONE_REGIONS * REGION_PAGES must not exceed 32768 (128 MiB)")
     return values
 
 
@@ -149,11 +165,18 @@ def stream_process(command, log, environment, cpu=None, cargo_json=False):
 
 
 def operation_counts(workload):
-    region_case = f"{workload['REGIONS']}_regions_{workload['REGION_PAGES']}_pages"
-    zone_case = f"{workload['ZONE_REGIONS']}_regions_{workload['REGION_PAGES']}_pages"
+    region_case = (
+        f"prefill_{workload['PREFILL_REGIONS']}_regions_"
+        f"{workload['PREFILL_REGION_PAGES']}_pages/"
+        f"target_{workload['REGION_PAGES']}_pages"
+    )
+    zone_case = (
+        "empty" if workload["ZONE_REGIONS"] == 0
+        else f"{workload['ZONE_REGIONS']}_regions_{workload['REGION_PAGES']}_pages"
+    )
     return {
-        f"region/insert/{region_case}": workload["REGIONS"],
-        f"region/remove/{region_case}": workload["REGIONS"],
+        f"region/insert/{region_case}": 1,
+        f"region/remove/after_insert/{region_case}": 1,
         f"zone_memory/create/{zone_case}": 1,
         f"zone_memory/remove/{zone_case}": 1,
     }
@@ -206,7 +229,9 @@ def write_reports(directory, status, results):
     lines = [
         "# VeriHyMem host region/zone benchmark", "", f"Run status: `{status}`.", "",
         "Host software API costs; real ARM barriers/TLB maintenance are excluded.",
-        "Region times are divided by REGIONS; zone times describe one complete zone operation.",
+        "Each region result times one operation: insertion into a prefilled zone, or removal of the newly inserted target; background setup and cleanup are outside timing.",
+        "Region and zone results each describe one operation per iteration; no region or page-count division is applied.",
+        "Zone cases named `empty` call add_zone/remove_zone directly with no regions or clear passes; populated cases include mapping/clearing their CPU and IOMMU regions.",
         "The statistics below use Criterion's mean and its confidence interval, both in ns/op.",
         "See [environment.json](environment.json) for source, workload, toolchain and affinity, and [criterion.log](criterion.log) for output.", "",
     ]

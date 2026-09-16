@@ -1,6 +1,6 @@
 //! Host fixture for region and zone benchmarks of this checkout.
 //!
-//! Keep the workload and timing boundaries aligned with hvisor/tools/memory-bench.
+//! Derived from hvisor/tools/memory-bench; empty-zone cases use direct lifecycle APIs.
 //!
 //! Region operations retain the production HvMem/zone locks, region metadata,
 //! allocator and AArch64 page tables. Zone cases construct and destroy the
@@ -38,7 +38,8 @@ pub type OpResult = Result<(), ()>;
 pub const PAGE_SIZE: usize = 4096;
 pub const POOL_FRAMES: usize = 1024;
 pub const MAX_REGIONS: usize = 4096;
-pub const MAX_MAPPED_PAGES: usize = 32768;
+pub const MAX_MAPPED_PAGES: usize = 65536;
+pub const MAX_REGION_PAGES: usize = 32768;
 pub const ZONE_ID: usize = 1;
 const TABLE_PA: usize = 0x1000_0000;
 const GUEST_BASE: usize = 0x1000_0000;
@@ -160,6 +161,12 @@ impl Fixture {
         self.memory.add_zone(ZONE_ID, ())
     }
 
+    /// Remove an already empty zone, including both root tables' destruction.
+    #[inline]
+    pub fn remove_empty_zone(&self) -> OpResult {
+        self.memory.remove_zone(ZONE_ID)
+    }
+
     #[inline]
     pub fn insert(&self, mapping: &Mapping) -> OpResult {
         self.memory.insert_region(ZONE_ID, copy_mapping(mapping))
@@ -217,10 +224,32 @@ impl Fixture {
     }
 
     /// Check CPU metadata and actual page-table translations outside timing.
-    pub fn check_mappings(&self, mappings: &[Mapping]) {
+    pub fn check_mappings<'a>(&self, mappings: impl IntoIterator<Item = &'a Mapping>) {
         self.with_sets(|cpu, iommu| {
             check_set(cpu, mappings);
             assert!(iommu.is_empty(), "region fixture has IOMMU mappings");
+            assert!(iommu.pt.query(VAddr(GUEST_BASE)).is_err());
+        });
+    }
+
+    /// Check every target PTE outside timing, including deletion of interior pages.
+    pub fn check_region_pages(&self, mapping: &Mapping, present: bool) {
+        self.with_sets(|cpu, _| {
+            for page in 0..mapping.pages {
+                for offset in [page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1] {
+                    let vaddr = VAddr(mapping.vstart.0 + offset);
+                    let translation = cpu.pt.query(vaddr);
+                    if present {
+                        let (base, frame) = translation.expect("target page is missing");
+                        assert_eq!(base.0, vaddr.0 & !(PAGE_SIZE - 1));
+                        assert_eq!(frame.base.0 + (vaddr.0 - base.0), mapping.pstart.0 + offset);
+                        assert!(frame.size == FrameSize::Size4K, "unexpected huge page");
+                        assert!(frame.attr == mapping.attr, "wrong target page attributes");
+                    } else {
+                        assert!(translation.is_err(), "removed target page remains mapped");
+                    }
+                }
+            }
         });
     }
 
@@ -289,16 +318,21 @@ impl Drop for Fixture {
 
 pub fn mapping(index: usize, pages: usize) -> Mapping {
     assert!(index < MAX_REGIONS, "too many regions");
+    mapping_at(index.checked_mul(pages).unwrap(), pages)
+}
+
+/// Place differently sized regions in fixed, nonoverlapping page slots.
+pub fn mapping_at(start_page: usize, pages: usize) -> Mapping {
     assert!(
-        (1..=MAX_MAPPED_PAGES).contains(&pages),
+        (1..=MAX_REGION_PAGES).contains(&pages),
         "invalid region page count"
     );
-    let end_page = (index + 1).checked_mul(pages).unwrap();
+    let end_page = start_page.checked_add(pages).unwrap();
     assert!(
         end_page <= MAX_MAPPED_PAGES,
-        "mapping exceeds the 128 MiB test range"
+        "mapping exceeds the 256 MiB test range"
     );
-    let offset = index * pages * PAGE_SIZE;
+    let offset = start_page * PAGE_SIZE;
     let region = Mapping {
         vstart: VAddr(GUEST_BASE + offset),
         pstart: PAddr(DATA_PA + offset),
@@ -319,9 +353,10 @@ fn copy_mapping(mapping: &Mapping) -> Mapping {
     }
 }
 
-fn check_set(set: &Set, mappings: &[Mapping]) {
-    assert_eq!(set.regions.len(), mappings.len(), "unexpected region count");
+fn check_set<'a>(set: &Set, mappings: impl IntoIterator<Item = &'a Mapping>) {
+    let mut count = 0;
     for mapping in mappings {
+        count += 1;
         for offset in [0, mapping.pages * PAGE_SIZE - 1] {
             let vaddr = VAddr(mapping.vstart.0 + offset);
             let (paddr, attr) = set.query_vaddr(vaddr).expect("region metadata missing");
@@ -334,4 +369,5 @@ fn check_set(set: &Set, mappings: &[Mapping]) {
             assert!(frame.attr == mapping.attr, "wrong page-table attributes");
         }
     }
+    assert_eq!(set.regions.len(), count, "unexpected region count");
 }
