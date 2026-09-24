@@ -167,6 +167,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> Mutex<K, V, Pred> {
             Pred::inv(k, val),
         ensures
             s.wf(),
+            s.k@ == k,
     {
         let tracked (
             Tracked(inst),
