@@ -987,6 +987,8 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         s2
     }
 
+    // Keep this quantified loop proof independent of earlier solver queries.
+    #[verifier::spinoff_prover]
     fn remove(
         &mut self,
         allocator: &GlobalAllocator<A>,
