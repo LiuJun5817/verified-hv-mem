@@ -5,3 +5,4 @@ pub mod step;
 
 pub use region::Region;
 pub use state::SoftwareView;
+pub use step::*;

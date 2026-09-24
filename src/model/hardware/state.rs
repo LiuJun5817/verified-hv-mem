@@ -10,7 +10,7 @@ verus! {
 /// can *observe or perturb*: the **hardware-reachable** stage-2 map, the TLB that
 /// caches translations and may lag a mapping edit, the data memory reachable
 /// through translation.  Everything *authoritative*
-/// (ownership, the intended mapping `SoftwareView::s2_map`, the memory partition) is
+/// (classification, the intended mapping `SoftwareView::s2_map`, the memory partition) is
 /// policy and lives in [`crate::model::software::SoftwareView`].
 ///
 /// # Two stage-2 maps: hardware-reachable here, software-maintained in `SoftwareView`
@@ -50,9 +50,9 @@ pub ghost struct HardwareView {
     /// synchronized against `SoftwareView::iommu_s2_map` at machine sync points.
     pub iommu_s2map: Map<VmPageKey, S2Entry>,
     /// The VM-observable **data plane**: physical memory values at addresses that
-    /// translations resolve to (VM-owned ∪ shared pages).  This is *not* a model
+    /// installed Private or Shared mappings can reach. This is *not* a model
     /// of all DRAM — page-table bytes and hypervisor-internal memory are
-    /// abstracted into `SoftwareView` (`s2_map`, ownership) and realized only in the
+    /// abstracted into `SoftwareView` (`s2_map`, classification) and realized only in the
     /// implementation, tied back by the refinement layers.
     pub memory: Map<PhysWordAddr, DataWord>,
 }

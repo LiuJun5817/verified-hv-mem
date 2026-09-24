@@ -6,3 +6,23 @@ edition = "2021"
 [dependencies]
 vstd = { version = "0.0.0-2026-06-14-0213", default-features = false, features = ["alloc"] }
 verus_state_machines_macros = "0.0.0-2026-06-14-0213"
+
+[dev-dependencies]
+criterion = { version = "=0.8.2", features = ["html_reports"] }
+
+[[bench]]
+name = "memory_ops"
+harness = false
+
+[[bench]]
+name = "region_zone_ops"
+harness = false
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
+debug-assertions = false
+overflow-checks = false
+incremental = false

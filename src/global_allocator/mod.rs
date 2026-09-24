@@ -6,6 +6,17 @@
 //! is exactly the set of frames that client currently owns.  The Instance
 //! invariants (`inv_free_clients_disjoint` and `inv_clients_disjoint`) then
 //! guarantee, at the type level, that no two clients ever hold the same frame.
+//!
+//! # Trusted assumptions
+//!
+//! Every executable `assume` in this module carries a stable, searchable tag:
+//! - `GA-BASE-BINDING`: platform construction binds a fresh allocator instance to `base`;
+//! - `GA-BITMAP-DEFAULT`: concrete bitmap defaults are well-formed and all-zero;
+//! - `GA-INIT-ONCE`: platform startup initializes the allocator exactly once;
+//! - `GA-ALLOC-SUCCESS`: a single-frame allocation has a free frame;
+//! - `GA-CONTIGUOUS-ALLOC-SUCCESS`: a suitable aligned contiguous block exists.
+//!
+//! The last two are the allocator's intentional allocation-success assumptions.
 use crate::constants::*;
 use core::marker::PhantomData;
 use verus_state_machines_macros::tokenized_state_machine;
@@ -543,6 +554,10 @@ pub type Frame4KPerm = vstd::simple_pptr::PointsTo<[u8; 4096]>;
 pub uninterp spec fn frame_is_empty(perm: &Frame4KPerm) -> bool;
 
 /// Abstract function binding allocator instance id to its base address.
+///
+/// `AllocSpec` deliberately models frame IDs only, so its initialization does
+/// not establish this address-layout binding. `GlobalAllocator::default`
+/// records that integration-level fact as `TRUSTED-ASSUMPTION[GA-BASE-BINDING]`.
 pub uninterp spec fn inst_base(inst_id: InstanceId) -> SpecPAddr;
 
 // ── Allocator-side ghost state ────────────────────────────────────────────────
@@ -965,7 +980,7 @@ impl<A: BitmapAllocator> InvariantPredicate<AllocKey, MutexContent<A>> for Alloc
 ///   PCell<A>   (exec bitmap)     ← accessed only while lock held
 ///
 /// When a thread holds the Mutex it also holds the `PointsTo<A>` token, which
-/// it uses to borrow the PCell's exec value via take()/put().
+/// it uses to access the PCell's exec value while holding the lock.
 ///
 /// Clients hold their own ClientState token completely outside the lock, so
 /// `Client::borrow_frame` is always lock-free (no CAS, no syscall).
@@ -974,9 +989,9 @@ impl<A: BitmapAllocator> InvariantPredicate<AllocKey, MutexContent<A>> for Alloc
 /// Thread 0              Thread 1              Client (any thread)
 ///   alloc()               alloc()               borrow_frame()
 ///     lock ──────────┐      lock (spins)          no lock needed ✓
-///     PCell::take()  │      ...
+///     borrow_mut()   │      ...
 ///     bitmap.alloc() │
-///     PCell::put()   │
+///     end borrow     │
 ///     ghost update   │
 ///     unlock ────────┘
 ///                           lock ──────────┐
@@ -1076,15 +1091,24 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         let key = Ghost(AllocKey { inst_id, cell_id: bitmap_cell_id });
 
         proof {
+            // TRUSTED-ASSUMPTION[GA-BASE-BINDING]: `AllocSpec` tracks frame IDs
+            // but not the allocator's physical base. Platform construction binds
+            // this fresh allocator instance to the supplied base address.
             assume(inst_base(inst_id) == base@);
-            assume(AllocMutexPred::<A>::inv(key@, content));
+            // TRUSTED-ASSUMPTION[GA-BITMAP-DEFAULT]: the public
+            // `BitmapAllocator::default` trait method currently has no
+            // postconditions. Concrete implementations construct a well-formed,
+            // all-zero bitmap, matching the state machine's empty free set.
+            assume(bitmap.wf() && forall|i: int| 0 <= i < A::spec_cap() ==> !bitmap@[i]);
+            assert(allocator_state.wf());
+            assert(AllocMutexPred::<A>::inv(key@, content));
         }
 
         let mutex = Mutex::new(key, Tracked(content));
         let res = GlobalAllocator { base, mutex, bitmap: bitmap_cell };
         proof {
             assert(res.bitmap.id() === bitmap_cell_id);
-            assume(res.mutex.k@ == key@);
+            assert(res.mutex.k@ == key@);
             assert(res.mutex.k@.cell_id == bitmap_cell_id);
             assert(res.bitmap.id() === res.mutex.k@.cell_id);
             assert(res.invariants());
@@ -1112,18 +1136,24 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         let MutexGuard { handle, token } = guard;
         let tracked mut content = token.get();
 
-        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
-        if size > 0 {
-            bitmap.insert(0usize..size);
+        {
+            let bitmap = self.bitmap.borrow_mut(Tracked(&mut content.bitmap_perm));
+            if size > 0 {
+                bitmap.insert(0usize..size);
+            }
         }
-        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
 
         proof {
-            assume(content.allocator_state.free_tok.value() =~= Set::empty());
-            assume(content.allocator_state.reg_tok.value() =~= Set::empty());
-            assume(content.allocator_state.free_perms.dom() =~= Set::empty());
+            // TRUSTED-ASSUMPTION[GA-INIT-ONCE]: platform startup calls `init`
+            // exactly once, before any client is registered. This sequencing
+            // guarantee is intentionally part of the integration TCB.
+            assume(
+                (content.allocator_state.free_tok.value() =~= Set::empty())
+                    && (content.allocator_state.reg_tok.value() =~= Set::empty())
+            );
+            assert(content.allocator_state.free_perms.dom() =~= Set::empty());
             content.allocator_state.init_free_set(size as nat, free_perms);
-            assume(AllocMutexPred::<A>::inv(self.mutex.k@, content));
+            assert(AllocMutexPred::<A>::inv(self.mutex.k@, content));
         }
 
         self.mutex.unlock(MutexGuard { handle, token: Tracked(content) });
@@ -1191,13 +1221,14 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         let MutexGuard { handle, token } = guard;
         let tracked mut content = token.get();
 
-        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
-        // The free pool is non-empty (design assumption: infinitely many slots).
-        // We assume bitmap.alloc() succeeds and unwrap the result.
-        assume(exists|i: int| 0 <= i < A::spec_cap() && bitmap@[i]);
-
-        let idx = bitmap.alloc().unwrap();
-        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
+        // Modify the bitmap in place instead of moving the entire allocator onto the stack.
+        let idx = {
+            let bitmap = self.bitmap.borrow_mut(Tracked(&mut content.bitmap_perm));
+            // TRUSTED-ASSUMPTION[GA-ALLOC-SUCCESS]: the allocation API is
+            // intentionally total; the integration guarantees a free frame.
+            assume(exists|i: int| 0 <= i < A::spec_cap() && bitmap@[i]);
+            bitmap.alloc().unwrap()
+        };
 
         let tracked new_client;
         proof {
@@ -1265,10 +1296,10 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         let MutexGuard { handle, token } = guard;
         let tracked mut content = token.get();
 
-        // Return the frame to the exec bitmap via PCell.
+        // Return the frame to the exec bitmap in place via PCell.
         // bitmap_perm belongs to self.bitmap — guaranteed by AllocKey::cell_id in the
         // mutex invariant and self.wf();
-        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
+        let bitmap = self.bitmap.borrow_mut(Tracked(&mut content.bitmap_perm));
         // The bit must be 0 (allocated) because client.owns(fid); justified by the
         // TSM disjointness invariant between free_set and client_sets.
         proof {
@@ -1289,7 +1320,6 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
             assert(!bitmap@[fid as int]);
         }
         bitmap.dealloc(fid);
-        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
 
         let tracked new_client;
         proof {
@@ -1341,9 +1371,10 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         let MutexGuard { handle, token } = guard;
         let tracked mut content = token.get();
 
-        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
-        bitmap.insert(start_fid..end_fid);
-        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
+        {
+            let bitmap = self.bitmap.borrow_mut(Tracked(&mut content.bitmap_perm));
+            bitmap.insert(start_fid..end_fid);
+        }
 
         let tracked new_client;
         proof {
@@ -1386,14 +1417,17 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         let MutexGuard { handle, token } = guard;
         let tracked mut content = token.get();
 
-        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
-        let ghost old_bitmap = bitmap;
+        let ghost old_bitmap = content.bitmap_perm.value();
+        let idx = {
+            let bitmap = self.bitmap.borrow_mut(Tracked(&mut content.bitmap_perm));
 
-        let alloc_res = bitmap.alloc_contiguous(count, align_log2);
-        // The free pool is non-empty (design assumption: infinitely many slots).
-        assume(alloc_res.is_some());
-        let idx = alloc_res.unwrap();
-        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
+            let alloc_res = bitmap.alloc_contiguous(count, align_log2);
+            // TRUSTED-ASSUMPTION[GA-CONTIGUOUS-ALLOC-SUCCESS]: integration
+            // guarantees a suitably aligned contiguous block, not merely one
+            // free frame, because this API is intentionally total.
+            assume(alloc_res.is_some());
+            alloc_res.unwrap()
+        };
 
         let tracked new_client;
         proof {

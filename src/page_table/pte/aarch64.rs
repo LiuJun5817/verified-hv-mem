@@ -138,11 +138,15 @@ impl PageTableEntry for Aarch64PTE {
         true
     }
 
+    open spec fn spec_supports_attr(_attr: MemAttr) -> bool {
+        true
+    }
+
     open spec fn spec_new(addr: SpecPAddr, attr: MemAttr, huge: bool) -> Self {
         Self { value: ((addr.0 as u64) & PHYS_ADDR_MASK) | Self::spec_descriptor_flags(attr, huge) }
     }
 
-    open spec fn spec_new_table(addr: SpecPAddr) -> Self {
+    open spec fn spec_new_table(addr: SpecPAddr, _next_level: nat) -> Self {
         Self::spec_new(addr, MemAttr::spec_default(), false)
     }
 
@@ -186,7 +190,7 @@ impl PageTableEntry for Aarch64PTE {
         Self { value }
     }
 
-    fn new_table(addr: PAddr) -> (pte: Self) {
+    fn new_table(addr: PAddr, _next_level: usize) -> (pte: Self) {
         Self::new(addr, MemAttr::default(), false)
     }
 
@@ -226,7 +230,7 @@ impl PageTableEntry for Aarch64PTE {
     proof fn lemma_new_wf(addr: SpecPAddr, attr: MemAttr, huge: bool) {
     }
 
-    proof fn lemma_new_table_wf(addr: SpecPAddr) {
+    proof fn lemma_new_table_wf(addr: SpecPAddr, _next_level: nat) {
         Self::lemma_new_wf(addr, MemAttr::spec_default(), false);
     }
 
@@ -437,8 +441,50 @@ impl PageTableEntry for Aarch64PTE {
         assert(pte.spec_attr() == attr);
     }
 
-    proof fn lemma_new_table_keeps_value(addr: SpecPAddr) {
+    proof fn lemma_new_table_keeps_value(addr: SpecPAddr, next_level: nat) {
         Self::lemma_new_keeps_value(addr, MemAttr::spec_default(), false);
+
+        let pte = Self::spec_new_table(addr, next_level);
+        let raw_addr = addr.0 as u64;
+        let value = pte.value;
+        let attr = MemAttr::spec_default();
+        let mem_type = if attr.device {
+            DEVICE_ATTR
+        } else {
+            NORMAL_ATTR | INNER | SHAREABLE
+        };
+        let readable = if attr.readable {
+            S2AP_R
+        } else {
+            0
+        };
+        let writable = if attr.writable {
+            S2AP_W
+        } else {
+            0
+        };
+        let execute_never = if attr.executable {
+            0
+        } else {
+            S2_XN
+        };
+        let non_block = NON_BLOCK;
+        let flags = VALID | AF | mem_type | readable | writable | execute_never | non_block;
+
+        assert(raw_addr & 0xfff == 0) by (bit_vector)
+            requires
+                raw_addr % 4096 == 0,
+        ;
+        assert(NON_BLOCK != 0) by (bit_vector);
+        assert(value & NON_BLOCK == NON_BLOCK) by (bit_vector)
+            requires
+                raw_addr & 0xfff == 0,
+                value == (raw_addr & PHYS_ADDR_MASK) | flags,
+                flags == VALID | AF | mem_type | readable | writable | execute_never | non_block,
+                non_block == NON_BLOCK,
+        ;
+        assert(pte.spec_huge() == (value & NON_BLOCK == 0));
+        assert(!pte.spec_huge());
     }
 
     proof fn lemma_empty_invalid() {

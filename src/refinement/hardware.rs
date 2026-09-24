@@ -21,9 +21,7 @@ pub ghost struct HardwareSpec {
 }
 
 /// Project the compound VM shards to the previous per-VM reachable-map shape.
-pub open spec fn vm_s2maps(
-    vms: Map<VmId, MmuVmState>,
-) -> Map<VmId, Map<GuestPage, S2Entry>> {
+pub open spec fn vm_s2maps(vms: Map<VmId, MmuVmState>) -> Map<VmId, Map<GuestPage, S2Entry>> {
     Map::new(|vm: VmId| vms.contains_key(vm), |vm: VmId| vms[vm].s2map)
 }
 
@@ -33,29 +31,26 @@ pub open spec fn flatten_vm_s2(vms: Map<VmId, MmuVmState>) -> Map<VmPageKey, S2E
 }
 
 /// Flatten all per-VM TLB shards into the hardware TLB map.
-pub open spec fn flatten_vm_tlb(vms: Map<VmId, MmuVmState>) -> Map<TlbKey, crate::model::types::TlbEntry> {
+pub open spec fn flatten_vm_tlb(vms: Map<VmId, MmuVmState>) -> Map<
+    TlbKey,
+    crate::model::types::TlbEntry,
+> {
     Map::new(
         |key: TlbKey| vms.contains_key(key.vm) && vms[key.vm].tlb.contains_key(key),
         |key: TlbKey| vms[key.vm].tlb[key],
     )
 }
 
-proof fn lemma_flatten_vm_tlb_same(
-    pre: Map<VmId, MmuVmState>,
-    post: Map<VmId, MmuVmState>,
-)
+proof fn lemma_flatten_vm_tlb_same(pre: Map<VmId, MmuVmState>, post: Map<VmId, MmuVmState>)
     requires
         post.dom() == pre.dom(),
-        forall|vm: VmId| #[trigger] pre.contains_key(vm)
-            ==> post[vm].tlb == pre[vm].tlb,
+        forall|vm: VmId| #[trigger] pre.contains_key(vm) ==> post[vm].tlb == pre[vm].tlb,
     ensures
         flatten_vm_tlb(post) == flatten_vm_tlb(pre),
 {
     assert(flatten_vm_tlb(post) =~= flatten_vm_tlb(pre)) by {
         assert forall|key: TlbKey| #[trigger]
-            flatten_vm_tlb(post).contains_key(key)
-                == flatten_vm_tlb(pre).contains_key(key) by {
-        }
+            flatten_vm_tlb(post).contains_key(key) == flatten_vm_tlb(pre).contains_key(key) by {}
     }
 }
 
@@ -71,8 +66,7 @@ proof fn lemma_flatten_vm_tlb_remove(
         post[vm].tlb == pre[vm].tlb.remove_keys(
             Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa),
         ),
-        forall|v: VmId| #[trigger] pre.contains_key(v) && v != vm
-            ==> post[v].tlb == pre[v].tlb,
+        forall|v: VmId| #[trigger] pre.contains_key(v) && v != vm ==> post[v].tlb == pre[v].tlb,
         forall|v: VmId| #[trigger] pre.contains_key(v) ==> pre[v].coherent(v),
     ensures
         flatten_vm_tlb(post) == flatten_vm_tlb(pre).remove_keys(
@@ -82,8 +76,9 @@ proof fn lemma_flatten_vm_tlb_remove(
     let targets = Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa);
     assert(flatten_vm_tlb(post) =~= flatten_vm_tlb(pre).remove_keys(targets)) by {
         assert forall|key: TlbKey| #[trigger]
-            flatten_vm_tlb(post).contains_key(key)
-                == flatten_vm_tlb(pre).remove_keys(targets).contains_key(key) by {
+            flatten_vm_tlb(post).contains_key(key) == flatten_vm_tlb(pre).remove_keys(
+                targets,
+            ).contains_key(key) by {
             if pre.contains_key(key.vm) && key.vm != vm {
                 assert(!pre[vm].tlb.contains_key(key)) by {
                     if pre[vm].tlb.contains_key(key) {
@@ -250,16 +245,15 @@ proof fn lemma_absent_vm_noop(s: MmuSpec::State, vm: VmId, gpa: GuestPage)
         !s.vms.contains_key(vm),
     ensures
         flatten_vm_s2(s.vms).remove(VmPageKey::new(vm, gpa)) == flatten_vm_s2(s.vms),
-        flatten_vm_tlb(s.vms).remove_keys(
-            Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa),
-        ) == flatten_vm_tlb(s.vms),
+        flatten_vm_tlb(s.vms).remove_keys(Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa))
+            == flatten_vm_tlb(s.vms),
 {
     let targets = Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa);
     assert(!flatten_vm_s2(s.vms).contains_key(VmPageKey::new(vm, gpa)));
     assert(flatten_vm_s2(s.vms).remove(VmPageKey::new(vm, gpa)) =~= flatten_vm_s2(s.vms));
     assert(flatten_vm_tlb(s.vms).remove_keys(targets) =~= flatten_vm_tlb(s.vms)) by {
-        assert forall|k: TlbKey| #[trigger] flatten_vm_tlb(s.vms).contains_key(k)
-            implies !targets.contains(k) by {
+        assert forall|k: TlbKey| #[trigger]
+            flatten_vm_tlb(s.vms).contains_key(k) implies !targets.contains(k) by {
             assert(s.vms.contains_key(k.vm));
         }
     }
@@ -312,11 +306,8 @@ impl HardwareRefinement for HardwareSpec {
         if self.mmu.vms.contains_key(vm) {
             mmu_post = MmuSpec::take_step::unmap_invalidate(self.mmu, vm, gpa);
             assert(vm_s2maps(mmu_post.vms).dom() =~= vm_s2maps(self.mmu.vms).dom());
-            assert(vm_s2maps(mmu_post.vms)[vm]
-                == vm_s2maps(self.mmu.vms)[vm].remove(gpa));
-            lemma_flatten_remove(
-                vm_s2maps(self.mmu.vms), vm_s2maps(mmu_post.vms), vm, gpa,
-            );
+            assert(vm_s2maps(mmu_post.vms)[vm] == vm_s2maps(self.mmu.vms)[vm].remove(gpa));
+            lemma_flatten_remove(vm_s2maps(self.mmu.vms), vm_s2maps(mmu_post.vms), vm, gpa);
             assert(mmu_post.vms.dom() =~= self.mmu.vms.dom());
             assert(mmu_post.vms[vm].tlb == self.mmu.vms[vm].tlb.remove_keys(
                 Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa),
@@ -334,11 +325,8 @@ impl HardwareRefinement for HardwareSpec {
     proof fn map_fence(self, vm: VmId, gpa: GuestPage, entry: S2Entry) -> (post: Self) {
         let mmu_post = MmuSpec::take_step::map(self.mmu, vm, gpa, entry);
         assert(vm_s2maps(mmu_post.vms).dom() =~= vm_s2maps(self.mmu.vms).dom());
-        assert(vm_s2maps(mmu_post.vms)[vm]
-            == vm_s2maps(self.mmu.vms)[vm].insert(gpa, entry));
-        lemma_flatten_insert(
-            vm_s2maps(self.mmu.vms), vm_s2maps(mmu_post.vms), vm, gpa, entry,
-        );
+        assert(vm_s2maps(mmu_post.vms)[vm] == vm_s2maps(self.mmu.vms)[vm].insert(gpa, entry));
+        lemma_flatten_insert(vm_s2maps(self.mmu.vms), vm_s2maps(mmu_post.vms), vm, gpa, entry);
         assert(mmu_post.vms.dom() =~= self.mmu.vms.dom());
         lemma_flatten_vm_tlb_same(self.mmu.vms, mmu_post.vms);
         let post = HardwareSpec { mmu: mmu_post, smmu: self.smmu };
@@ -351,11 +339,8 @@ impl HardwareRefinement for HardwareSpec {
         if self.smmu.vms.contains_key(vm) {
             smmu_post = MmuSpec::take_step::unmap_invalidate(self.smmu, vm, gpa);
             assert(vm_s2maps(smmu_post.vms).dom() =~= vm_s2maps(self.smmu.vms).dom());
-            assert(vm_s2maps(smmu_post.vms)[vm]
-                == vm_s2maps(self.smmu.vms)[vm].remove(gpa));
-            lemma_flatten_remove(
-                vm_s2maps(self.smmu.vms), vm_s2maps(smmu_post.vms), vm, gpa,
-            );
+            assert(vm_s2maps(smmu_post.vms)[vm] == vm_s2maps(self.smmu.vms)[vm].remove(gpa));
+            lemma_flatten_remove(vm_s2maps(self.smmu.vms), vm_s2maps(smmu_post.vms), vm, gpa);
             assert(smmu_post.vms.dom() =~= self.smmu.vms.dom());
             assert(smmu_post.vms[vm].tlb == self.smmu.vms[vm].tlb.remove_keys(
                 Set::new(|key: TlbKey| key.vm == vm && key.gpa == gpa),
@@ -373,11 +358,8 @@ impl HardwareRefinement for HardwareSpec {
     proof fn iommu_map_fence(self, vm: VmId, gpa: GuestPage, entry: S2Entry) -> (post: Self) {
         let smmu_post = MmuSpec::take_step::map(self.smmu, vm, gpa, entry);
         assert(vm_s2maps(smmu_post.vms).dom() =~= vm_s2maps(self.smmu.vms).dom());
-        assert(vm_s2maps(smmu_post.vms)[vm]
-            == vm_s2maps(self.smmu.vms)[vm].insert(gpa, entry));
-        lemma_flatten_insert(
-            vm_s2maps(self.smmu.vms), vm_s2maps(smmu_post.vms), vm, gpa, entry,
-        );
+        assert(vm_s2maps(smmu_post.vms)[vm] == vm_s2maps(self.smmu.vms)[vm].insert(gpa, entry));
+        lemma_flatten_insert(vm_s2maps(self.smmu.vms), vm_s2maps(smmu_post.vms), vm, gpa, entry);
         assert(smmu_post.vms.dom() =~= self.smmu.vms.dom());
         lemma_flatten_vm_tlb_same(self.smmu.vms, smmu_post.vms);
         let post = HardwareSpec { mmu: self.mmu, smmu: smmu_post };

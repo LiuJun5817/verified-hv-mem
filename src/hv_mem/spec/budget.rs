@@ -1,12 +1,13 @@
 //! Static physical-page-budget state machine for the hypervisor memory manager.
 //!
-//! Physical memory is partitioned into zone-private budgets and one global
-//! shared budget. A CPU or IOMMU region is admissible when its entire physical
-//! footprint lies in either budget. Shared-budget regions may deliberately
-//! overlap in physical memory while using different guest addresses or
-//! attributes. Within each CPU/IOMMU memory set, zone-private regions remain
-//! pairwise non-overlapping in physical memory so removing one region cannot
-//! silently release another zone-private mapping's pages.
+//! Physical memory has per-zone Private eligibility budgets and one Shared
+//! eligibility budget. A CPU or IOMMU region is admissible when its entire
+//! physical footprint lies in either budget. Budget membership is static
+//! authorization; the dynamic Private/Shared classification is derived from
+//! installed mappings. Shared regions may deliberately overlap in physical
+//! memory while using different guest addresses or attributes. Private regions
+//! owned by the same zone may likewise alias physical pages; the projected
+//! Private classification remains present until the final alias is removed.
 //!
 //! The budgets are static pure functions rather than tokenized fields. Region
 //! transitions therefore consume only the zone-local `zones[zid]` shard and
@@ -20,27 +21,27 @@ verus! {
 
 use crate::constants::*;
 
-/// Static zone-private physical-page budget of zone `zid`.
-pub uninterp spec fn zone_private_pages(zid: nat) -> Set<PhysPage>;
+/// Static pages eligible for Private mappings of zone `zid`.
+pub uninterp spec fn private_pages(zid: nat) -> Set<PhysPage>;
 
-/// Static physical pages that every zone may map.
-pub uninterp spec fn global_shared_pages() -> Set<PhysPage>;
+/// Static pages eligible for Shared mappings.
+pub uninterp spec fn shared_pages() -> Set<PhysPage>;
 
-/// Axiom: zone-private page budgets of distinct zones are pairwise disjoint.
-pub axiom fn zone_private_pages_pairwise_disjoint()
+/// Private eligibility budgets of distinct zones are pairwise disjoint.
+pub axiom fn private_pages_pairwise_disjoint()
     ensures
         forall|zid1: nat, zid2: nat, page: PhysPage|
-            #![trigger zone_private_pages(zid1).contains(page),
-                zone_private_pages(zid2).contains(page)]
-            zid1 != zid2 && zone_private_pages(zid1).contains(page)
-                ==> !zone_private_pages(zid2).contains(page),
+            #![trigger private_pages(zid1).contains(page),
+                private_pages(zid2).contains(page)]
+            zid1 != zid2 && private_pages(zid1).contains(page)
+                ==> !private_pages(zid2).contains(page),
 ;
 
-/// Axiom: no zone-private page is globally shared.
-pub axiom fn zone_private_pages_disjoint_from_global_shared()
+/// No page is eligible for both Private and Shared classification.
+pub axiom fn private_pages_disjoint_from_shared()
     ensures
         forall|zid: nat, page: PhysPage| #[trigger]
-            zone_private_pages(zid).contains(page) ==> !global_shared_pages().contains(page),
+            private_pages(zid).contains(page) ==> !shared_pages().contains(page),
 ;
 
 /// The physical page occupied by page index `i` of `region`.
@@ -56,136 +57,87 @@ pub open spec fn region_phys_pages(region: MemoryRegion) -> Set<PhysPage> {
     )
 }
 
-/// `region` lies wholly in zone `zid`'s zone-private page budget.
-pub open spec fn region_in_zone_private_budget(zid: nat, region: MemoryRegion) -> bool {
-    region_phys_pages(region).subset_of(zone_private_pages(zid))
+/// `region` is eligible for Private classification by zone `zid`.
+pub open spec fn region_in_private_budget(zid: nat, region: MemoryRegion) -> bool {
+    region_phys_pages(region).subset_of(private_pages(zid))
 }
 
-/// `region` lies wholly in the global shared page budget.
-pub open spec fn region_in_global_shared_budget(region: MemoryRegion) -> bool {
-    region_phys_pages(region).subset_of(global_shared_pages())
+/// `region` is eligible for Shared classification.
+pub open spec fn region_in_shared_budget(region: MemoryRegion) -> bool {
+    region_phys_pages(region).subset_of(shared_pages())
 }
 
 /// Page-budget authorization for either a CPU or IOMMU region.
 pub open spec fn region_in_budget(zid: nat, region: MemoryRegion) -> bool {
-    region_in_zone_private_budget(zid, region) || region_in_global_shared_budget(region)
+    region_in_private_budget(zid, region) || region_in_shared_budget(region)
 }
 
-/// Whether `region` is physically non-overlapping with every zone-private
-/// region already in `mem_set`.
-pub open spec fn pmem_nonoverlap_with_zone_private_regions(
-    zid: nat,
-    mem_set: SpecMemorySet,
-    region: MemoryRegion,
-) -> bool {
-    forall|old_region: MemoryRegion| #[trigger]
-        mem_set.regions.contains(old_region) && region_in_zone_private_budget(zid, old_region)
-            ==> !old_region.spec_overlaps_pmem(region)
-}
-
-/// Zone-private regions in one memory set are pairwise non-overlapping in physical memory.
-pub open spec fn private_regions_pmem_nonoverlap(zid: nat, mem_set: SpecMemorySet) -> bool {
-    forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
-        mem_set.regions.contains(r1) && #[trigger] mem_set.regions.contains(r2) && r1 != r2
-            && region_in_zone_private_budget(zid, r1) && region_in_zone_private_budget(zid, r2)
-            ==> !r1.spec_overlaps_pmem(r2)
-}
-
-/// Every region in `mem_set` is authorized by `zid`'s zone-private budget or the
-/// global shared budget.
+/// Every region in `mem_set` is authorized by `zid`'s Private budget or the
+/// Shared budget.
 pub open spec fn all_regions_in_budget(zid: nat, mem_set: SpecMemorySet) -> bool {
     forall|region: MemoryRegion| #[trigger]
         mem_set.regions.contains(region) ==> region_in_budget(zid, region)
 }
 
-/// A valid global-shared region cannot also lie in any zone-private budget.
-pub proof fn lemma_global_shared_region_not_zone_private(zid: nat, region: MemoryRegion)
+/// A valid Shared region cannot also lie in any Private budget.
+pub proof fn lemma_shared_region_not_private(zid: nat, region: MemoryRegion)
     requires
         region.spec_valid(),
-        region_in_global_shared_budget(region),
+        region_in_shared_budget(region),
     ensures
-        !region_in_zone_private_budget(zid, region),
+        !region_in_private_budget(zid, region),
 {
     let page = region_phys_page(region, 0);
     assert(region_phys_pages(region).contains(page)) by {
         assert(0 < region.pages);
     };
-    zone_private_pages_disjoint_from_global_shared();
-    if region_in_zone_private_budget(zid, region) {
-        assert(zone_private_pages(zid).contains(page));
-        assert(global_shared_pages().contains(page));
-        assert(!global_shared_pages().contains(page));
+    private_pages_disjoint_from_shared();
+    if region_in_private_budget(zid, region) {
+        assert(private_pages(zid).contains(page));
+        assert(shared_pages().contains(page));
+        assert(!shared_pages().contains(page));
         assert(false);
     }
 }
 
-/// A valid zone-private region cannot also lie in the global-shared budget.
-pub proof fn lemma_zone_private_region_not_global_shared(zid: nat, region: MemoryRegion)
+/// A valid Private region cannot also lie in the Shared budget.
+pub proof fn lemma_private_region_not_shared(zid: nat, region: MemoryRegion)
     requires
         region.spec_valid(),
-        region_in_zone_private_budget(zid, region),
+        region_in_private_budget(zid, region),
     ensures
-        !region_in_global_shared_budget(region),
+        !region_in_shared_budget(region),
 {
     let page = region_phys_page(region, 0);
     assert(region_phys_pages(region).contains(page)) by {
         assert(0 < region.pages);
     };
-    zone_private_pages_disjoint_from_global_shared();
-    if region_in_global_shared_budget(region) {
-        assert(zone_private_pages(zid).contains(page));
-        assert(global_shared_pages().contains(page));
-        assert(!global_shared_pages().contains(page));
+    private_pages_disjoint_from_shared();
+    if region_in_shared_budget(region) {
+        assert(private_pages(zid).contains(page));
+        assert(shared_pages().contains(page));
+        assert(!shared_pages().contains(page));
         assert(false);
     }
 }
 
-/// Insertion preserves page-budget authorization and zone-private-region pmem non-overlap.
+/// Insertion preserves page-budget authorization.
 pub proof fn lemma_insert_region_preserves_budget_policy(
     zid: nat,
     mem_set: SpecMemorySet,
     region: MemoryRegion,
 )
     requires
-        mem_set.wf(),
         all_regions_in_budget(zid, mem_set),
-        private_regions_pmem_nonoverlap(zid, mem_set),
-        region.spec_valid(),
         region_in_budget(zid, region),
-        region_in_zone_private_budget(zid, region) ==> pmem_nonoverlap_with_zone_private_regions(
-            zid,
-            mem_set,
-            region,
-        ),
-        !mem_set.regions.contains(region),
-        !mem_set.overlaps_vmem(region),
     ensures
         all_regions_in_budget(zid, mem_set.insert_region(region)),
-        private_regions_pmem_nonoverlap(zid, mem_set.insert_region(region)),
 {
     let new_mem_set = mem_set.insert_region(region);
     assert forall|r: MemoryRegion| #[trigger]
         new_mem_set.regions.contains(r) implies region_in_budget(zid, r) by {
         if r != region {
             assert(mem_set.regions.contains(r));
-        }
-    };
-    assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
-        new_mem_set.regions.contains(r1) && #[trigger] new_mem_set.regions.contains(r2) && r1 != r2
-            && region_in_zone_private_budget(zid, r1) && region_in_zone_private_budget(
-            zid,
-            r2,
-        ) implies !r1.spec_overlaps_pmem(r2) by {
-        if r1 == region {
-            assert(mem_set.regions.contains(r2));
-            assert(!r2.spec_overlaps_pmem(region));
-            assert(r2.spec_valid());
-            region.lemma_overlaps_pmem_symmetric(r2);
-        } else if r2 == region {
-            assert(mem_set.regions.contains(r1));
-        } else {
-            assert(mem_set.regions.contains(r1));
-            assert(mem_set.regions.contains(r2));
         }
     };
 }
@@ -198,35 +150,20 @@ pub proof fn lemma_remove_region_preserves_budget_policy(
 )
     requires
         all_regions_in_budget(zid, mem_set),
-        private_regions_pmem_nonoverlap(zid, mem_set),
     ensures
         all_regions_in_budget(zid, mem_set.remove_region_exact(region)),
-        private_regions_pmem_nonoverlap(zid, mem_set.remove_region_exact(region)),
 {
     let new_mem_set = mem_set.remove_region_exact(region);
     assert forall|r: MemoryRegion| #[trigger]
         new_mem_set.regions.contains(r) implies region_in_budget(zid, r) by {
         assert(mem_set.regions.contains(r));
     };
-    assert forall|r1: MemoryRegion, r2: MemoryRegion| #[trigger]
-        new_mem_set.regions.contains(r1) && #[trigger] new_mem_set.regions.contains(r2) && r1 != r2
-            && region_in_zone_private_budget(zid, r1) && region_in_zone_private_budget(
-            zid,
-            r2,
-        ) implies !r1.spec_overlaps_pmem(r2) by {
-        assert(mem_set.regions.contains(r1));
-        assert(mem_set.regions.contains(r2));
-    };
 }
 
-/// An empty memory set satisfies both budget-policy clauses.
+/// An empty memory set satisfies the budget policy.
 pub proof fn lemma_empty_memory_set_budget_policy(zid: nat)
     ensures
         all_regions_in_budget(zid, SpecMemorySet { regions: Set::empty(), mappings: Map::empty() }),
-        private_regions_pmem_nonoverlap(
-            zid,
-            SpecMemorySet { regions: Set::empty(), mappings: Map::empty() },
-        ),
 {
 }
 
@@ -259,7 +196,7 @@ tokenized_state_machine! {
             )
         }
 
-        /// IOMMU regions obey the same zone-private-or-global-shared policy as CPU regions.
+        /// IOMMU regions obey the same Private-or-Shared policy as CPU regions.
         #[invariant]
         pub fn inv_iommu_regions_in_budget(&self) -> bool {
             forall|zid: nat| self.zones.contains_key(zid) ==> all_regions_in_budget(
@@ -268,24 +205,14 @@ tokenized_state_machine! {
             )
         }
 
-        /// Zone-private CPU regions are pairwise non-overlapping in physical memory.
+        /// Reachable memory sets contain finitely many region-sized operation
+        /// units, so an atomic clear can refine to a finite removal trace.
         #[invariant]
-        pub fn inv_cpu_private_regions_pmem_nonoverlap(&self) -> bool {
-            forall|zid: nat|
-                self.zones.contains_key(zid) ==> private_regions_pmem_nonoverlap(
-                    zid,
-                    self.zones[zid].cpu_mem_set,
-                )
-        }
-
-        /// Zone-private IOMMU regions are pairwise non-overlapping in physical memory.
-        #[invariant]
-        pub fn inv_iommu_private_regions_pmem_nonoverlap(&self) -> bool {
-            forall|zid: nat|
-                self.zones.contains_key(zid) ==> private_regions_pmem_nonoverlap(
-                    zid,
-                    self.zones[zid].iommu_mem_set,
-                )
+        pub fn inv_region_sets_finite(&self) -> bool {
+            forall|zid: nat| #[trigger] self.zones.contains_key(zid) ==> {
+                &&& self.zones[zid].cpu_mem_set.regions.finite()
+                &&& self.zones[zid].iommu_mem_set.regions.finite()
+            }
         }
 
         init! {
@@ -318,12 +245,6 @@ tokenized_state_machine! {
                 remove zones -= [zid => let zone];
                 require(region.spec_valid());
                 require(region_in_budget(zid, region));
-                require(region_in_zone_private_budget(zid, region)
-                    ==> pmem_nonoverlap_with_zone_private_regions(
-                        zid,
-                        zone.cpu_mem_set,
-                        region,
-                    ));
                 require(!zone.cpu_mem_set.regions.contains(region));
                 require(!zone.cpu_mem_set.overlaps_vmem(region));
                 add zones += [zid => zone.cpu_insert_region(region)];
@@ -350,12 +271,6 @@ tokenized_state_machine! {
                 remove zones -= [zid => let zone];
                 require(region.spec_valid());
                 require(region_in_budget(zid, region));
-                require(region_in_zone_private_budget(zid, region)
-                    ==> pmem_nonoverlap_with_zone_private_regions(
-                        zid,
-                        zone.iommu_mem_set,
-                        region,
-                    ));
                 require(!zone.iommu_mem_set.regions.contains(region));
                 require(!zone.iommu_mem_set.overlaps_vmem(region));
                 add zones += [zid => zone.iommu_insert_region(region)];

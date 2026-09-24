@@ -342,6 +342,10 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         self.pt.spec_root()
     }
 
+    open spec fn spec_supports_attr(attr: MemAttr) -> bool {
+        PT::spec_supports_attr(attr)
+    }
+
     open spec fn invariants(&self) -> bool {
         &&& self.pt@.constants.valid()
         // Frame size is 4K
@@ -426,6 +430,27 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         {
             let r = &self.regions[i];
             if r.overlaps_pmem(region) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn overlaps_vmem_or_pmem(&self, region: &MemoryRegion) -> (res: bool) {
+        proof {
+            self.lemma_invariants_implies_wf();
+            self@.lemma_same_start_implies_vmem_overlap(*region);
+        }
+        for i in 0..self.regions.len()
+            invariant
+                0 <= i <= self.regions.len(),
+                region.spec_valid(),
+                self.invariants(),
+                forall|j: int| #![auto] 0 <= j < i ==> !self.regions[j].spec_overlaps_vmem(*region),
+                forall|j: int| #![auto] 0 <= j < i ==> !self.regions[j].spec_overlaps_pmem(*region),
+        {
+            let r = &self.regions[i];
+            if r.overlaps_vmem(region) || r.overlaps_pmem(region) {
                 return true;
             }
         }
@@ -533,6 +558,7 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
                 0 <= i <= region.pages,
                 region.spec_valid(),
                 region.spec_within_vspace(self.pt@.constants.arch.vspace_size()),
+                PT::spec_supports_attr(region.attr),
                 i == 0 ==> self.invariants(),
                 self.pt.invariants(),
                 allocator.invariants(),
@@ -982,6 +1008,8 @@ impl<PT, A, I> MemorySet<PT, A, I> for VecMemorySet<PT, A, I> where
         s2
     }
 
+    // Keep this quantified loop proof independent of earlier solver queries.
+    #[verifier::spinoff_prover]
     fn remove(
         &mut self,
         allocator: &GlobalAllocator<A>,

@@ -1,24 +1,24 @@
 //! Ghost state machine specifications for the hypervisor memory manager.
 //!
-//! - [`closure`]: `ClosureSpec` with global `all_regions`, plus its state-machine tokens.
-//! - [`budget`]: `BudgetSpec` with zone-private and global-shared physical-page budgets,
+//! - [`budget`]: `BudgetSpec` with static Private and Shared eligibility budgets,
 //!   plus its state-machine tokens.
+//! - [`enclave`]: an extensible physical-class policy for enclave hypervisors,
+//!   with dynamic per-enclave sharing.
 pub mod budget;
-pub mod closure;
+pub mod enclave;
 
 use crate::{address::region::MemoryRegion, memory_set::SpecMemorySet};
 use vstd::prelude::*;
 
 pub use budget::{BudgetSpec, BudgetSpecInstance, BudgetZoneIdsToken, BudgetZoneToken};
-pub use closure::{
-    ClosureSpec, ClosureSpecInstance, ClosureZoneIdsToken, ClosureZoneToken, ClosureZonesViewToken,
+pub use enclave::{
+    EnclavePrivateRegionsViewToken, EnclaveSharedRegionsToken, EnclaveSpec, EnclaveSpecInstance,
+    EnclaveZoneIdsToken, EnclaveZoneToken,
 };
 
 verus! {
 
-pub use closure::*;
-
-/// Ghost state for one zone tracked inside `ClosureSpec` or `BudgetSpec`.
+/// Ghost state for one zone.
 ///
 /// A zone owns two page-table-backed memory sets: the CPU stage-2 set
 /// (`cpu_mem_set`, kept in sync with the tokenized MMU) and the IOMMU/SMMU set

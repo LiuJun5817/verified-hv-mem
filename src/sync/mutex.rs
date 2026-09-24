@@ -102,25 +102,35 @@ type MutexLockedToken<K, V, Pred> = MutexToks::locked<K, V, Pred>;
 
 type MutexOwnerToken<K, V, Pred> = MutexToks::owner<K, V, Pred>;
 
-struct_with_invariants! {
-    /// A mutex protecting an object of type `V` with invariant `Pred`.
-    /// The mutex is identified by a key of type `K`.
-    pub struct Mutex<K, V, Pred: InvariantPredicate<K, V>> {
-        pub locked: AtomicBool<_, MutexLockedToken<K, V, Pred>, _>,
-        pub inst: Tracked<MutexInstance<K, V, Pred>>,
-        pub k: Ghost<K>,
-    }
+pub struct MutexAtomicPred<K, V, Pred> {
+    marker: PhantomData<(K, V, Pred)>,
+}
 
-    pub open spec fn wf(&self) -> bool {
-        invariant on locked with (inst) is (v: bool, g: MutexLockedToken<K, V, Pred>) {
-            &&& g.instance_id() == inst@.id()
-            &&& g.value() == v
-        }
-
-        predicate {
-            self.inst@.k() == self.k@
-        }
+impl<K, V, Pred: InvariantPredicate<K, V>> AtomicInvariantPredicate<
+    vstd::tokens::InstanceId,
+    bool,
+    MutexLockedToken<K, V, Pred>,
+> for MutexAtomicPred<K, V, Pred> {
+    open spec fn atomic_inv(
+        inst_id: vstd::tokens::InstanceId,
+        value: bool,
+        token: MutexLockedToken<K, V, Pred>,
+    ) -> bool {
+        &&& token.instance_id() == inst_id
+        &&& token.value() == value
     }
+}
+
+/// A mutex protecting an object of type `V` with invariant `Pred`.
+/// The mutex is identified by a key of type `K`.
+pub struct Mutex<K, V, Pred: InvariantPredicate<K, V>> {
+    pub locked: AtomicBool<
+        vstd::tokens::InstanceId,
+        MutexLockedToken<K, V, Pred>,
+        MutexAtomicPred<K, V, Pred>,
+    >,
+    pub inst: Tracked<MutexInstance<K, V, Pred>>,
+    pub k: Ghost<K>,
 }
 
 /// Exclusive guard returned by `Mutex::lock`.
@@ -144,6 +154,12 @@ impl<K, V, Pred: InvariantPredicate<K, V>> MutexGuard<K, V, Pred> {
 }
 
 impl<K, V, Pred: InvariantPredicate<K, V>> Mutex<K, V, Pred> {
+    pub open spec fn wf(&self) -> bool {
+        &&& self.locked.well_formed()
+        &&& self.locked.constant() == self.inst@.id()
+        &&& self.inst@.k() == self.k@
+    }
+
     /// Create a new mutex protecting the value `val` with invariant `Pred`.
     /// The mutex is identified by the key `k`.
     pub fn new(Ghost(k): Ghost<K>, Tracked(val): Tracked<V>) -> (s: Self)
@@ -151,6 +167,7 @@ impl<K, V, Pred: InvariantPredicate<K, V>> Mutex<K, V, Pred> {
             Pred::inv(k, val),
         ensures
             s.wf(),
+            s.k@ == k,
     {
         let tracked (
             Tracked(inst),
@@ -158,8 +175,9 @@ impl<K, V, Pred: InvariantPredicate<K, V>> Mutex<K, V, Pred> {
             _,  // owner: None
         ) = MutexToks::Instance::<K, V, Pred>::initialize(k, val, Option::Some(val));
 
+        let ghost inst_id = inst.id();
         let inst = Tracked(inst);
-        let locked = AtomicBool::new(Ghost(inst), false, Tracked(locked_tok));
+        let locked = AtomicBool::new(Ghost(inst_id), false, Tracked(locked_tok));
         Mutex { locked, inst, k: Ghost(k) }
     }
 
@@ -189,21 +207,27 @@ impl<K, V, Pred: InvariantPredicate<K, V>> Mutex<K, V, Pred> {
             let tracked mut owner_token_opt: Option<MutexOwnerToken<K, V, Pred>> = None;
             let tracked mut value_opt: Option<V> = None;
 
+            assert(self.locked.well_formed());
+            let ghost atomic_inst_id = self.locked.constant();
+            let ghost inst_id = self.inst@.id();
+            assert(atomic_inst_id == inst_id);
             let cas_result =
                 atomic_with_ghost!(
                 &self.locked => compare_exchange(false, true);
+                update prev -> next;
                 returning cas_res;
                 ghost g => {
                     if cas_res is Ok {
-                        // NOTE: Verus 2026-05-03 loses these opened AtomicBool
-                        // invariant facts in this proof shape:
-                        //   g.instance_id() == self.inst@.id()
-                        //   g.value() == false
-                        // The same state machine verifies with Verus 2026-03-08,
-                        // and RwLock verifies under 2026-05-03. Treat failures
-                        // at this acquire call as a verifier/vstd instantiation
-                        // issue, not as evidence that the Mutex state machine is
-                        // inconsistent.
+                        assert(prev == false);
+                        assert(next == true);
+                        assert(MutexAtomicPred::<K, V, Pred>::atomic_inv(
+                            atomic_inst_id,
+                            prev,
+                            g,
+                        ));
+                        assert(g.instance_id() == atomic_inst_id);
+                        assert(g.instance_id() == inst_id);
+                        assert(g.value() == prev);
                         let tracked acquire_result = self.inst.borrow().acquire(&mut g);
                         assert(g.value() == true);
                         let tracked value = acquire_result.1.get();
@@ -245,9 +269,23 @@ impl<K, V, Pred: InvariantPredicate<K, V>> Mutex<K, V, Pred> {
         let tracked owner_token = guard.handle.get();
         let tracked value = guard.token.get();
 
+        assert(self.locked.well_formed());
+        let ghost atomic_inst_id = self.locked.constant();
+        let ghost inst_id = self.inst@.id();
+        assert(atomic_inst_id == inst_id);
         atomic_with_ghost!(
             &self.locked => store(false);
+            update prev -> next;
             ghost g => {
+                assert(next == false);
+                assert(MutexAtomicPred::<K, V, Pred>::atomic_inv(
+                    atomic_inst_id,
+                    prev,
+                    g,
+                ));
+                assert(g.instance_id() == atomic_inst_id);
+                assert(g.instance_id() == inst_id);
+                assert(g.value() == prev);
                 self.inst.borrow().release(value, &mut g, value, owner_token);
             }
         );
