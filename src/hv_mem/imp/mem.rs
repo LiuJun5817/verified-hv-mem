@@ -292,8 +292,7 @@ impl<PT, M, A, P, I, D, IOPT, IOM> HvMem<PT, M, A, P, I, D, IOPT, IOM> where
     /// 2. Advance the protocol ghost state machine (`add_zone`) to obtain a
     ///    fresh `ZoneState` for the new zone.
     /// 3. Delegate Zone assembly to `Zone::new` (infallible).
-    /// 4. Push the new `Zone`, return the zone list to its `PCell`, and release
-    ///    the write lock.
+    /// 4. Push the new `Zone` into the list in place and release the write lock.
     pub fn add_zone(&self, zid: usize, payload: D) -> (res: Result<(), ()>)
         requires
             self.invariants(),
@@ -305,16 +304,15 @@ impl<PT, M, A, P, I, D, IOPT, IOM> HvMem<PT, M, A, P, I, D, IOPT, IOM> where
         let guard = self.lock.lock_write();
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: HvMemRwContent<PT, M, A, P, I, D, IOPT, IOM> = token.get();
-        let mut zones = self.zone_list.take(Tracked(&mut content.zone_list_perm));
+        let duplicate = {
+            let zones = self.zone_list.borrow(Tracked(&content.zone_list_perm));
+            Self::find_zone_index(zones, zid).is_some()
+        };
 
         // ── Step 1b: reject duplicate zone IDs ────────────────────────────────
-        match Self::find_zone_index(&zones, zid) {
-            Some(_) => {
-                self.zone_list.put(Tracked(&mut content.zone_list_perm), zones);
-                self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
-                return Err(());
-            },
-            None => {},
+        if duplicate {
+            self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
+            return Err(());
         }
 
         // ── Step 2: advance protocol ghost state, obtain zone token ───────────
@@ -369,11 +367,13 @@ impl<PT, M, A, P, I, D, IOPT, IOM> HvMem<PT, M, A, P, I, D, IOPT, IOM> where
             Tracked(iommu_mmu_tok),
         );
         // Snapshot the pre-push zone list for use in the postcondition proof.
-        let ghost old_zones = zones@;
+        let ghost old_zones = content.zone_list_perm.value()@;
 
-        // ── Step 4: push zone, restore PCell, release write lock ─────────────
-        zones.push(new_zone);
-        self.zone_list.put(Tracked(&mut content.zone_list_perm), zones);
+        // ── Step 4: push zone in place, release write lock ──────────────────
+        {
+            let zones = self.zone_list.borrow_mut(Tracked(&mut content.zone_list_perm));
+            zones.push(new_zone);
+        }
         proof {
             // lemma_mmu_vm_ids_insert(pre_add_zone_ids, zid as nat);
             assert(content.cpu_vm_ids_tok.value() =~= mmu_vm_ids(
@@ -383,7 +383,7 @@ impl<PT, M, A, P, I, D, IOPT, IOM> HvMem<PT, M, A, P, I, D, IOPT, IOM> where
                 P::zone_ids(&content.global_state),
             ));
             let zone_list = content.zone_list_perm@.mem_contents->Init_0;
-            // After push+put: zone_list@ = old_zones.push(new_zone).
+            // After the in-place push: zone_list@ = old_zones.push(new_zone).
             let new_zones = zone_list@;
             let old_len = old_zones.len() as int;
             assert(new_zones =~= old_zones.push(new_zone));
@@ -423,7 +423,7 @@ impl<PT, M, A, P, I, D, IOPT, IOM> HvMem<PT, M, A, P, I, D, IOPT, IOM> where
 
     /// Remove the zone identified by `zid` from the hypervisor memory manager.
     ///
-    /// 1. Acquire the HvMem write lock and take the zone list.
+    /// 1. Acquire the HvMem write lock and borrow the zone list mutably.
     /// 2. Find the zone by `zone_id` field.
     /// 3. Acquire the zone write lock and reject removal unless both its CPU and
     ///    IOMMU memory sets are empty.
@@ -431,7 +431,7 @@ impl<PT, M, A, P, I, D, IOPT, IOM> HvMem<PT, M, A, P, I, D, IOPT, IOM> where
     /// 5. Drop both empty memory sets, restoring their implementation-owned resources.
     /// 6. Swap-remove the zone from the list.
     /// 7. Advance the protocol's `remove_zone` transition to drop the zone token.
-    /// 8. Restore the zone list and release the HvMem write lock.
+    /// 8. Release the HvMem write lock.
     ///
     /// Returns `Err(())` if no zone with the given `zid` is found or either of
     /// its memory sets is non-empty.
@@ -446,14 +446,13 @@ impl<PT, M, A, P, I, D, IOPT, IOM> HvMem<PT, M, A, P, I, D, IOPT, IOM> where
         let RwWriteGuard { handle, token } = guard;
         let tracked mut content: HvMemRwContent<PT, M, A, P, I, D, IOPT, IOM> = token.get();
         let ghost pre_remove_zone_ids = P::zone_ids(&content.global_state);
-        let mut zones = self.zone_list.take(Tracked(&mut content.zone_list_perm));
+        let zones = self.zone_list.borrow_mut(Tracked(&mut content.zone_list_perm));
 
         // ── Step 2: find zone by ID ───────────────────────────────────────────
         let i = match Self::find_zone_index(&zones, zid) {
             Some(i) => i,
             None => {
-                // Zone not found — restore and return error.
-                self.zone_list.put(Tracked(&mut content.zone_list_perm), zones);
+                // Zone not found — return without changing the list.
                 self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
                 return Err(());
             },
@@ -462,25 +461,29 @@ impl<PT, M, A, P, I, D, IOPT, IOM> HvMem<PT, M, A, P, I, D, IOPT, IOM> where
         let zone_guard = zones[i].lock.lock_write();
         let RwWriteGuard { handle: zone_handle, token: zone_token } = zone_guard;
         let tracked mut zone_content: ZoneRwContent<M, P, D, IOM> = zone_token.get();
+        let cpu_empty = {
+            let cpu_mem_set = zones[i].cpu_mem_set.borrow(Tracked(&zone_content.cpu_mem_set_perm));
+            cpu_mem_set.is_empty()
+        };
+        let iommu_empty = {
+            let iommu_mem_set = zones[i].iommu_mem_set.borrow(
+                Tracked(&zone_content.iommu_mem_set_perm),
+            );
+            iommu_mem_set.is_empty()
+        };
+        if !cpu_empty || !iommu_empty {
+            zones[i].lock.unlock_write(
+                RwWriteGuard { handle: zone_handle, token: Tracked(zone_content) },
+            );
+            self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
+            return Err(());
+        }
+        // Successful removal destroys the empty memory sets, so ownership is
+        // intentionally withdrawn only after both checks have passed.
         let cpu_mem_set: M = zones[i].cpu_mem_set.take(Tracked(&mut zone_content.cpu_mem_set_perm));
         let iommu_mem_set: IOM = zones[i].iommu_mem_set.take(
             Tracked(&mut zone_content.iommu_mem_set_perm),
         );
-        let cpu_empty = cpu_mem_set.is_empty();
-        let iommu_empty = iommu_mem_set.is_empty();
-        if !cpu_empty || !iommu_empty {
-            zones[i].cpu_mem_set.put(Tracked(&mut zone_content.cpu_mem_set_perm), cpu_mem_set);
-            zones[i].iommu_mem_set.put(
-                Tracked(&mut zone_content.iommu_mem_set_perm),
-                iommu_mem_set,
-            );
-            zones[i].lock.unlock_write(
-                RwWriteGuard { handle: zone_handle, token: Tracked(zone_content) },
-            );
-            self.zone_list.put(Tracked(&mut content.zone_list_perm), zones);
-            self.lock.unlock_write(RwWriteGuard { handle, token: Tracked(content) });
-            return Err(());
-        }
         // ── Step 4: deregister the VM from both hardware regimes ─────────────
 
         proof {
@@ -525,8 +528,7 @@ impl<PT, M, A, P, I, D, IOPT, IOM> HvMem<PT, M, A, P, I, D, IOPT, IOM> where
             // there is no zone lock to release afterwards.
         }
 
-        // ── Step 8: restore zone list and release HvMem write lock ───────────
-        self.zone_list.put(Tracked(&mut content.zone_list_perm), zones);
+        // ── Step 8: release HvMem write lock ─────────────────────────
         proof {
             let zone_list = content.zone_list_perm@.mem_contents->Init_0;
             let new_zones = zone_list@;
