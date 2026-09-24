@@ -1112,11 +1112,12 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         let MutexGuard { handle, token } = guard;
         let tracked mut content = token.get();
 
-        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
-        if size > 0 {
-            bitmap.insert(0usize..size);
+        {
+            let bitmap = self.bitmap.borrow_mut(Tracked(&mut content.bitmap_perm));
+            if size > 0 {
+                bitmap.insert(0usize..size);
+            }
         }
-        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
 
         proof {
             assume(content.allocator_state.free_tok.value() =~= Set::empty());
@@ -1341,9 +1342,10 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         let MutexGuard { handle, token } = guard;
         let tracked mut content = token.get();
 
-        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
-        bitmap.insert(start_fid..end_fid);
-        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
+        {
+            let bitmap = self.bitmap.borrow_mut(Tracked(&mut content.bitmap_perm));
+            bitmap.insert(start_fid..end_fid);
+        }
 
         let tracked new_client;
         proof {
@@ -1386,14 +1388,15 @@ impl<A: BitmapAllocator> GlobalAllocator<A> {
         let MutexGuard { handle, token } = guard;
         let tracked mut content = token.get();
 
-        let mut bitmap = self.bitmap.take(Tracked(&mut content.bitmap_perm));
-        let ghost old_bitmap = bitmap;
+        let ghost old_bitmap = content.bitmap_perm.value();
+        let idx = {
+            let bitmap = self.bitmap.borrow_mut(Tracked(&mut content.bitmap_perm));
 
-        let alloc_res = bitmap.alloc_contiguous(count, align_log2);
-        // The free pool is non-empty (design assumption: infinitely many slots).
-        assume(alloc_res.is_some());
-        let idx = alloc_res.unwrap();
-        self.bitmap.put(Tracked(&mut content.bitmap_perm), bitmap);
+            let alloc_res = bitmap.alloc_contiguous(count, align_log2);
+            // The free pool is non-empty (design assumption: infinitely many slots).
+            assume(alloc_res.is_some());
+            alloc_res.unwrap()
+        };
 
         let tracked new_client;
         proof {
